@@ -138,3 +138,11 @@ ummu ummu.0: ummu register to ummu core successful!
 UBUS entity attachment, default BI/decoder discovery, UBASE auxiliary-device
 creation and official UDMA probe are now passed gates. The existing functional
 data-plane baseline remains unchanged throughout this bring-up.
+
+The untagged OpenURMA implementation snapshot `1f58c45` decodes the official
+JFC/JFR/JFS/Jetty mailbox contexts, reconstructs their queue and doorbell IOVAs,
+and routes official queue DMA through UMMU into the existing UDMA execution
+engine. It also provides an `atomic_fast` CPU mode for functional bring-up.
+This is compiled implementation, not a passed gate: G6 remains pending until
+an official-provider SQ doorbell is observed and the corresponding CQE is
+consumed by `urma_perftest`.

@@ -12,8 +12,11 @@ registers `udma0` with ubcore and creates `/dev/uburma/udma0`. The next
 saved stage gives the official device a configurable management-plane EID and
 reports its modeled 400-Gb/s port as `link ACTIVE`.  Official `urma_perftest`
 now creates its context, queues, Jettys and process-scoped TPs through the
-official stack and reaches the send/receive wait. Connecting the stock UDMA
-SQ doorbell and WQE layout to the simulated data path is the next contract.
+official stack and reaches the send/receive wait. An untagged development
+snapshot now decodes the official queue contexts and connects their SQ, RQ,
+doorbell and CQ memory to the modeled data path. End-to-end SQ-to-CQE runtime
+validation is still in progress, so the last validated stage remains the
+management-plane resource checkpoint.
 
 ## Required prebuilt inputs
 
