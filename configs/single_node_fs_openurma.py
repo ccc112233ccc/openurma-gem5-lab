@@ -18,7 +18,9 @@ from m5.util.fdthelper import (
 # The upstream research scaffold names the author's original gem5 checkout.
 # Seed the import path from this lab's own location before loading it so the
 # same config works in Docker Desktop or a native Linux checkout.
-LAB_ROOT = Path(__file__).resolve().parents[1]
+LAB_ROOT = Path(os.environ.get(
+    "OPENURMA_LAB_ROOT", str(Path(__file__).resolve().parents[1])
+))
 GEM5_CONFIGS = LAB_ROOT / "gem5" / "configs"
 addToPath(str(GEM5_CONFIGS))
 addToPath(str(GEM5_CONFIGS / "example" / "arm"))
@@ -94,6 +96,17 @@ def _official_udma_device_tree(original):
             "interrupts", [0, OFFICIAL_UDMA_UBC_IRQ - 32, 4]
         ))
         root.append(ubc)
+
+        # UBFI matches this placeholder by index, then supplies the MMIO
+        # resource and firmware metadata from the UBIOS UMMU table before the
+        # unchanged official ummu.ko probes it.
+        ummu = FdtNode("ummu@0")
+        ummu.append(FdtPropertyStrings("compatible", ["ub,ummu"]))
+        ummu.append(FdtPropertyWords("index", [0]))
+        ummu.append(FdtPropertyWords(
+            "msi-parent", [state.phandle(system.realview.gicv2m)]
+        ))
+        root.append(ummu)
         return root
 
     return generate
@@ -120,7 +133,7 @@ def create_olk66_compatible(args):
         GenericTimerMem.generateDeviceTree = original_timer_dtb
         ArmSystem.generateDeviceTree = original_system_dtb
     timer_message = "DT advertises CP15 timer only"
-    kept = []
+    kept = []  # Preserve every extension that direct EL2 boot can expose.
     removed = []
     for extension in system.release.extensions:
         name = getattr(extension, "value", str(extension))

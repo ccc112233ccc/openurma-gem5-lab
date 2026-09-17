@@ -53,6 +53,8 @@ build_module_dir drivers/ub/ubus \
 make -j"$jobs" "${make_args[@]}" -C "$kernel_root" M="$ub_v2m_bridge" \
     KBUILD_EXTRA_SYMBOLS="$kernel_root/drivers/ub/ubfi/Module.symvers $kernel_root/drivers/ub/ubus/Module.symvers" modules
 build_module_dir drivers/iommu/hisilicon/ummu-core
+build_module_dir drivers/iommu/hisilicon \
+    KBUILD_EXTRA_SYMBOLS="$kernel_root/drivers/ub/ubfi/Module.symvers $kernel_root/drivers/ub/ubus/Module.symvers $kernel_root/drivers/iommu/hisilicon/ummu-core/Module.symvers"
 build_module_dir drivers/ub/urma/ubcore
 build_module_dir drivers/ub/urma/uburma \
     KBUILD_EXTRA_SYMBOLS="$kernel_root/drivers/ub/urma/ubcore/Module.symvers"
@@ -67,6 +69,7 @@ artifacts=(
     drivers/ub/ubus/vendor/hisilicon/hisi_ubus.ko
     "$ub_v2m_bridge/openurma_ub_v2m.ko"
     drivers/iommu/hisilicon/ummu-core/ummu-core.ko
+    drivers/iommu/hisilicon/ummu.ko
     drivers/ub/ubase/ubase.ko
     drivers/ub/urma/ubcore/ubcore.ko
     drivers/ub/urma/uburma/uburma.ko

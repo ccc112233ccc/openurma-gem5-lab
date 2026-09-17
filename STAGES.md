@@ -72,6 +72,25 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   intentionally ignored by Git).
 - Official UBFI, UBUS, UBASE, UMMU and UDMA driver sources remain unchanged.
 
+### `stage/2026-09-17-ummu-device-probe`
+
+- The build now includes the full unmodified official `ummu.ko`, in addition
+  to `ummu-core.ko`.
+- UBIOS publishes one architecture-generic UMMU node and associates UBC 0
+  with that node through `ummu_map`.
+- The device model exposes the minimal truthful capability set, CR0/GBPA
+  acknowledgement semantics, writable queue registers and immediate MCMDQ
+  command consumption.
+- Unmodified `ummu.ko` completes probe and reports
+  `ummu register to ummu core successful!`.
+- First open boundary: the subsequent official UBUS attach path lacks a valid
+  default BI/decoder description and dereferences a null `uent->bi` while
+  assigning its default DMA domain. Decoder/BI discovery is therefore the
+  next modeled hardware contract, not another UMMU bypass.
+- Validation evidence: `run-official-ummu-v2-20260917/` plus the attached
+  PL011 trace (run output is intentionally ignored by Git).
+- No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:

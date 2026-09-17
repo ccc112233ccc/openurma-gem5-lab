@@ -20,10 +20,10 @@ openclicknp_root="${OPENCLICKNP_ROOT:-$lab_dir/../OpenClickNP}"
 jobs="${JOBS:-1}"
 
 # These are repository object IDs, not moving branch or tag names.
-readonly GEM5_COMMIT=b1a44b89c7bae73fae2dc547bc1f871452075b85
-readonly OPENURMA_COMMIT=0ae5dce300154d761f97095864bda0cf2546b265
+readonly GEM5_COMMIT=36b6c5b99c8bbbd7445173f1655240ad4b1bffd9
+readonly OPENURMA_COMMIT=d50de02f5801122b6ffa7495a9b3688842de9924
 readonly OPENCLICKNP_COMMIT=c1c6acc58032a1894507d88659b3cca668b0e1a5
-readonly UMDK_COMMIT=4eab3e4ad170b06bfe5d5c1014341e81edb9bf58
+readonly UMDK_COMMIT=6878bcb26c10c415e662615730b2c946e533689f
 
 [[ "$(uname -s)" == Linux ]] ||
     die "run this inside the ARM64 Linux build container"

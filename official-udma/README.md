@@ -23,7 +23,7 @@ the baseline and must not be reset as part of official-driver bring-up.
 | --- | --- | --- |
 | G0 | Existing dual-node functional profile still passes | existing baseline |
 | G1 | Official `udma.ko` and its required lower stack build for AArch64 | passed |
-| G2 | A simulated UBASE auxiliary device named `ubase_core.udma` is discovered | in progress: command queue and Type-1 USI pass; mailbox/EQC pending |
+| G2 | A simulated UBASE auxiliary device named `ubase_core.udma` is discovered | in progress: command queue, mailbox/EQC, CtrlQ and Type-1 USI pass; full UMMU probes; UBUS BI/decoder contract pending |
 | G3 | Unmodified `udma.ko` completes `probe()` and registers a ubcore device | pending |
 | G4 | `urma_admin show` reports the official UDMA device and EID | pending |
 | G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | pending |
@@ -76,7 +76,7 @@ APIs without including `linux/interrupt.h`, so the isolated build injects the
 missing kernel header with `KCFLAGS=-include`; no official source file is
 patched.
 
-## Runtime bring-up status (2026-09-16)
+## Runtime bring-up status (2026-09-17)
 
 The `--official-udma-discovery` gem5 mode now provides an evidence-driven
 subset of the real UBC hardware contract:
@@ -118,9 +118,22 @@ openurma: raised Type-1 MSI address=0x2c1c0040 data=0x100
 ubase 00002: failed to alloc iova slot, cmd = 0x0, size = 262144
 ```
 
-The evidence is in `run-official-ctrlq-v6-20260917/`.  Mailbox status, EQC,
-QoS discovery, the parent GIC interrupt path, and control-plane notification
-have completed.  G2 remains open at the first context-buffer allocation: the
-full official UMMU device driver and its modeled hardware are not registered
-yet, so no DMA IOMMU domain exists.  The existing functional data-plane
-baseline is kept unchanged throughout this bring-up.
+The CtrlQ evidence is in `run-official-ctrlq-v6-20260917/`.  Mailbox status,
+EQC, QoS discovery, the parent GIC interrupt path, and control-plane
+notification have completed.
+
+The next checkpoint adds the unmodified full `ummu.ko` and a minimal
+architecture-generic register/queue model.  In
+`run-official-ummu-v2-20260917/` the driver reports 40-bit IAS/OAS, initializes
+its MCMDQ and event queue, and reaches:
+
+```text
+ummu ummu.0: features 0x002381ac, options 0x00000000.
+ummu ummu.0: ummu register to ummu core successful!
+```
+
+The next first failure is now in official UBUS entity attachment: the modeled
+endpoint has no valid default BI/decoder description, so `uent->bi` is null
+when the IOMMU default domain is assigned.  G2 remains open until that firmware
+and decoder contract is implemented.  The existing functional data-plane
+baseline remains unchanged throughout this bring-up.
