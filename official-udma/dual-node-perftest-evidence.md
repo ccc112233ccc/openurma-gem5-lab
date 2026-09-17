@@ -9,7 +9,8 @@ Validation date: 2026-09-17
 - `atomic_fast`, one CPU per guest;
 - unmodified official `ubfi.ko`, `ubus.ko`, `ummu-core.ko`, `ummu.ko`,
   `hisi_ubus.ko`, `ubase.ko`, `udma.ko`, `ubcore.ko` and `uburma.ko`;
-- stock UMDK `liburma-udma.so` and `urma_perftest`;
+- stock UMDK `liburma-udma.so`; `urma_perftest` carries only the
+  simulator-specific distributed-time synchronization boundary;
 - node 0 `udma0` EID `...:0100`, node 1 `udma0` EID `...:0101`;
 - 400-Gbit/s peer serialization, 100 ns one-way propagation and 100 ns
   conservative synchronization quantum.
@@ -65,3 +66,51 @@ Complete local evidence is retained in:
 
 Generated run artifacts are intentionally excluded from Git. No official OLK
 driver or UMDK provider source file was modified for this result.
+
+## RMA READ/WRITE gate
+
+The same official stack now completes bidirectional `write_bw` and `read_bw`.
+Uppercase `-B` is required: both independent guests issue work during the
+conservative-time epoch. TCP setup and result exchange stay outside that epoch,
+so the 100-ns synchronization quantum covers only the measured data path.
+
+Representative 8-KiB commands are:
+
+```sh
+# node 0, start first
+OPENURMA_DIST_SYNC=1 urma_perftest write_bw -d udma0 --eid_idx 0 \
+  --ctp -B -s 8192 -P 21252 -J 1 -I 64 -n 5 -l 1 -Q 1 -p 0
+# node 1
+OPENURMA_DIST_SYNC=1 urma_perftest write_bw -d udma0 -S 10.0.0.1 \
+  --eid_idx 0 --ctp -B -s 8192 -P 21252 -J 1 -I 64 \
+  -n 5 -l 1 -Q 1 -p 0
+
+# Replace write_bw with read_bw on both nodes and use a fresh port for READ.
+```
+
+Both endpoints returned zero for every row below and printed identical
+averages:
+
+| operation | bytes | iterations | average MiB/s | message rate Mpps |
+| --- | ---: | ---: | ---: | ---: |
+| WRITE | 128 | 5 | 349.10 | 2.859803 |
+| WRITE | 8192 | 5 | 22,217.84 | 2.843883 |
+| WRITE | 65536 | 5 | 44,074.69 | 0.705195 |
+| READ | 128 | 5 | 731.43 | 5.991863 |
+| READ | 8192 | 5 | 22,923.99 | 2.934271 |
+| READ | 65536 | 5 | 24,466.37 | 0.391462 |
+
+WRITE reads the local SGE through the initiator UMMU context, emits 8088-byte
+maximum peer-link fragments, translates the registered remote VA through the
+target's active UMMU context, and acknowledges only after target DMA completes.
+READ emits a payload-free request; the target DMA-reads its registered memory
+and streams response fragments that are DMA-written into the initiator SGE.
+Each multi-fragment operation produces one official CQE (opcode 3 for WRITE,
+opcode 6 for READ). An 8192-byte operation is visibly split into 8088+104 bytes
+and a 65536-byte operation into nine fragments.
+
+This extends the useful transfer range beyond CTP SEND's official 4096-byte
+limit. The currently validated RMA range ends at 64 KiB; larger advertised
+sizes and negative token/permission checks remain separate gates. Complete
+local logs are retained under `run-rma-final-20260917/` and are excluded from
+Git.

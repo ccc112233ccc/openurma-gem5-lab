@@ -28,6 +28,7 @@ the baseline and must not be reset as part of official-driver bring-up.
 | G4 | `urma_admin show` reports the official UDMA device and EID | passed; configurable EID and 400-Gb/s port report `ACTIVE` |
 | G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | passed; stock provider also receives and activates process-scoped TPs |
 | G6 | Two-node `urma_perftest send_lat` completes through official `udma.ko` | passed; two independent gem5 guests exchange CTP SEND_IMM traffic |
+| G7 | Two-node official-provider RMA READ/WRITE moves remote memory and completes | passed; bidirectional `read_bw` and `write_bw` validated at 128 B, 8 KiB and 64 KiB |
 
 The intermediate one-guest loopback gate is also passed: two unmodified stock
 `urma_perftest` processes complete five bidirectional 128-byte iterations
@@ -177,4 +178,8 @@ The one-guest official-provider runtime gate is captured in
 `loopback-perftest-evidence.md`. The two-guest G6 gate is also passed and
 captured in `dual-node-perftest-evidence.md`: both independent machines load
 the official stack, exchange payloads through the virtual-time-stamped peer
-link, consume receive completions and exit the stock benchmark normally.
+link, consume receive completions and exit the benchmark normally. The same
+evidence file records G7: official READ/WRITE WQEs use target-side UMMU address
+translation, link fragmentation, remote DMA and one final CQE. Only the
+simulator synchronization boundary in `urma_perftest` is instrumented; the
+official UDMA provider and OLK driver sources are unchanged.

@@ -455,9 +455,62 @@ excluded here. Therefore this single-Jetty CTP SEND experiment does not reach
 the 400-Gbit/s line-rate plateau within the supported message-size range. Use a
 proper WRITE data path or additional legal parallel streams to study saturation.
 A finite 64-slot peer ring still applies backpressure and retries an unconsumed
-SQ WQE; ring-full is no longer treated as a simulator panic. The current model
-supports SEND/SEND_IMM opcodes; these numbers must not be reported as true
-`write_bw` results.
+SQ WQE; ring-full is no longer treated as a simulator panic. These numbers are
+SEND results and must not be reported as `write_bw` results. The independent
+RMA READ/WRITE path described below is used for larger transfers.
+
+### Official UDMA READ/WRITE bandwidth
+
+The model now executes the official provider's READ (WQE opcode 6) and WRITE
+(WQE opcode 3) paths. A WRITE DMA-reads the initiator SGE, fragments it onto
+the simulated 400-Gbit/s link, translates the registered remote virtual address
+through the target guest's active UMMU context, DMA-writes target memory, and
+returns one completion only after the final fragment is applied. A READ sends a
+request to the target, DMA-reads target memory, returns one or more response
+fragments, DMA-writes the initiator SGE, and then produces one completion. The
+target NIC progresses this work asynchronously; it does not require a target
+receive WQE or a userspace receive loop.
+
+Use uppercase `-B` (bidirectional), not lowercase `-b`, on both nodes. The
+simulator-only perftest synchronization patch keeps the existing TCP setup and
+report exchange outside the 100-ns conservative synchronization epoch and
+enables distributed virtual time only around the measured RMA loop. The
+official OLK drivers and `liburma-udma.so` provider remain unmodified.
+
+```sh
+# WRITE: node0 first, then node1
+OPENURMA_DIST_SYNC=1 urma_perftest write_bw -d udma0 --eid_idx 0 --ctp \
+  -B -s 8192 -P 21252 -J 1 -I 64 -n 5 -l 1 -Q 1 -p 0
+OPENURMA_DIST_SYNC=1 urma_perftest write_bw -d udma0 -S 10.0.0.1 \
+  --eid_idx 0 --ctp -B -s 8192 -P 21252 -J 1 -I 64 \
+  -n 5 -l 1 -Q 1 -p 0
+
+# READ: node0 first, then node1
+OPENURMA_DIST_SYNC=1 urma_perftest read_bw -d udma0 --eid_idx 0 --ctp \
+  -B -s 8192 -P 21254 -J 1 -I 64 -n 5 -l 1 -Q 1 -p 0
+OPENURMA_DIST_SYNC=1 urma_perftest read_bw -d udma0 -S 10.0.0.1 \
+  --eid_idx 0 --ctp -B -s 8192 -P 21254 -J 1 -I 64 \
+  -n 5 -l 1 -Q 1 -p 0
+```
+
+The following two-node smoke results were reproduced symmetrically on both
+endpoints. As elsewhere, `MB/sec` is the benchmark's binary MiB/s label:
+
+| operation | bytes | average MiB/s | message rate Mpps |
+| --- | ---: | ---: | ---: |
+| WRITE | 128 | 349.10 | 2.859803 |
+| WRITE | 8192 | 22,217.84 | 2.843883 |
+| WRITE | 65536 | 44,074.69 | 0.705195 |
+| READ | 128 | 731.43 | 5.991863 |
+| READ | 8192 | 22,923.99 | 2.934271 |
+| READ | 65536 | 24,466.37 | 0.391462 |
+
+Unlike CTP SEND's official 4-KiB message limit, RMA transfers are fragmented
+internally and have been validated here through 64 KiB. This is the currently
+verified range, not a claim that every larger provider-advertised size already
+works. Remote token-value and access-permission fault enforcement also remains
+a later correctness gate; the present path validates registered-address
+translation, payload movement, ordering and completion behavior.
 
 There is a second, upstream `send_lat` sampling detail which matters when
 comparing short and long runs. SEND-LAT actually defaults to a JFR depth of 512
@@ -506,9 +559,9 @@ failure point.
 `-l 128` to request a 128-byte message.  The current provider does not implement
 the optional TP-aware API, so omit `--tp_aware`.
 
-The ring is currently drained when the receiver polls its CQ, which is exactly
-what `send_lat` does. A passive WRITE target with no polling receiver still needs
-a dedicated asynchronous Rx event before it can use this timing path faithfully.
+SEND receive completion is consumed when the receiver polls its CQ, which is
+what `send_lat` does. READ and WRITE use the NIC worker's asynchronous peer-ring
+path instead, so a passive RMA target does not need to post a receive WQE.
 
 Stop only these two guests and their Ethernet relay with:
 
