@@ -108,15 +108,19 @@ change the official UBUS, UBASE or UDMA sources.  The generated device tree
 advertises the existing GICv2m frame and connects the UBC through
 `msi-parent`.  This bridge must load after `ubus.ko` and before `ubase.ko`.
 
-The validated bridge trace now reaches:
+The validated bridge and device-model trace now reaches:
 
 ```text
 ubase 00002: (pid 86) The firmware version is 1.0.0.0
 ub_msi_domain_set_desc, arg->hwirq: 0
-ubase 00002: failed to query ubase mailbox, status = 0
-ubase 00002: failed to create EQC, ret = -16
+openurma: emitted UE2UE CtrlQ response service=4 opcode=0x2
+openurma: raised Type-1 MSI address=0x2c1c0040 data=0x100
+ubase 00002: failed to alloc iova slot, cmd = 0x0, size = 262144
 ```
 
-The evidence is in `run-official-usi-v3-20260917/`.  G2 remains open until
-`ubase_core.udma` appears.  The existing functional data-plane baseline is
-kept unchanged throughout this bring-up.
+The evidence is in `run-official-ctrlq-v6-20260917/`.  Mailbox status, EQC,
+QoS discovery, the parent GIC interrupt path, and control-plane notification
+have completed.  G2 remains open at the first context-buffer allocation: the
+full official UMMU device driver and its modeled hardware are not registered
+yet, so no DMA IOMMU domain exists.  The existing functional data-plane
+baseline is kept unchanged throughout this bring-up.

@@ -54,6 +54,24 @@ pinned revisions in `SOURCE_REVISIONS.md`.
 - Validation evidence: `run-official-usi-v3-20260917/` (kept locally,
   intentionally ignored by Git).
 
+### `stage/2026-09-17-ubase-ctrlq-msi`
+
+- The simulation-only GICv2m bridge now mirrors the official ITS UBUS
+  irqchip and updates both the UBUS device mask and the parent GIC SPI mask.
+- The NIC routes MSI writes through a dedicated system-bus request port and
+  consumes the Type-1 address/data tuple programmed by the official driver.
+- Unmodified UBASE completes mailbox status, EQC setup, QoS SL discovery and
+  the control-plane initialization notification through real CSQ/CRQ DMA and
+  Type-1 MSI delivery.
+- CtrlQ response sizes and direction bits are derived from the official
+  request rather than fixed to one command shape.
+- First open boundary: UBASE requests a 256 KiB context IOVA, but only
+  `ummu-core.ko` is present and no full UMMU device has registered an IOMMU
+  domain, so `dma_alloc_iova()` returns `-ENODEV`.
+- Validation evidence: `run-official-ctrlq-v6-20260917/` (kept locally,
+  intentionally ignored by Git).
+- Official UBFI, UBUS, UBASE, UMMU and UDMA driver sources remain unchanged.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:
