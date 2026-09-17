@@ -443,18 +443,21 @@ average values (the tool labels binary MiB/s as `MB/sec`):
 | 1024 | 9,757.98 | 9.9922 |
 | 2048 | 19,523.53 | 9.9960 |
 | 4096 | 39,047.05 | 9.9960 |
-| 5120 | 48,187.31 | 9.8688 |
-| 6144 | 48,225.79 | 8.2305 |
 
 The 400-Gbit/s payload ceiling is 47,683.7 MiB/s. With the current roughly
-100-ns message issue/synchronization cadence, 4096 bytes reaches about 81.9%
-and the curve enters its line-rate plateau at roughly 5 KiB. The 5120- and
-6144-byte rows use 4096 iterations so startup buffering is amortized. A finite
-64-slot peer ring now applies backpressure and retries the unconsumed SQ WQE;
-ring-full is no longer treated as a simulator panic. The power-of-two `-a12`
-sweep ends at 4096 bytes, so use `-s 5120` or `-s 6144` for the plateau points.
-The current model supports SEND/SEND_IMM opcodes; these numbers must not be
-reported as true `write_bw` results.
+100-ns message issue/synchronization cadence, the largest legal CTP SEND,
+4096 bytes, reaches about 81.9%. The official UMDK release specification caps
+CTP/RM SEND messages at 4 KiB (single-path TP/RC has a separate 64-KiB limit),
+so values above 4096 bytes are outside this experiment's valid domain. Earlier
+5120- and 6144-byte simulator probes only exposed a missing device-limit check
+in the model; they are not hardware-comparable SEND results and are deliberately
+excluded here. Therefore this single-Jetty CTP SEND experiment does not reach
+the 400-Gbit/s line-rate plateau within the supported message-size range. Use a
+proper WRITE data path or additional legal parallel streams to study saturation.
+A finite 64-slot peer ring still applies backpressure and retries an unconsumed
+SQ WQE; ring-full is no longer treated as a simulator panic. The current model
+supports SEND/SEND_IMM opcodes; these numbers must not be reported as true
+`write_bw` results.
 
 There is a second, upstream `send_lat` sampling detail which matters when
 comparing short and long runs. SEND-LAT actually defaults to a JFR depth of 512
