@@ -169,6 +169,27 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   Git).
 - No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
 
+### `stage/2026-09-17-official-loopback-perftest`
+
+- An unmodified stock `urma_perftest` server/client pair completes five
+  bidirectional 128-byte CTP send-latency iterations through `udma0` in one
+  full-system guest, then both processes tear down their resources and exit.
+- The model consumes the official provider's mmap-backed direct-SQE writes,
+  decodes the queue contexts' TIDs and uses the selected UMMU address space
+  for ring, CQE and payload DMA. This is required because independent
+  processes can use identical IOVAs for different physical pages.
+- Receive work and completions are observed for Jettys 1024 and 1025 in every
+  iteration. The official TP deactivation request and Jetty flush query also
+  complete, so the result is not based on terminating stuck processes.
+- Validation commands and representative output are recorded in
+  `official-udma/loopback-perftest-evidence.md`. The complete local trace is
+  `run-official-ummu-v35-model.log`; its gem5 output directory is
+  `run-official-ummu-v35-20260917/` (both intentionally ignored by Git).
+- This checkpoint proves one-device, two-process official-stack loopback. It
+  does not claim the two-gem5 G6 gate; transport across two simulated hosts is
+  the next checkpoint.
+- No official UMMU, UBFI, UBUS, UBASE, UDMA or UMDK source file was modified.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:

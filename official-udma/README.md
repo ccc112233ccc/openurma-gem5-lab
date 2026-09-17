@@ -29,6 +29,12 @@ the baseline and must not be reset as part of official-driver bring-up.
 | G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | passed; stock provider also receives and activates process-scoped TPs |
 | G6 | Two-node `urma_perftest send_lat` completes through official `udma.ko` | pending |
 
+The intermediate one-guest loopback gate is also passed: two unmodified stock
+`urma_perftest` processes complete five bidirectional 128-byte iterations
+through the official kernel driver and provider. This validates the official
+data-path contract without conflating it with the still-pending two-gem5 G6
+transport gate.
+
 Passing a build or module-load gate is not counted as data-plane support.
 
 ## Hardware contract boundary
@@ -127,8 +133,10 @@ register/queue model. In `run-official-ummu-v16b-20260917/`, the complete
 official lower stack probes, `udma0` reports its configured EID and an ACTIVE
 400-Gb/s port, and stock UMDK creates two Jettys. In
 `run-official-ummu-v18-20260917/`, the model also returns TP lists and activates
-both process-scoped TPs. The next observed boundary is the official provider's
-mmap-backed SQ doorbell/WQE data path. Earlier UMMU bring-up evidence included:
+both process-scoped TPs. In `run-official-ummu-v35-20260917/`, the official
+provider's direct-SQE path, UMMU-selected queue/payload DMA, receive work and
+CQEs complete for five request/reply iterations, followed by normal TP and
+Jetty teardown. Earlier UMMU bring-up evidence included:
 
 ```text
 ummu ummu.0: features 0x002381ac, options 0x00000000.
@@ -139,16 +147,17 @@ UBUS entity attachment, default BI/decoder discovery, UBASE auxiliary-device
 creation and official UDMA probe are now passed gates. The existing functional
 data-plane baseline remains unchanged throughout this bring-up.
 
-The untagged OpenURMA implementation snapshot `bd60afa` decodes the official
-JFC/JFR/JFS/Jetty mailbox contexts, reconstructs their queue and doorbell IOVAs,
-and routes official queue DMA through UMMU into the existing UDMA execution
-engine. It also provides an `atomic_fast` CPU mode and a configurable Linux
-`lpj` override for functional bring-up. OLK 6.6 must still be launched through
-`configs/single_node_fs_openurma.py`, which applies the validated early-EL2 and
-timer-device-tree compatibility contract. The same snapshot distinguishes JFS
-from Jetty completions and accepts the stock provider's 64-byte direct-SQE
-submission path; these additions are compiled but remain part of pending G6
-runtime validation.
-This is compiled implementation, not a passed gate: G6 remains pending until
-an official-provider SQ doorbell is observed and the corresponding CQE is
-consumed by `urma_perftest`.
+OpenURMA commit `5372409` decodes the official JFC/JFR/JFS/Jetty mailbox
+contexts, reconstructs their queue and doorbell IOVAs, and routes official
+queue and payload DMA through the context-selected UMMU TID into the existing
+UDMA execution engine. It also provides an `atomic_fast` CPU mode and a
+configurable Linux `lpj` override for functional bring-up. OLK 6.6 must still
+be launched through `configs/single_node_fs_openurma.py`, which applies the
+validated early-EL2 and timer-device-tree compatibility contract. The model
+distinguishes JFS from Jetty completions, assembles the stock provider's
+64-byte direct-SQE submission, and implements the teardown responses required
+for a clean process exit.
+
+The one-guest official-provider runtime gate is passed and captured in
+`loopback-perftest-evidence.md`. G6 remains pending until the same official
+stack exchanges traffic between two separate gem5 full-system nodes.
