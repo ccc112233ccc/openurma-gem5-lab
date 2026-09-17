@@ -91,12 +91,29 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   PL011 trace (run output is intentionally ignored by Git).
 - No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
 
+### `stage/2026-09-17-ubase-aux-device`
+
+- Official UBUS builds its default BI and decoder, enumerates endpoint `00002`
+  and attaches both root and endpoint devices to the official UMMU domains.
+- The model translates UBASE CSQ/CRQ and GICv2m MSI IOVAs through the TECT,
+  TCT and ARM64 page tables programmed by the unmodified official UMMU stack.
+- Official CtrlQ request/response traffic completes through DMA and Type-1
+  MSI; mailbox completions are delivered through the programmed AEQ and its
+  own MSI vector.
+- Unmodified `ubase.ko` completes probe and creates auxiliary devices
+  `ubase.udma.0` and `ubase.unic.0`.
+- First open boundary: unmodified `udma.ko` matches `ubase.udma.0`, but the
+  modeled firmware resource response reports zero UDMA jetty ranges, so its
+  resource-table initialization returns `-EINVAL`.
+- Validation evidence: `run-official-ummu-v8-20260917/` and
+  `run-official-ummu-v8-model.log` (kept locally, intentionally ignored by
+  Git).
+- No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:
 
-- `stage/...-ubase-aux-device`: UBASE command queue completes and
-  `ubase_core.udma` appears.
 - `stage/...-official-udma-probe`: unchanged official `udma.ko` completes
   probe and registers with ubcore.
 - `stage/...-official-urma-resources`: context, segment and queue resources

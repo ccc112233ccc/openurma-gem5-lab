@@ -14,6 +14,7 @@
 # Runtime output and performance sweeps.
 /run/
 /run-*/
+/run-*.log
 /*.host.log
 /sweeps/
 /*.raw.txt
