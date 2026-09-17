@@ -130,6 +130,27 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   Git).
 - No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
 
+### `stage/2026-09-17-official-udma-active`
+
+- The management-plane UDMA EID is an explicit per-node model parameter; it
+  is distinct from the UBUS entity EID, as required by the official UMMU
+  duplicate-entry checks.
+- The model implements the official `UDMA_CMD_QUERY_PORT_INFO` response and
+  reports one 400-Gb/s UB lane.
+- Unmodified official `udma.ko` completes probe with EID
+  `0000:0000:0000:0000:0000:0000:0000:0100`; `urma_admin show` reports
+  `udma0` as `ACTIVE` and `/dev/uburma/udma0` persists.
+- A same-guest server/client smoke test reaches the stock UDMA provider and
+  creates Jettys 1024 and 1025 through the official userspace and kernel
+  resource path.
+- First open boundary: both peers request TP allocation through CtrlQ service
+  `TP_ACL`, opcode `GET_TP_LIST (0x21)`; the model does not yet provide that
+  management-plane response, so the official driver times out.
+- Validation evidence: `run-official-ummu-v16b-20260917/` and
+  `run-official-ummu-v16b-model.log` (kept locally, intentionally ignored by
+  Git).
+- No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:

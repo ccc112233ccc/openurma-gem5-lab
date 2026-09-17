@@ -9,8 +9,10 @@ The current saved checkpoint runs the unmodified official UBFI, UBUS, UMMU,
 UBASE and UDMA modules through probe. UBASE creates `ubase.udma.0` and
 `ubase.unic.0`; official `udma.ko` binds to the UDMA auxiliary device,
 registers `udma0` with ubcore and creates `/dev/uburma/udma0`. The next
-modeled contract is non-zero port capability/status, which currently leaves
-the official device at `link NOP` after its otherwise successful probe.
+saved stage gives the official device a configurable management-plane EID and
+reports its modeled 400-Gb/s port as `link ACTIVE`.  Official `urma_perftest`
+can create Jetty resources; TP-list control-plane allocation is the next open
+hardware contract.
 
 ## Required prebuilt inputs
 

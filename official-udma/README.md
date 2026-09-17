@@ -25,8 +25,8 @@ the baseline and must not be reset as part of official-driver bring-up.
 | G1 | Official `udma.ko` and its required lower stack build for AArch64 | passed |
 | G2 | A simulated UBASE auxiliary device named `ubase.udma.0` is discovered | passed |
 | G3 | Unmodified `udma.ko` completes `probe()` and registers a ubcore device | passed; `udma0` and `/dev/uburma/udma0` persist |
-| G4 | `urma_admin show` reports the official UDMA device and EID | pending |
-| G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | pending |
+| G4 | `urma_admin show` reports the official UDMA device and EID | passed; configurable EID and 400-Gb/s port report `ACTIVE` |
+| G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | in progress; stock provider creates Jettys, next boundary is TP-list allocation |
 | G6 | Two-node `urma_perftest send_lat` completes through official `udma.ko` | pending |
 
 Passing a build or module-load gate is not counted as data-plane support.
@@ -122,18 +122,18 @@ The CtrlQ evidence is in `run-official-ctrlq-v6-20260917/`.  Mailbox status,
 EQC, QoS discovery, the parent GIC interrupt path, and control-plane
 notification have completed.
 
-The next checkpoint adds the unmodified full `ummu.ko` and a minimal
-architecture-generic register/queue model.  In
-`run-official-ummu-v2-20260917/` the driver reports 40-bit IAS/OAS, initializes
-its MCMDQ and event queue, and reaches:
+The unmodified full `ummu.ko` now runs against the architecture-generic
+register/queue model. In `run-official-ummu-v16b-20260917/`, the complete
+official lower stack probes, `udma0` reports its configured EID and an ACTIVE
+400-Gb/s port, and stock UMDK creates two Jettys. The next observed boundary
+is the management-plane TP-list request (`TP_ACL`, opcode `0x21`). Earlier
+UMMU bring-up evidence included:
 
 ```text
 ummu ummu.0: features 0x002381ac, options 0x00000000.
 ummu ummu.0: ummu register to ummu core successful!
 ```
 
-The next first failure is now in official UBUS entity attachment: the modeled
-endpoint has no valid default BI/decoder description, so `uent->bi` is null
-when the IOMMU default domain is assigned.  G2 remains open until that firmware
-and decoder contract is implemented.  The existing functional data-plane
-baseline remains unchanged throughout this bring-up.
+UBUS entity attachment, default BI/decoder discovery, UBASE auxiliary-device
+creation and official UDMA probe are now passed gates. The existing functional
+data-plane baseline remains unchanged throughout this bring-up.
