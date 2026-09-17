@@ -27,13 +27,28 @@ the baseline and must not be reset as part of official-driver bring-up.
 | G3 | Unmodified `udma.ko` completes `probe()` and registers a ubcore device | passed; `udma0` and `/dev/uburma/udma0` persist |
 | G4 | `urma_admin show` reports the official UDMA device and EID | passed; configurable EID and 400-Gb/s port report `ACTIVE` |
 | G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | passed; stock provider also receives and activates process-scoped TPs |
-| G6 | Two-node `urma_perftest send_lat` completes through official `udma.ko` | pending |
+| G6 | Two-node `urma_perftest send_lat` completes through official `udma.ko` | passed; two independent gem5 guests exchange CTP SEND_IMM traffic |
 
 The intermediate one-guest loopback gate is also passed: two unmodified stock
 `urma_perftest` processes complete five bidirectional 128-byte iterations
 through the official kernel driver and provider. This validates the official
-data-path contract without conflating it with the still-pending two-gem5 G6
-transport gate.
+data-path contract independently of the two-gem5 transport gate. G6 also
+passes in the independent two-guest run documented by
+`dual-node-perftest-evidence.md`.
+
+Build the reproducible official-driver image inside the existing container:
+
+```sh
+docker exec openurma-repro-20260909 \
+  bash /workspace/openurma-gem5-lab/official-udma/build_initramfs.sh
+```
+
+Then start the fastest functional two-node configuration with:
+
+```sh
+bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
+  --profile fast --provider official
+```
 
 Passing a build or module-load gate is not counted as data-plane support.
 
@@ -158,6 +173,8 @@ distinguishes JFS from Jetty completions, assembles the stock provider's
 64-byte direct-SQE submission, and implements the teardown responses required
 for a clean process exit.
 
-The one-guest official-provider runtime gate is passed and captured in
-`loopback-perftest-evidence.md`. G6 remains pending until the same official
-stack exchanges traffic between two separate gem5 full-system nodes.
+The one-guest official-provider runtime gate is captured in
+`loopback-perftest-evidence.md`. The two-guest G6 gate is also passed and
+captured in `dual-node-perftest-evidence.md`: both independent machines load
+the official stack, exchange payloads through the virtual-time-stamped peer
+link, consume receive completions and exit the stock benchmark normally.

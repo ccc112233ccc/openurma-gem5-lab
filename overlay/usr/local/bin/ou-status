@@ -2,7 +2,7 @@
 echo "--- kernel ----------------------------------------------------"
 uname -a
 echo "--- modules ---------------------------------------------------"
-lsmod | grep -E '(^Module|ipv6|ubcore|uburma|openurma)' || true
+lsmod | grep -E '(^Module|ipv6|ubcore|uburma|ubfi|ubus|ummu|ubase|udma|openurma)' || true
 echo "--- ubcore sysfs ----------------------------------------------"
 if [ -d /sys/class/ubcore ]; then
     ls -la /sys/class/ubcore

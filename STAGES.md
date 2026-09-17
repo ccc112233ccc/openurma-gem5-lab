@@ -190,9 +190,32 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   the next checkpoint.
 - No official UMMU, UBFI, UBUS, UBASE, UDMA or UMDK source file was modified.
 
+### `stage/2026-09-17-official-dual-node-perftest`
+
+- Two independent gem5 full-system guests boot with `atomic_fast`; each loads
+  the unmodified official UBFI, UBUS, UMMU, UBASE, UDMA, ubcore and uburma
+  modules and registers its own `udma0` device as `ACTIVE`.
+- Node 0 advertises EID `...:0100` and node 1 advertises `...:0101`. The
+  modeled UBC message interrupt uses SPI 104 so it can coexist with the
+  VExpress PCI INTx range 100--103 used by the OOB e1000 devices.
+- Stock `urma_perftest` completes a CTP/RM/SEND_IMM 128-byte latency run over
+  the cross-process UB peer ring. Five synchronized warm-up deltas are
+  excluded and five measured samples complete on both nodes; both processes
+  return zero and clean up their official resources.
+- Packet traces prove that each gem5 instance transmits to and receives from
+  the other instance. Two consecutive benchmark invocations leave 22 numbered
+  packets in each direction (11 per invocation), UDMA receive completions and
+  virtual-time link timestamps using 100 ns propagation and a 400-Gbit/s
+  serialization rate.
+- Reproduction and output are recorded in
+  `official-udma/dual-node-perftest-evidence.md`. Full local evidence is in
+  `run-official-dual-v2-20260917/` and is intentionally ignored by Git.
+- No official OLK driver or UMDK provider source file was modified.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:
 
-- `stage/...-official-dual-node-perftest`: two-node `send_lat` completes on
-  the official stack.
+- broaden the official data-path matrix beyond the validated CTP SEND_IMM
+  case, then implement additional optional hardware blocks such as CDMA,
+  OBMM and Sentry only when their official drivers require them.

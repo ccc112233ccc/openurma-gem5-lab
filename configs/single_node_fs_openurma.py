@@ -34,7 +34,10 @@ UPSTREAM = OPENURMA_ROOT / (
 )
 UNSAFE_EARLY_EL2_FEATURES = {"FEAT_HCX", "FEAT_SME"}
 OFFICIAL_UDMA_UBRT = 0x2D010000
-OFFICIAL_UDMA_UBC_IRQ = 101
+# SPIs 100..103 are the VExpress PCI INTx range and are occupied when the
+# dual-node OOB e1000 is present.  The matching UBIOS entry is emitted by the
+# OpenURMA model with this otherwise-unused platform SPI.
+OFFICIAL_UDMA_UBC_IRQ = 104
 OFFICIAL_UDMA_V2M_BASE = 0x2C1C0000
 OFFICIAL_UDMA_V2M_SIZE = 0x1000
 OFFICIAL_UDMA_V2M_SPI_BASE = 256

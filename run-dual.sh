@@ -16,7 +16,7 @@ Profiles:
                                 fast is the AtomicSimpleCPU functional path)
 
 CPU, cache, and memory:
-  --cpu-mode MODE               OPENURMA_CPU_MODE (atomic is fastest;
+  --cpu-mode MODE               OPENURMA_CPU_MODE (atomic_fast is fastest;
                                 server_o3 uses Atomic boot + ArmO3 ROI)
   --m5ops-base HEX              OPENURMA_M5OPS_BASE (VExpress m5ops MMIO ABI)
   --cpu-freq FREQ               OPENURMA_CPU_FREQ
@@ -142,7 +142,9 @@ UDMA front end:
   --dma-max-outstanding N       OPENURMA_DMA_MAX_OUTSTANDING
 
 Other:
-  --provider legacy|udma         OPENURMA_PROVIDER (default: profile-specific)
+  --provider legacy|udma|official
+                                OPENURMA_PROVIDER (default: profile-specific;
+                                official loads the unmodified OLK UDMA stack)
   --print-config                Print the resolved model without starting it
   -h, --help                    Show this help
 
@@ -605,8 +607,8 @@ case "$profile" in
         # AtomicSimpleCPU and no timing caches.  Use this for interactive
         # bring-up and correctness checks, not for CPU/cache latency studies.
         profile_provider=udma
-        profile_revision=udma400-atomic-functional-v1
-        profile_cpu_mode=atomic
+        profile_revision=udma400-atomic-fast-functional-v2
+        profile_cpu_mode=atomic_fast
         profile_cpu_freq=3GHz
         profile_num_cpus=1
         profile_benchmark_cpu=0
@@ -949,7 +951,12 @@ provider="${OPENURMA_PROVIDER:-$profile_provider}"
 [[ -n "$cli_dma_max_outstanding" ]] && dma_max_outstanding=$cli_dma_max_outstanding
 [[ -n "$cli_provider" ]] && provider=$cli_provider
 
-dma_backend="${OPENURMA_DMA_BACKEND:-$provider}"
+if [[ "$provider" == official ]]; then
+    default_dma_backend=udma
+else
+    default_dma_backend=$provider
+fi
+dma_backend="${OPENURMA_DMA_BACKEND:-$default_dma_backend}"
 
 # These labels describe executable simulator mechanisms, not latency-fit
 # inputs.  Every non-legacy DMA operation enters the native gem5 RequestPort;
@@ -975,7 +982,7 @@ if [[ "$cpu_mode" == server_o3 ]]; then
 else
     cpu_switch_policy=none
     case "$cpu_mode" in
-        atomic|atomic_hot|atomic_cache) cpu_model=AtomicSimpleCPU ;;
+        atomic|atomic_hot|atomic_fast|atomic_cache) cpu_model=AtomicSimpleCPU ;;
         timing|timing_nocache|timing_full) cpu_model=TimingSimpleCPU ;;
         o3) cpu_model=ArmO3CPU ;;
         *) die "invalid CPU mode '$cpu_mode'" ;;
@@ -997,7 +1004,12 @@ lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
 gem5="${OPENURMA_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
 m5_path="${OPENURMA_M5_PATH:-$lab/system}"
 kernel="${OPENURMA_KERNEL:-$lab/artifacts/kernel/vmlinux}"
-initrd="${OPENURMA_INITRD:-$lab/out/openurma-interactive.cpio.gz}"
+if [[ "$provider" == official ]]; then
+    default_initrd="$lab/out/official-udma.cpio.gz"
+else
+    default_initrd="$lab/out/openurma-interactive.cpio.gz"
+fi
+initrd="${OPENURMA_INITRD:-$default_initrd}"
 config="${OPENURMA_CONFIG:-$lab/configs/single_node_fs_openurma.py}"
 switch_config="${OPENURMA_SWITCH_CONFIG:-$lab/gem5/configs/dist/sw.py}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
@@ -1023,7 +1035,7 @@ case "$benchmark_cpu" in
     *) die "benchmark CPU must be -1 or a non-negative decimal integer" ;;
 esac
 case "$cpu_mode" in
-    atomic|atomic_hot|atomic_cache|timing|timing_nocache|timing_full|o3|server_o3) ;;
+    atomic|atomic_hot|atomic_fast|atomic_cache|timing|timing_nocache|timing_full|o3|server_o3) ;;
     *) die "invalid CPU mode '$cpu_mode'" ;;
 esac
 [[ "$m5ops_base" =~ ^0[xX][0-9a-fA-F]+$ ]] ||
@@ -1033,8 +1045,8 @@ esac
 (( m5ops_base == 0x10010000 )) ||
     die "VExpress_GEM5_V1 reserves m5ops at 0x10010000; another address needs another platform memory map"
 case "$provider" in
-    legacy|udma) ;;
-    *) die "invalid provider '$provider'; expected legacy or udma" ;;
+    legacy|udma|official) ;;
+    *) die "invalid provider '$provider'; expected legacy, udma, or official" ;;
 esac
 case "$dma_backend" in
     legacy|timing|udma) ;;
@@ -1453,6 +1465,11 @@ launch_node() {
     mac=$3
     tap=$4
     out="$run_root/node$node"
+    official_args=()
+    if [[ "$provider" == official ]]; then
+        official_args+=(--official-udma-discovery)
+        official_args+=(--udma-endpoint-eid="$((0x100 + node))")
+    fi
     docker exec -d \
         -e "M5_PATH=$m5_path" \
         -e "OPENURMA_PIPE_DATA=$pipe_data" \
@@ -1460,6 +1477,7 @@ launch_node() {
         "$container" \
         bash "$lab/tools/run-background.sh" "$out/gem5.pid" "$out/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$out" "$config" \
+        "${official_args[@]}" \
         --kernel="$kernel" --initrd="$initrd" --root-device=/dev/ram \
         --cpu="$cpu_mode" --m5ops-base="$m5ops_base" \
         --cpu-freq="$cpu_freq" \
@@ -1584,8 +1602,13 @@ docker exec -d "$container" \
     python3 "$lab/tools/ethernet_relay.py" "unix:$tap0" "unix:$tap1"
 
 echo "Started two independent gem5 full-system guests:"
-echo "  node0 UART: localhost:$uart0, EID fe80::1, OOB 10.0.0.1"
-echo "  node1 UART: localhost:$uart1, EID fe80::2, OOB 10.0.0.2"
+if [[ "$provider" == official ]]; then
+    echo "  node0 UART: localhost:$uart0, EID ...:0100, OOB 10.0.0.1"
+    echo "  node1 UART: localhost:$uart1, EID ...:0101, OOB 10.0.0.2"
+else
+    echo "  node0 UART: localhost:$uart0, EID fe80::1, OOB 10.0.0.1"
+    echo "  node1 UART: localhost:$uart1, EID fe80::2, OOB 10.0.0.2"
+fi
 echo "  model profile: $profile ($num_cpus x $cpu_mode at $cpu_freq)"
 echo "  cache: private $l1i_size I + $l1d_size D + $l2_size L2; shared $l3_size L3"
 echo "  memory: $mem_size modeled, Linux limited to $guest_mem_limit; $mem_channels x $mem_type, $mem_ranks rank/channel"

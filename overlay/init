@@ -34,6 +34,7 @@ for arg in $(cat /proc/cmdline); do
         openurma_node=1) OPENURMA_NODE=1 ;;
         openurma_provider=legacy) OPENURMA_PROVIDER=legacy ;;
         openurma_provider=udma) OPENURMA_PROVIDER=udma ;;
+        openurma_provider=official) OPENURMA_PROVIDER=official ;;
         openurma_cpu_switch=server_o3) OPENURMA_CPU_SWITCH=server_o3 ;;
         openurma_bench_cpu=*) OPENURMA_BENCH_CPU=${arg#*=} ;;
         openurma_m5ops_mode=inst) OPENURMA_M5OPS_MODE=inst ;;
@@ -48,6 +49,15 @@ case "$OPENURMA_NODE" in
     1) hostname openurma-node1; eid_last_byte=2; guest_ip=10.0.0.2 ;;
     *) hostname openurma-gem5;  eid_last_byte=1; guest_ip="" ;;
 esac
+if [ "$OPENURMA_PROVIDER" = official ]; then
+    case "$OPENURMA_NODE" in
+        0) eid_display=0000:0000:0000:0000:0000:0000:0000:0100 ;;
+        1) eid_display=0000:0000:0000:0000:0000:0000:0000:0101 ;;
+        *) eid_display=0000:0000:0000:0000:0000:0000:0000:0100 ;;
+    esac
+else
+    eid_display="fe80::$eid_last_byte"
+fi
 
 load_one() {
     module="$1"
@@ -82,7 +92,7 @@ echo "[openurma-init] mounting guest filesystems"
 load_one ipv6.ko || true
 ip link set lo up 2>/dev/null || echo "[openurma-init] warning: could not bring lo up"
 udma_compat=0
-if [ "$OPENURMA_PROVIDER" = udma ]; then
+if [ "$OPENURMA_PROVIDER" = udma ] || [ "$OPENURMA_PROVIDER" = official ]; then
     if ! grep -qw udma /etc/openurma-available-providers 2>/dev/null ||
        [ ! -r /lib/urma/liburma-udma.so ] || [ ! -r /lib/libummu.so.1 ]; then
         emergency_shell \
@@ -91,15 +101,22 @@ if [ "$OPENURMA_PROVIDER" = udma ]; then
     udma_compat=1
 fi
 if ! load_one ubcore.ko; then
-    [ "$OPENURMA_PROVIDER" != udma ] || emergency_shell "ubcore.ko failed to load"
+    [ "$OPENURMA_PROVIDER" = legacy ] || emergency_shell "ubcore.ko failed to load"
 fi
 if ! load_one uburma.ko; then
-    [ "$OPENURMA_PROVIDER" != udma ] || emergency_shell "uburma.ko failed to load"
+    [ "$OPENURMA_PROVIDER" = legacy ] || emergency_shell "uburma.ko failed to load"
 fi
-if ! load_one openurma_ubcore.ko "eid_last_byte=$eid_last_byte" \
-    "udma_compat=$udma_compat"; then
-    [ "$OPENURMA_PROVIDER" != udma ] || \
-        emergency_shell "openurma_ubcore.ko failed to load in UDMA-compatible mode"
+if [ "$OPENURMA_PROVIDER" = official ]; then
+    for module in ubfi.ko ubus.ko openurma_ub_v2m.ko ummu-core.ko ummu.ko \
+                  hisi_ubus.ko ubase.ko udma.ko; do
+        load_one "$module" || emergency_shell "$module failed to load"
+    done
+else
+    if ! load_one openurma_ubcore.ko "eid_last_byte=$eid_last_byte" \
+        "udma_compat=$udma_compat"; then
+        [ "$OPENURMA_PROVIDER" != udma ] || \
+            emergency_shell "openurma_ubcore.ko failed to load in UDMA-compatible mode"
+    fi
 fi
 
 # The e1000 device and TCP/IP are used only for urma_perftest's OOB handshake;
@@ -126,7 +143,13 @@ fi
 # Give ubcore's asynchronous registration path a brief chance to populate
 # sysfs/devtmpfs before the first interactive command.
 i=0
-while [ "$i" -lt 50 ] && [ ! -e /sys/class/ubcore/openurma0 ]; do
+if [ "$OPENURMA_PROVIDER" = official ]; then
+    expected_device=udma0
+else
+    expected_device=openurma0
+fi
+export OPENURMA_DEVICE="$expected_device"
+while [ "$i" -lt 50 ] && [ ! -e "/sys/class/ubcore/$expected_device" ]; do
     sleep 0.02
     i=$((i + 1))
 done
@@ -135,14 +158,16 @@ echo
 echo "=============================================================="
 echo " OpenURMA Tier-G interactive guest"
 echo " provider mode: $OPENURMA_PROVIDER"
-if [ "$OPENURMA_PROVIDER" = udma ]; then
+if [ "$OPENURMA_PROVIDER" = official ]; then
+    echo " path: stock liburma-udma.so -> official udma.ko -> modeled UBASE/UMMU/UDMA"
+elif [ "$OPENURMA_PROVIDER" = udma ]; then
     echo " path: stock liburma-udma.so -> UDMA-compatible kmod -> OpenURMA NIC"
 else
     echo " path: liburma_openurma.so -> openurma kmod -> OpenURMA NIC"
 fi
 echo "=============================================================="
 if [ -n "$OPENURMA_NODE" ]; then
-    echo "Node $OPENURMA_NODE: EID fe80::$eid_last_byte, OOB IPv4 $guest_ip"
+    echo "Node $OPENURMA_NODE: EID $eid_display, OOB IPv4 $guest_ip"
 fi
 echo "Type 'ou-help' for examples and 'ou-status' to inspect the stack."
 echo "Run 'ou-dataplane' for the 14-check data-path exercise."
