@@ -23,8 +23,8 @@ the baseline and must not be reset as part of official-driver bring-up.
 | --- | --- | --- |
 | G0 | Existing dual-node functional profile still passes | existing baseline |
 | G1 | Official `udma.ko` and its required lower stack build for AArch64 | passed |
-| G2 | A simulated UBASE auxiliary device named `ubase_core.udma` is discovered | in progress: command queue, mailbox/EQC, CtrlQ and Type-1 USI pass; full UMMU probes; UBUS BI/decoder contract pending |
-| G3 | Unmodified `udma.ko` completes `probe()` and registers a ubcore device | pending |
+| G2 | A simulated UBASE auxiliary device named `ubase.udma.0` is discovered | passed |
+| G3 | Unmodified `udma.ko` completes `probe()` and registers a ubcore device | passed; `udma0` and `/dev/uburma/udma0` persist |
 | G4 | `urma_admin show` reports the official UDMA device and EID | pending |
 | G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | pending |
 | G6 | Two-node `urma_perftest send_lat` completes through official `udma.ko` | pending |

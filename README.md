@@ -5,11 +5,12 @@ OpenURMA checkout.  Unlike OpenURMA's demonstration `init.c`, this guest does
 not run one command and power off: it loads the official kernel stack and then
 keeps a BusyBox shell attached to the gem5 serial console.
 
-The current saved checkpoint runs the unmodified official UBFI, UBUS, UMMU
-and UBASE modules through probe. UBASE creates `ubase.udma.0` and
-`ubase.unic.0`; official `udma.ko` then binds to the UDMA auxiliary device.
-The next modeled contract is the non-zero UDMA resource-capability response
-needed for the UDMA driver's internal queue/resource tables.
+The current saved checkpoint runs the unmodified official UBFI, UBUS, UMMU,
+UBASE and UDMA modules through probe. UBASE creates `ubase.udma.0` and
+`ubase.unic.0`; official `udma.ko` binds to the UDMA auxiliary device,
+registers `udma0` with ubcore and creates `/dev/uburma/udma0`. The next
+modeled contract is non-zero port capability/status, which currently leaves
+the official device at `link NOP` after its otherwise successful probe.
 
 ## Required prebuilt inputs
 

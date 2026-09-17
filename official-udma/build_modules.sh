@@ -27,6 +27,21 @@ fi
 scripts/kconfig/merge_config.sh -m .config "$fragment"
 make "${make_args[@]}" olddefconfig
 
+# UDMA's device-TID setup unconditionally uses the official KSVA and MAPT
+# APIs.  A module-only build can otherwise appear successful while sva.h
+# compiles those APIs into -ENODEV stubs, so fail before spending time on the
+# kernel link if the final Kconfig closure dropped any prerequisite.
+for required in \
+    CONFIG_UB_UMMU_SVA=y \
+    CONFIG_IOMMU_SVA=y \
+    CONFIG_IOMMU_KSVA=y \
+    CONFIG_IOMMU_IOPF=y; do
+    grep -qx "$required" .config || {
+        echo "missing final config: $required" >&2
+        exit 1
+    }
+done
+
 # UBUS and the builtin half of UMMU export symbols to the lower modules, so an
 # Image link must precede targeted module modpost.  Building every enabled
 # module is unnecessary and much slower.

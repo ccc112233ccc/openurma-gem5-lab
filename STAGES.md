@@ -110,12 +110,30 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   Git).
 - No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
 
+### `stage/2026-09-17-official-udma-probe`
+
+- The kernel configuration enables the official UMMU SVA/KSVA path; the
+  unmodified UMMU driver allocates MAPT blocks and publishes its translation
+  context through TCT and MCMDQ.
+- Modeled UBASE and UDMA resource queries return finite, ABI-aligned queue,
+  table and jetty capabilities.
+- The control-plane CTRLQ returns the SEID belonging to the endpoint already
+  enumerated by UBIOS, through the real CSQ/CRQ DMA and Type-1 MSI path.
+- Unmodified official `udma.ko` completes `probe()`, reports
+  `init udma successfully`, registers `udma0` with ubcore and creates
+  `/dev/uburma/udma0`.
+- First open boundary: the official device-status query sees modeled port
+  speed zero, so `urma_admin show` reports `udma0` with `link NOP`. Port
+  capability/status is the next hardware contract.
+- Validation evidence: `run-official-ummu-v14-20260917/` and
+  `run-official-ummu-v14-model.log` (kept locally, intentionally ignored by
+  Git).
+- No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:
 
-- `stage/...-official-udma-probe`: unchanged official `udma.ko` completes
-  probe and registers with ubcore.
 - `stage/...-official-urma-resources`: context, segment and queue resources
   can be created.
 - `stage/...-official-dual-node-perftest`: two-node `send_lat` completes on
