@@ -23,7 +23,7 @@ the baseline and must not be reset as part of official-driver bring-up.
 | --- | --- | --- |
 | G0 | Existing dual-node functional profile still passes | existing baseline |
 | G1 | Official `udma.ko` and its required lower stack build for AArch64 | passed |
-| G2 | A simulated UBASE auxiliary device named `ubase_core.udma` is discovered | in progress: official UBUS entities and resources pass; UBASE command queue pending |
+| G2 | A simulated UBASE auxiliary device named `ubase_core.udma` is discovered | in progress: command queue and Type-1 USI pass; mailbox/EQC pending |
 | G3 | Unmodified `udma.ko` completes `probe()` and registers a ubcore device | pending |
 | G4 | `urma_admin show` reports the official UDMA device and EID | pending |
 | G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | pending |
@@ -96,19 +96,27 @@ The latest verified trace is in
 `/sys/bus/ub/devices`, and the endpoint resources are allocated at
 `0x2d100000`, `0x2d200000`, and `0x2d300000`.
 
-The current boundary is the UBASE device command queue.  `ubase` binds to the
-endpoint and initializes its UBUS resources, but the first firmware-version
-command receives no modeled completion and returns `-52`:
+The UBASE command queue is now modeled: the unchanged driver completes its
+firmware query and reports version `1.0.0.0`.  The next integration boundary
+is the USI interrupt parent.  gem5's VExpress platform contains GICv2m
+hardware, but its kernel driver publishes only PCI and platform MSI domains;
+UBUS intentionally requests a separate `DOMAIN_BUS_UB_MSI` domain.
+
+`official-udma/ub_v2m_bridge/` is simulation-only integration glue that
+publishes that missing domain over the existing GICv2m parent.  It does not
+change the official UBUS, UBASE or UDMA sources.  The generated device tree
+advertises the existing GICv2m frame and connects the UBC through
+`msi-parent`.  This bridge must load after `ubus.ko` and before `ubase.ko`.
+
+The validated bridge trace now reaches:
 
 ```text
-ubase 00002: failed to query fw version, ret = -52.
-ubase 00002: failed to init cmd queue, ret = -52.
-ubase 00002: failed to init ubase dev, ret = -52.
+ubase 00002: (pid 86) The firmware version is 1.0.0.0
+ub_msi_domain_set_desc, arg->hwirq: 0
+ubase 00002: failed to query ubase mailbox, status = 0
+ubase 00002: failed to create EQC, ret = -16
 ```
 
-Consequently `ubase_core.udma` is not created yet.  The official `udma.ko`
-module is loaded but has no auxiliary device to probe, so G2 and G3 remain
-open.  The next implementation step is the UBASE command-queue
-register/descriptor/completion contract, followed by capability reporting and
-auxiliary-device creation.  The existing functional data-plane baseline is
+The evidence is in `run-official-usi-v3-20260917/`.  G2 remains open until
+`ubase_core.udma` appears.  The existing functional data-plane baseline is
 kept unchanged throughout this bring-up.

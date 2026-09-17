@@ -38,6 +38,22 @@ pinned revisions in `SOURCE_REVISIONS.md`.
 - Validation evidence: `run-official-resource-v3-20260916/` (kept locally,
   intentionally ignored by Git).
 
+### `stage/2026-09-17-ubase-cmdq-usi`
+
+- Unmodified UBASE completes its command queue and reports firmware version
+  `1.0.0.0`.
+- The generated DT advertises gem5's existing GICv2m frame and associates the
+  UBC through `msi-parent`.
+- A simulation-only bridge publishes the required `DOMAIN_BUS_UB_MSI` domain
+  and attaches it to the firmware-created UBC; official UBUS/UBASE/UDMA source
+  files remain unchanged.
+- Type-1 USI capability discovery and MSI descriptor setup reach
+  `ub_msi_domain_set_desc` successfully.
+- First open boundary: UBASE mailbox status/query and EQC creation return
+  `-16`, so `ubase_core.udma` is not created yet.
+- Validation evidence: `run-official-usi-v3-20260917/` (kept locally,
+  intentionally ignored by Git).
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:
@@ -50,4 +66,3 @@ The next intended tags are created only after their observable gates pass:
   can be created.
 - `stage/...-official-dual-node-perftest`: two-node `send_lat` completes on
   the official stack.
-

@@ -7,7 +7,12 @@ from pathlib import Path
 
 from m5.objects import ArmSystem, GenericTimerMem
 from m5.util import addToPath
-from m5.util.fdthelper import FdtNode, FdtPropertyStrings, FdtPropertyWords
+from m5.util.fdthelper import (
+    FdtNode,
+    FdtProperty,
+    FdtPropertyStrings,
+    FdtPropertyWords,
+)
 
 
 # The upstream research scaffold names the author's original gem5 checkout.
@@ -28,6 +33,10 @@ UPSTREAM = OPENURMA_ROOT / (
 UNSAFE_EARLY_EL2_FEATURES = {"FEAT_HCX", "FEAT_SME"}
 OFFICIAL_UDMA_UBRT = 0x2D010000
 OFFICIAL_UDMA_UBC_IRQ = 101
+OFFICIAL_UDMA_V2M_BASE = 0x2C1C0000
+OFFICIAL_UDMA_V2M_SIZE = 0x1000
+OFFICIAL_UDMA_V2M_SPI_BASE = 256
+OFFICIAL_UDMA_V2M_SPI_COUNT = 64
 
 
 spec = importlib.util.spec_from_file_location("openurma_fs_upstream", str(UPSTREAM))
@@ -53,9 +62,34 @@ def _official_udma_device_tree(original):
         ))
         root.append(chosen)
 
+        # VExpress_GEM5_V1 already instantiates this GICv2m frame in the
+        # hardware model, but gem5 does not emit a DT node for it.  Advertise
+        # the existing frame so the guest can create an MSI parent domain.
+        v2m = FdtNode(f"msi-controller@{OFFICIAL_UDMA_V2M_BASE:x}")
+        v2m.append(FdtPropertyStrings(
+            "compatible", ["arm,gic-v2m-frame"]
+        ))
+        v2m.append(FdtProperty("msi-controller"))
+        v2m.append(FdtPropertyWords(
+            "reg",
+            state.addrCells(OFFICIAL_UDMA_V2M_BASE)
+            + state.sizeCells(OFFICIAL_UDMA_V2M_SIZE),
+        ))
+        v2m.append(FdtPropertyWords(
+            "arm,msi-base-spi", [OFFICIAL_UDMA_V2M_SPI_BASE]
+        ))
+        v2m.append(FdtPropertyWords(
+            "arm,msi-num-spis", [OFFICIAL_UDMA_V2M_SPI_COUNT]
+        ))
+        v2m.appendPhandle(system.realview.gicv2m)
+        root.append(v2m)
+
         ubc = FdtNode("ubc@0")
         ubc.append(FdtPropertyStrings("compatible", ["ub,ubc"]))
         ubc.append(FdtPropertyWords("index", [0]))
+        ubc.append(FdtPropertyWords(
+            "msi-parent", [state.phandle(system.realview.gicv2m)]
+        ))
         ubc.append(FdtPropertyWords(
             "interrupts", [0, OFFICIAL_UDMA_UBC_IRQ - 32, 4]
         ))

@@ -6,6 +6,8 @@ fragment="${FRAGMENT:-/workspace/openurma-gem5-lab/official-udma/kernel.fragment
 arch="${ARCH:-arm64}"
 cross_compile="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 jobs="${JOBS:-8}"
+lab_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ub_v2m_bridge="$lab_root/official-udma/ub_v2m_bridge"
 
 [[ -d "$kernel_root" ]] || {
     echo "kernel source not found: $kernel_root" >&2
@@ -45,6 +47,11 @@ make "${make_args[@]}" M=drivers/ub/ubus clean
 build_module_dir drivers/ub/ubus \
     KCFLAGS="-include $kernel_root/include/linux/interrupt.h" \
     KBUILD_EXTRA_SYMBOLS="$kernel_root/drivers/ub/ubfi/Module.symvers"
+# gem5's GICv2m supplies the interrupt hardware, while real UB machines use a
+# UB-aware interrupt controller (normally an ITS).  Build the simulation-only
+# domain bridge separately so the official UBUS/UBASE/UDMA sources stay clean.
+make -j"$jobs" "${make_args[@]}" -C "$kernel_root" M="$ub_v2m_bridge" \
+    KBUILD_EXTRA_SYMBOLS="$kernel_root/drivers/ub/ubfi/Module.symvers $kernel_root/drivers/ub/ubus/Module.symvers" modules
 build_module_dir drivers/iommu/hisilicon/ummu-core
 build_module_dir drivers/ub/urma/ubcore
 build_module_dir drivers/ub/urma/uburma \
@@ -58,6 +65,7 @@ artifacts=(
     drivers/ub/ubfi/ubfi.ko
     drivers/ub/ubus/ubus.ko
     drivers/ub/ubus/vendor/hisilicon/hisi_ubus.ko
+    "$ub_v2m_bridge/openurma_ub_v2m.ko"
     drivers/iommu/hisilicon/ummu-core/ummu-core.ko
     drivers/ub/ubase/ubase.ko
     drivers/ub/urma/ubcore/ubcore.ko
@@ -67,8 +75,12 @@ artifacts=(
 
 for artifact in "${artifacts[@]}"; do
     [[ -s "$artifact" ]] || {
-        echo "missing module: $kernel_root/$artifact" >&2
+        echo "missing module: $artifact" >&2
         exit 1
     }
-    printf '%s\n' "$kernel_root/$artifact"
+    if [[ "$artifact" = /* ]]; then
+        printf '%s\n' "$artifact"
+    else
+        printf '%s\n' "$kernel_root/$artifact"
+    fi
 done
