@@ -139,10 +139,13 @@ UBUS entity attachment, default BI/decoder discovery, UBASE auxiliary-device
 creation and official UDMA probe are now passed gates. The existing functional
 data-plane baseline remains unchanged throughout this bring-up.
 
-The untagged OpenURMA implementation snapshot `1f58c45` decodes the official
+The untagged OpenURMA implementation snapshot `2dfff31` decodes the official
 JFC/JFR/JFS/Jetty mailbox contexts, reconstructs their queue and doorbell IOVAs,
 and routes official queue DMA through UMMU into the existing UDMA execution
-engine. It also provides an `atomic_fast` CPU mode for functional bring-up.
+engine. It also provides an `atomic_fast` CPU mode and a configurable Linux
+`lpj` override for functional bring-up. OLK 6.6 must still be launched through
+`configs/single_node_fs_openurma.py`, which applies the validated early-EL2 and
+timer-device-tree compatibility contract.
 This is compiled implementation, not a passed gate: G6 remains pending until
 an official-provider SQ doorbell is observed and the corresponding CQE is
 consumed by `urma_perftest`.
