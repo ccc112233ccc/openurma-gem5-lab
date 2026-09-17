@@ -1,0 +1,8 @@
+#!/bin/sh
+echo '[ou-smoke] exercising stock liburma + TLV ioctl + kernel provider + NIC'
+OPENURMA_PROVIDER_LOG="${OPENURMA_PROVIDER_LOG:-0}" \
+LD_LIBRARY_PATH=/lib:/usr/lib /usr/bin/k_smoke
+rc=$?
+echo "[ou-smoke] exit=$rc"
+exit "$rc"
+

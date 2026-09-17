@@ -1,0 +1,82 @@
+#!/bin/sh
+profile="${OPENURMA_LAT_PROFILE:-ctp-rm-send-imm-i128}"
+roi_stats="${OPENURMA_ROI_STATS:-0}"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --profile)
+            [ "$#" -ge 2 ] || { echo "ou-lat-server: --profile requires a value" >&2; exit 2; }
+            profile=$2
+            shift 2
+            ;;
+        --profile=*) profile=${1#*=}; shift ;;
+        --roi-stats) roi_stats=1; shift ;;
+        --no-roi-stats) roi_stats=0; shift ;;
+        --) shift; break ;;
+        -*) echo "ou-lat-server: unknown option $1" >&2; exit 2 ;;
+        *) break ;;
+    esac
+done
+
+samples="${1:-100}"
+size="${2:-128}"
+port="${3:-21115}"
+out=/tmp/ou-lat-server.out
+
+if [ "$#" -gt 3 ]; then
+    echo "usage: ou-lat-server [--profile ctp-rm-send-imm-i128|legacy] [--roi-stats] [samples] [size] [port]" >&2
+    exit 2
+fi
+case "$samples:$size:$port" in
+    *[!0-9:]*|0:*|*:0:*|*:*:0)
+        echo "usage: ou-lat-server [--profile ctp-rm-send-imm-i128|legacy] [--roi-stats] [samples>0] [message-bytes=1..8088] [port>0]" >&2
+        exit 2
+        ;;
+esac
+if [ "$size" -gt 8088 ]; then
+    echo "message size must be <= 8088 bytes for the current peer-ring slot" >&2
+    exit 2
+fi
+if [ "$port" -gt 65535 ]; then
+    echo "port must be <= 65535" >&2
+    exit 2
+fi
+iters=$((samples + 6))
+
+case "$profile" in
+    ctp-rm-send-imm-i128|ctp-rm-send-imm-inline128)
+        profile=ctp-rm-send-imm-i128
+        set -- urma_perftest send_lat -d openurma0 --eid_idx 0 --ctp \
+            -s "$size" -P "$port" -J 1 -I 128 -n "$iters" --enable_imm -p 0
+        ;;
+    legacy)
+        set -- urma_perftest send_lat -d openurma0 --eid_idx 0 \
+            -s "$size" -P "$port" -n "$iters" -p 0
+        ;;
+    *)
+        echo "ou-lat-server: unknown profile '$profile'" >&2
+        exit 2
+        ;;
+esac
+
+if [ -n "${OPENURMA_BENCH_CPU:-}" ]; then
+    # Ubuntu's static BusyBox implements the portable HEXMASK form, not the
+    # util-linux -c syntax.  Convert the configured CPU index to a one-bit mask.
+    bench_mask=$(printf '%x' "$((1 << OPENURMA_BENCH_CPU))")
+    set -- taskset "$bench_mask" "$@"
+fi
+
+if [ "$roi_stats" = 1 ]; then
+    OPENURMA_DIST_SYNC=1 OPENURMA_ROI_STATS=1 LD_LIBRARY_PATH=/lib:/usr/lib \
+        "$@" >"$out" 2>&1
+else
+    OPENURMA_DIST_SYNC=1 LD_LIBRARY_PATH=/lib:/usr/lib "$@" >"$out" 2>&1
+fi
+rc=$?
+if [ "$rc" -eq 0 ]; then
+    echo "profile=$profile role=server measured_samples=$samples size_bytes=$size port=$port roi_stats=$roi_stats"
+    sed -n '/bytes.*iterations/,$p' "$out"
+else
+    cat "$out"
+fi
+exit "$rc"

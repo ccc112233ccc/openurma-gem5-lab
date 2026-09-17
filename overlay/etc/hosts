@@ -1,0 +1,4 @@
+127.0.0.1 localhost openurma-gem5
+::1 localhost openurma-gem5
+10.0.0.1 openurma-node0
+10.0.0.2 openurma-node1

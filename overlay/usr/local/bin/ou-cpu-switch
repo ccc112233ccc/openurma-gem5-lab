@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if [ "${OPENURMA_CPU_SWITCH:-}" != server_o3 ]; then
+    echo "ou-cpu-switch: this guest was not launched with the server_o3 model" >&2
+    exit 2
+fi
+
+# CPU switching is a paired operation: entering O3 without a matching exit
+# leaves an idle node advancing slowly and defeats the next distributed-time
+# rendezvous. urma_perftest therefore owns both transitions at the exact ROI
+# boundary. Keep this command as a diagnostic guard instead of exposing the
+# underlying toggle as an easy-to-misuse interactive command.
+echo "ArmO3 switching is automatic for synchronized send_lat runs."
+echo "The guest stays on its fast boot CPU while idle and enters ArmO3 only inside the benchmark ROI."

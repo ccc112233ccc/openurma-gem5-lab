@@ -1,0 +1,32 @@
+# Third-party source trees are independent Git repositories.  Their exact
+# revisions are recorded in SOURCE_REVISIONS.md.
+/gem5/
+/oe66/
+/deps/
+
+# Downloaded and generated artifacts.
+/artifacts/
+/downloads/
+/system/
+/out/
+/m5out/
+
+# Runtime output and performance sweeps.
+/run/
+/run-*/
+/sweeps/
+/*.raw.txt
+
+# Generated presentation output.  Keep the editable plan and generator.
+/presentation/output/
+/presentation/.build/*
+!/presentation/.build/build_deck.mjs
+/presentation-aico/output/
+/presentation-aico/.build/*
+!/presentation-aico/.build/build_deck.mjs
+
+# Local caches.
+.DS_Store
+__pycache__/
+*.py[cod]
+

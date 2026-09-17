@@ -1,0 +1,55 @@
+diff --git a/arch/arm64/include/asm/assembler.h b/arch/arm64/include/asm/assembler.h
+index 10a4d1c8d9b5..f3b812278ce8 100644
+--- a/arch/arm64/include/asm/assembler.h
++++ b/arch/arm64/include/asm/assembler.h
+@@ -819,7 +819,7 @@ alternative_endif
+ 	.equ	.L__bti_targets_c, 34
+ 	.equ	.L__bti_targets_j, 36
+ 	.equ	.L__bti_targets_jc,38
+-	hint	#.L__bti_targets_\targets
++	nop
+ 	.endm
+ 
+ /*
+diff --git a/arch/arm64/include/asm/linkage.h b/arch/arm64/include/asm/linkage.h
+index 32f3c8dca1cd..167a8a74031f 100644
+--- a/arch/arm64/include/asm/linkage.h
++++ b/arch/arm64/include/asm/linkage.h
+@@ -17,30 +17,30 @@
+  */
+ #define SYM_FUNC_START(name)				\
+ 	SYM_START(name, SYM_L_GLOBAL, SYM_A_ALIGN)	\
+-	bti c ;
++	nop ;
+ 
+ #define SYM_FUNC_START_NOALIGN(name)			\
+ 	SYM_START(name, SYM_L_GLOBAL, SYM_A_NONE)	\
+-	bti c ;
++	nop ;
+ 
+ #define SYM_FUNC_START_LOCAL(name)			\
+ 	SYM_START(name, SYM_L_LOCAL, SYM_A_ALIGN)	\
+-	bti c ;
++	nop ;
+ 
+ #define SYM_FUNC_START_LOCAL_NOALIGN(name)		\
+ 	SYM_START(name, SYM_L_LOCAL, SYM_A_NONE)	\
+-	bti c ;
++	nop ;
+ 
+ #define SYM_FUNC_START_WEAK(name)			\
+ 	SYM_START(name, SYM_L_WEAK, SYM_A_ALIGN)	\
+-	bti c ;
++	nop ;
+ 
+ #define SYM_FUNC_START_WEAK_NOALIGN(name)		\
+ 	SYM_START(name, SYM_L_WEAK, SYM_A_NONE)		\
+-	bti c ;
++	nop ;
+ 
+ #define SYM_TYPED_FUNC_START(name)				\
+ 	SYM_TYPED_START(name, SYM_L_GLOBAL, SYM_A_ALIGN)	\
+-	bti c ;
++	nop ;
+ 
+ #endif

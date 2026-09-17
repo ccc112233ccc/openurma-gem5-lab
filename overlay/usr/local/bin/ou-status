@@ -1,0 +1,22 @@
+#!/bin/sh
+echo "--- kernel ----------------------------------------------------"
+uname -a
+echo "--- modules ---------------------------------------------------"
+lsmod | grep -E '(^Module|ipv6|ubcore|uburma|openurma)' || true
+echo "--- ubcore sysfs ----------------------------------------------"
+if [ -d /sys/class/ubcore ]; then
+    ls -la /sys/class/ubcore
+else
+    echo '/sys/class/ubcore is absent'
+fi
+echo "--- uburma devices --------------------------------------------"
+if [ -d /dev/uburma ]; then
+    ls -la /dev/uburma
+else
+    echo '/dev/uburma is absent'
+fi
+echo "--- network ---------------------------------------------------"
+hostname
+ip -brief addr 2>/dev/null || ip addr || true
+echo "--- stock urma_admin show -------------------------------------"
+LD_LIBRARY_PATH=/lib:/usr/lib urma_admin show || true

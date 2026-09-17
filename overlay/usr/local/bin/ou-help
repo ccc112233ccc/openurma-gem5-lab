@@ -1,0 +1,25 @@
+#!/bin/sh
+cat <<'EOF'
+OpenURMA Tier-G commands
+
+  ou-status             kernel/module/device status + urma_admin show
+  ou-smoke              run the compact full-stack verbs smoke test
+  ou-dataplane          verify 14 data-path operations and resulting bytes
+  urma_admin show       enumerate the simulated UB device via netlink
+  urma_admin show -d openurma0
+  urma_perftest --help  inspect the stock UMDK performance-test syntax
+  ou-peer-server        node0: wait for a deterministic cross-node WRITE_IMM
+  ou-peer-client        node1: send it through the shared UB peer ring
+  ou-lat-server 101 128 node0: CTP/RM/SEND_IMM, inline 128, one-Jetty server
+  ou-lat-client 101 128 node1: matching synchronized send_lat client
+  ping 10.0.0.1         test the dual-node Ethernet control channel
+  dmesg | tail -n 80    inspect provider and ubcore messages
+  lsmod                 list the real guest kernel modules
+  poweroff -f           stop the guest/gem5 run
+
+In a standalone guest, start with ou-smoke and ou-dataplane.  In a dual-node
+guest, use node0 as the urma_perftest server and node1 (10.0.0.2) as the client;
+the OOB handshake uses eth0 while URMA SEND/WRITE payloads use the UB peer ring.
+The latency wrappers default to --profile ctp-rm-send-imm-i128; pass
+--profile legacy for the old command shape, or --roi-stats for ROI statistics.
+EOF

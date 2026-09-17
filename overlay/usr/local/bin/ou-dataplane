@@ -1,0 +1,8 @@
+#!/bin/sh
+echo '[ou-dataplane] checking CQEs and bytes for 14 verb/error cases'
+OPENURMA_PROVIDER_LOG="${OPENURMA_PROVIDER_LOG:-0}" \
+LD_LIBRARY_PATH=/lib:/usr/lib /usr/bin/k_dataplane
+rc=$?
+echo "[ou-dataplane] exit=$rc"
+exit "$rc"
+

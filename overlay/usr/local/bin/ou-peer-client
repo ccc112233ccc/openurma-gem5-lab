@@ -1,0 +1,5 @@
+#!/bin/sh
+if [ "${OPENURMA_NODE:-}" != 1 ]; then
+    echo "ou-peer-client is intended for openurma-node1" >&2
+fi
+exec /usr/bin/twonode_write client

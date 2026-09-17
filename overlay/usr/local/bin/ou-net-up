@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ -z "${OPENURMA_NODE:-}" ]; then
+    echo "ou-net-up is only valid in a dual-node guest" >&2
+    exit 1
+fi
+exec ip addr replace "10.0.0.$((OPENURMA_NODE + 1))/24" dev eth0

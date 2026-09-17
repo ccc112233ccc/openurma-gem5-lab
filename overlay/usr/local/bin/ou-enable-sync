@@ -1,0 +1,11 @@
+#!/bin/sh
+if [ -z "${OPENURMA_NODE:-}" ]; then
+    echo "ou-enable-sync is only valid in a dual-node guest" >&2
+    exit 1
+fi
+
+# This pseudo-op is a collective operation: the host must invoke this script
+# on both guests concurrently.  Once both event queues enter conservative
+# synchronization, it is safe to enable the OOB IPv4 control path.
+/usr/bin/ou-dist-sync || exit $?
+exec ip addr replace "10.0.0.$((OPENURMA_NODE + 1))/24" dev eth0

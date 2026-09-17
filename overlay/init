@@ -1,0 +1,159 @@
+#!/bin/sh
+# Interactive PID 1 for the OpenURMA Tier-G gem5 guest.
+
+export PATH=/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+export LD_LIBRARY_PATH=/lib:/usr/lib
+export HOME=/root
+export TERM="${TERM:-vt100}"
+export GLIBC_TUNABLES=glibc.pthread.rseq=0
+
+# Mount devtmpfs first: /dev/null does not exist in the archive yet, so the
+# later diagnostic redirections are only safe after this succeeds.
+mount -t devtmpfs devtmpfs /dev || true
+mkdir -p /dev/pts /run /tmp /root
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+chmod 1777 /tmp
+
+exec </dev/console >/dev/console 2>&1
+
+# The same initramfs serves the standalone guest and both dual-node guests.
+# gem5 appends openurma_node=0/1 to the dual-node kernel command line.
+OPENURMA_NODE=""
+OPENURMA_PROVIDER=legacy
+OPENURMA_CPU_SWITCH=""
+OPENURMA_BENCH_CPU=""
+OPENURMA_M5OPS_MODE=inst
+OPENURMA_M5OPS_BASE=""
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        openurma_node=0) OPENURMA_NODE=0 ;;
+        openurma_node=1) OPENURMA_NODE=1 ;;
+        openurma_provider=legacy) OPENURMA_PROVIDER=legacy ;;
+        openurma_provider=udma) OPENURMA_PROVIDER=udma ;;
+        openurma_cpu_switch=server_o3) OPENURMA_CPU_SWITCH=server_o3 ;;
+        openurma_bench_cpu=*) OPENURMA_BENCH_CPU=${arg#*=} ;;
+        openurma_m5ops_mode=inst) OPENURMA_M5OPS_MODE=inst ;;
+        openurma_m5ops_mode=addr) OPENURMA_M5OPS_MODE=addr ;;
+        openurma_m5ops_base=*) OPENURMA_M5OPS_BASE=${arg#*=} ;;
+    esac
+done
+export OPENURMA_NODE OPENURMA_PROVIDER OPENURMA_CPU_SWITCH OPENURMA_BENCH_CPU
+export OPENURMA_M5OPS_MODE OPENURMA_M5OPS_BASE
+case "$OPENURMA_NODE" in
+    0) hostname openurma-node0; eid_last_byte=1; guest_ip=10.0.0.1 ;;
+    1) hostname openurma-node1; eid_last_byte=2; guest_ip=10.0.0.2 ;;
+    *) hostname openurma-gem5;  eid_last_byte=1; guest_ip="" ;;
+esac
+
+load_one() {
+    module="$1"
+    shift
+    if [ ! -r "/lib/modules/$module" ]; then
+        echo "[openurma-init] MISSING /lib/modules/$module"
+        return 1
+    fi
+    if insmod "/lib/modules/$module" "$@"; then
+        echo "[openurma-init] loaded $module"
+        return 0
+    fi
+    echo "[openurma-init] FAILED $module (use dmesg for details)"
+    return 1
+}
+
+emergency_shell() {
+    echo
+    echo "[openurma-init] FAIL CLOSED: $1"
+    echo "[openurma-init] the UDMA-compatible kernel provider was not loaded"
+    echo "[openurma-init] inspect /etc/openurma-available-providers, then rebuild the initramfs"
+    echo "[openurma-init] starting an emergency shell; exit restarts it"
+    while true; do
+        setsid cttyhack /bin/sh -l
+        echo "[openurma-init] emergency shell exited; starting a new one"
+        sleep 1
+    done
+}
+
+echo
+echo "[openurma-init] mounting guest filesystems"
+load_one ipv6.ko || true
+ip link set lo up 2>/dev/null || echo "[openurma-init] warning: could not bring lo up"
+udma_compat=0
+if [ "$OPENURMA_PROVIDER" = udma ]; then
+    if ! grep -qw udma /etc/openurma-available-providers 2>/dev/null ||
+       [ ! -r /lib/urma/liburma-udma.so ] || [ ! -r /lib/libummu.so.1 ]; then
+        emergency_shell \
+            "openurma_provider=udma requested, but stock provider/shim is not packaged"
+    fi
+    udma_compat=1
+fi
+if ! load_one ubcore.ko; then
+    [ "$OPENURMA_PROVIDER" != udma ] || emergency_shell "ubcore.ko failed to load"
+fi
+if ! load_one uburma.ko; then
+    [ "$OPENURMA_PROVIDER" != udma ] || emergency_shell "uburma.ko failed to load"
+fi
+if ! load_one openurma_ubcore.ko "eid_last_byte=$eid_last_byte" \
+    "udma_compat=$udma_compat"; then
+    [ "$OPENURMA_PROVIDER" != udma ] || \
+        emergency_shell "openurma_ubcore.ko failed to load in UDMA-compatible mode"
+fi
+
+# The e1000 device and TCP/IP are used only for urma_perftest's OOB handshake;
+# OpenURMA payloads use the simulated UB peer ring.  In a distributed run the
+# e1000 is a DistEtherLink endpoint.  Do the slow hardware bring-up before the
+# fine-grained barrier starts, but disable IPv6 and leave the interface without
+# an address so it cannot emit DAD/ARP traffic across the process boundary.
+# sync-dual.sh assigns IPv4 only after synchronization is live.
+if [ -n "$guest_ip" ]; then
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -e /sys/class/net/eth0 ]; do
+        sleep 0.02
+        i=$((i + 1))
+    done
+    if [ -e /sys/class/net/eth0 ]; then
+        echo 1 > /proc/sys/net/ipv6/conf/eth0/disable_ipv6 2>/dev/null || true
+        ip link set eth0 up 2>/dev/null || true
+        echo "[openurma-init] node $OPENURMA_NODE Ethernet OOB UP, address deferred: $guest_ip/24"
+    else
+        echo "[openurma-init] warning: e1000 eth0 was not discovered"
+    fi
+fi
+
+# Give ubcore's asynchronous registration path a brief chance to populate
+# sysfs/devtmpfs before the first interactive command.
+i=0
+while [ "$i" -lt 50 ] && [ ! -e /sys/class/ubcore/openurma0 ]; do
+    sleep 0.02
+    i=$((i + 1))
+done
+
+echo
+echo "=============================================================="
+echo " OpenURMA Tier-G interactive guest"
+echo " provider mode: $OPENURMA_PROVIDER"
+if [ "$OPENURMA_PROVIDER" = udma ]; then
+    echo " path: stock liburma-udma.so -> UDMA-compatible kmod -> OpenURMA NIC"
+else
+    echo " path: liburma_openurma.so -> openurma kmod -> OpenURMA NIC"
+fi
+echo "=============================================================="
+if [ -n "$OPENURMA_NODE" ]; then
+    echo "Node $OPENURMA_NODE: EID fe80::$eid_last_byte, OOB IPv4 $guest_ip"
+fi
+echo "Type 'ou-help' for examples and 'ou-status' to inspect the stack."
+echo "Run 'ou-dataplane' for the 14-check data-path exercise."
+echo "Exit restarts the shell; 'poweroff -f' stops the guest."
+echo
+ou-status
+
+# Keep PID 1 alive and attach each shell to ttyAMA0. cttyhack supplies a
+# controlling terminal, so Ctrl-C and interactive job control behave normally.
+while true; do
+    setsid cttyhack /bin/sh -l
+    echo "[openurma-init] shell exited; starting a new one"
+    sleep 1
+done
