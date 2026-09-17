@@ -151,11 +151,27 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   Git).
 - No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
 
+### `stage/2026-09-17-official-urma-resources`
+
+- The modeled management plane implements official TP-ACL
+  `GET_TP_LIST (0x21)` and `ACTIVE_TP (0x22)` responses.
+- The TP allocator derives stable, process-scoped TP identifiers from the
+  official request payload and keeps them inside the advertised finite TP
+  resource range; no test-specific TP number is embedded in the response.
+- A same-guest stock `urma_perftest` server/client pair creates contexts,
+  JFC/JFS/JFR/Jettys, receives separate TP allocations (115 and 961),
+  activates both TPs and prints the complete SEND-latency test configuration.
+- First open boundary: both processes then sleep waiting for completions. The
+  official provider's mmap-backed SQ doorbell and WQE format are not yet
+  decoded by the modeled UDMA data path.
+- Validation evidence: `run-official-ummu-v18-20260917/` and
+  `run-official-ummu-v18-model.log` (kept locally, intentionally ignored by
+  Git).
+- No official UMMU, UBFI, UBUS, UBASE or UDMA source file was modified.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:
 
-- `stage/...-official-urma-resources`: context, segment and queue resources
-  can be created.
 - `stage/...-official-dual-node-perftest`: two-node `send_lat` completes on
   the official stack.

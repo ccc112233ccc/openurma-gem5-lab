@@ -26,7 +26,7 @@ the baseline and must not be reset as part of official-driver bring-up.
 | G2 | A simulated UBASE auxiliary device named `ubase.udma.0` is discovered | passed |
 | G3 | Unmodified `udma.ko` completes `probe()` and registers a ubcore device | passed; `udma0` and `/dev/uburma/udma0` persist |
 | G4 | `urma_admin show` reports the official UDMA device and EID | passed; configurable EID and 400-Gb/s port report `ACTIVE` |
-| G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | in progress; stock provider creates Jettys, next boundary is TP-list allocation |
+| G5 | Context, token, segment, JFC/JFS/JFR/Jetty creation succeeds | passed; stock provider also receives and activates process-scoped TPs |
 | G6 | Two-node `urma_perftest send_lat` completes through official `udma.ko` | pending |
 
 Passing a build or module-load gate is not counted as data-plane support.
@@ -125,9 +125,10 @@ notification have completed.
 The unmodified full `ummu.ko` now runs against the architecture-generic
 register/queue model. In `run-official-ummu-v16b-20260917/`, the complete
 official lower stack probes, `udma0` reports its configured EID and an ACTIVE
-400-Gb/s port, and stock UMDK creates two Jettys. The next observed boundary
-is the management-plane TP-list request (`TP_ACL`, opcode `0x21`). Earlier
-UMMU bring-up evidence included:
+400-Gb/s port, and stock UMDK creates two Jettys. In
+`run-official-ummu-v18-20260917/`, the model also returns TP lists and activates
+both process-scoped TPs. The next observed boundary is the official provider's
+mmap-backed SQ doorbell/WQE data path. Earlier UMMU bring-up evidence included:
 
 ```text
 ummu ummu.0: features 0x002381ac, options 0x00000000.

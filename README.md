@@ -11,8 +11,9 @@ UBASE and UDMA modules through probe. UBASE creates `ubase.udma.0` and
 registers `udma0` with ubcore and creates `/dev/uburma/udma0`. The next
 saved stage gives the official device a configurable management-plane EID and
 reports its modeled 400-Gb/s port as `link ACTIVE`.  Official `urma_perftest`
-can create Jetty resources; TP-list control-plane allocation is the next open
-hardware contract.
+now creates its context, queues, Jettys and process-scoped TPs through the
+official stack and reaches the send/receive wait. Connecting the stock UDMA
+SQ doorbell and WQE layout to the simulated data path is the next contract.
 
 ## Required prebuilt inputs
 
