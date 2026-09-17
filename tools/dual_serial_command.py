@@ -23,7 +23,13 @@ def run_one(
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=5.0) as sock:
             sock.settimeout(0.2)
-            warm_deadline = min(deadline, time.monotonic() + 0.5)
+            prompt_pattern = rb"\(openurma-[^)]+\)[^\r\n]*# "
+            # A freshly started full-system guest can take minutes of host
+            # time to reach its shell while conservative dist synchronization
+            # is active.  Never inject into the boot stream: bytes sent before
+            # ash owns the console are replayed later as a partial command.
+            warm_deadline = deadline
+            prompt_ready = False
             while time.monotonic() < warm_deadline:
                 try:
                     data = sock.recv(65536)
@@ -34,12 +40,17 @@ def run_one(
                 chunks.append(data)
                 if b"terminal already attached" in data:
                     raise RuntimeError("terminal already attached; detach it with ~. first")
+                if re.search(prompt_pattern, b"".join(chunks)) is not None:
+                    prompt_ready = True
+                    break
+            if not prompt_ready:
+                raise TimeoutError(f"no shell prompt before command within {timeout:g}s")
 
             # Both consoles are connected and drained before either command is
             # injected.  This keeps a host scheduling difference from turning
             # into a large guest virtual-time skew before dist sync is enabled.
             try:
-                start_gate.wait(timeout=min(timeout, 10.0))
+                start_gate.wait(timeout=max(0.1, deadline - time.monotonic()))
             except threading.BrokenBarrierError as exc:
                 raise RuntimeError("peer UART did not reach the command start gate") from exc
             if start_delay:
@@ -71,7 +82,7 @@ def run_one(
                 )
                 if status_match is not None:
                     prompt_seen = re.search(
-                        rb"\(openurma-[^)]+\)[^\r\n]*# ",
+                        prompt_pattern,
                         new_text[status_match.end() :],
                     ) is not None
                     if prompt_seen:

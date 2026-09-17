@@ -416,6 +416,46 @@ mode currently requires exactly one Jetty/pair, and the fixed ring slot supports
 messages up to 8088 bytes; unsupported settings fail instead of printing a
 plausible but invalid report.
 
+Iteration-mode, unidirectional `send_bw` supports the same collective virtual-
+time boundary for one pair and one Jetty. Use an inline threshold of 64 bytes
+for the official provider: a 128-byte inline WQE occupies three WQEBBs while
+the provider allocates this SQ at two WQEBBs per advertised entry, so `-I 128`
+can exhaust the physical SQ before perftest's WQE-depth accounting polls a CQE.
+
+```sh
+# node0 (server)
+OPENURMA_DIST_SYNC=1 urma_perftest send_bw -d udma0 --eid_idx 0 --ctp \
+  -a12 -P 21119 -J 1 -I 64 -n 1024 -l 16 -Q 16 -p 0
+
+# node1 (client/sender)
+OPENURMA_DIST_SYNC=1 urma_perftest send_bw -d udma0 -S 10.0.0.1 \
+  --eid_idx 0 --ctp -a12 -P 21119 -J 1 -I 64 \
+  -n 1024 -l 16 -Q 16 -p 0
+```
+
+The validated 400-Gbit/s, 100-ns direct-link run produced these sender-side
+average values (the tool labels binary MiB/s as `MB/sec`):
+
+| bytes | average MiB/s | message rate Mpps |
+| ---: | ---: | ---: |
+| 128 | 1,220.22 | 9.9960 |
+| 512 | 4,880.88 | 9.9960 |
+| 1024 | 9,757.98 | 9.9922 |
+| 2048 | 19,523.53 | 9.9960 |
+| 4096 | 39,047.05 | 9.9960 |
+| 5120 | 48,187.31 | 9.8688 |
+| 6144 | 48,225.79 | 8.2305 |
+
+The 400-Gbit/s payload ceiling is 47,683.7 MiB/s. With the current roughly
+100-ns message issue/synchronization cadence, 4096 bytes reaches about 81.9%
+and the curve enters its line-rate plateau at roughly 5 KiB. The 5120- and
+6144-byte rows use 4096 iterations so startup buffering is amortized. A finite
+64-slot peer ring now applies backpressure and retries the unconsumed SQ WQE;
+ring-full is no longer treated as a simulator panic. The power-of-two `-a12`
+sweep ends at 4096 bytes, so use `-s 5120` or `-s 6144` for the plateau points.
+The current model supports SEND/SEND_IMM opcodes; these numbers must not be
+reported as true `write_bw` results.
+
 There is a second, upstream `send_lat` sampling detail which matters when
 comparing short and long runs. SEND-LAT actually defaults to a JFR depth of 512
 (despite the current UMDK help text saying LAT defaults to one). It preposts 512

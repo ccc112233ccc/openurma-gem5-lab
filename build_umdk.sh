@@ -2,11 +2,11 @@
 # Build the pinned openEuler UMDK userspace for the ARM64 gem5 guest.
 #
 # Run this script inside the ARM64 Linux build container.  The build tree is
-# deliberately outside the UMDK source tree, so the pinned submodule remains
-# unchanged and the result can be copied directly into the guest initramfs.
+# deliberately outside the UMDK source tree, so the pinned integration revision
+# remains clean and the result can be copied directly into the guest initramfs.
 set -euo pipefail
 
-PINNED_UMDK_SHA="4eab3e4ad170b06bfe5d5c1014341e81edb9bf58"
+PINNED_UMDK_SHA="097c3a5d6b2234d6a070e3bfb26f6f49f0ce26f8"
 UMDK_SRC="${UMDK_SRC:-/workspace/OpenURMA/integration/umdk/vendor/umdk}"
 BUILD_DIR="${UMDK_BUILD_DIR:-/workspace/openurma-gem5-lab/artifacts/umdk-build}"
 JOBS="${JOBS:-2}"

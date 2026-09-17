@@ -6,13 +6,13 @@ changes code in one of those repositories.
 
 | Component | Path | Upstream baseline | Stage commit |
 | --- | --- | --- | --- |
-| OpenURMA integration and scaffold | `../OpenURMA` | `0ae5dce300154d761f97095864bda0cf2546b265` | `f499672` (official two-node data path validated) |
-| vendored official UMDK | `../OpenURMA/integration/umdk/vendor/umdk` | `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58` | `6878bcb` |
+| OpenURMA integration and scaffold | `../OpenURMA` | `0ae5dce300154d761f97095864bda0cf2546b265` | `ef1b294` (synchronized send bandwidth plus finite peer-ring backpressure) |
+| vendored official UMDK | `../OpenURMA/integration/umdk/vendor/umdk` | `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58` | `097c3a5` |
 | gem5 | `./gem5` | `b1a44b89c7bae73fae2dc547bc1f871452075b85` | `36b6c5b99` |
 | OpenEuler OLK 6.6 | `./oe66` | `5078a3a23a1e1825ec136485173ec98668cdd640` | unchanged; local case-folding noise is not committed |
 | UMMU userspace dependency | `./deps/ummu` | `f1930d006e08bbe96dfa6fa037ff8a386f535425` | unchanged |
 
-The last validated cross-repository checkpoint uses the annotated tag
-`stage/2026-09-17-official-dual-node-perftest`. The OpenURMA commit shown above
-is the exact model source used for that runtime validation; the stage tag is
-kept in this orchestration repository, which pins all participating sources.
+The bandwidth checkpoint was runtime-validated with the official UDMA path on
+2026-09-17. The previous latency checkpoint remains available as
+`stage/2026-09-17-official-dual-node-perftest`; a new bandwidth tag pins the
+revisions above. Stage tags are kept in this orchestration repository.
