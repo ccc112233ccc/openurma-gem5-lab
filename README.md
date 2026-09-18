@@ -186,18 +186,25 @@ provider uses its normal memory-backed SQ. The defaults contain no fitted
 device delays: switch, direct-WQE, SQ-fetch, per-WQEBB and synthetic
 payload-DMA service terms are all zero.
 
-To study the supplied two-node path through one L1 switch, change the topology
-explicitly rather than fitting the direct-link defaults to its end-to-end
-numbers. For example, two serialization stages model host-to-switch and
-switch-to-host transmission; add only a switch delay justified by the switch
-model or measurements:
+To study the supplied two-node path through one L1 switch, select the explicit
+switch topology rather than fitting the direct-link defaults to its end-to-end
+numbers. Each hop owns a 400-Gbit/s serialization queue and the configured link
+propagation delay. The switch has independent output-port queues and an optional
+fixed forwarding delay:
 
 ```bash
 bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
-  --profile server \
-  --peer-serialization-stages 2 \
+  --profile server --ub-port-count 2 \
+  --peer-topology l1-switch --peer-port-map 0,1 \
   --peer-switch-delay 0ns
 ```
+
+`--peer-port-map 0,1` means source port 0 exits the switch toward remote port 0
+and source port 1 exits toward remote port 1. The mapping is an experiment
+input, not hard-coded wiring: `1,0` crosses the paths, while `0,0` makes both
+source ports contend for remote port 0. In `l1-switch` mode, the default
+100-ns link delay is charged once from host to switch and once from switch to
+the remote host. `direct` mode charges it once end to end.
 
 The exact resolved values are written to `run-dual/run-manifest.txt`, so a
 result never depends on an unreported preset.
@@ -232,7 +239,8 @@ normal for this topology. Transport flows are pinned by a stable jetty/token
 hash; each port owns an independent 400-Gbit/s serialization timeline and
 cross-process queue, so two flows assigned to different ports can progress
 concurrently while one flow retains packet order. The current direct wiring is
-port 0 to port 0 and port 1 to port 1. This option models ports on one socket. It does not yet
+port 0 to port 0 and port 1 to port 1; switch mode uses the explicit port map
+described above. This option models ports on one socket. It does not yet
 model two NUMA sockets or a separate UDMA instance per socket.
 
 ```bash
@@ -256,7 +264,8 @@ bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
 
 Every model input has both a command-line option and an environment equivalent.
 Run `run-dual.sh --help` for the complete mapping. The principal controls are
-`--cpu-mode`, `--cpu-freq`, `--ub-port-count`, `--peer-link-rate-gbps`,
+`--cpu-mode`, `--cpu-freq`, `--ub-port-count`, `--peer-topology`,
+`--peer-port-map`, `--peer-link-rate-gbps`,
 `--peer-serialization-stages`, `--peer-switch-delay`,
 `--peer-link-overhead-bytes`, `--sq-control-bytes`, `--wqebb-bytes`,
 `--sq-sge-bytes`, `--direct-wqe-max-blocks`,

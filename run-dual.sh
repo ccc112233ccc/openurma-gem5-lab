@@ -121,6 +121,8 @@ CPU, cache, and memory:
 
 UB link:
   --ub-port-count N             OPENURMA_UB_PORT_COUNT
+  --peer-topology MODE          OPENURMA_PEER_TOPOLOGY (direct|l1-switch)
+  --peer-port-map LIST          OPENURMA_PEER_PORT_MAP (for example 0,1)
   --peer-latency-ns NS          OPENURMA_PEER_LATENCY_NS
   --sync-quantum-ns NS          OPENURMA_SYNC_QUANTUM_NS (default: lookahead)
   --peer-link-rate-gbps N       OPENURMA_PEER_LINK_RATE_GBPS
@@ -249,6 +251,8 @@ cli_mem_ctrl_frontend_latency=""
 cli_mem_ctrl_backend_latency=""
 cli_mem_ctrl_command_window=""
 cli_ub_port_count=""
+cli_peer_topology=""
+cli_peer_port_map=""
 cli_peer_latency_ns=""
 cli_sync_quantum_ns=""
 cli_peer_link_rate_gbps=""
@@ -460,6 +464,10 @@ while (( $# > 0 )); do
         --mem-ctrl-command-window=*) cli_mem_ctrl_command_window=${1#*=}; shift ;;
         --ub-port-count) need_value "$@"; cli_ub_port_count=$2; shift 2 ;;
         --ub-port-count=*) cli_ub_port_count=${1#*=}; shift ;;
+        --peer-topology) need_value "$@"; cli_peer_topology=$2; shift 2 ;;
+        --peer-topology=*) cli_peer_topology=${1#*=}; shift ;;
+        --peer-port-map) need_value "$@"; cli_peer_port_map=$2; shift 2 ;;
+        --peer-port-map=*) cli_peer_port_map=${1#*=}; shift ;;
         --peer-latency-ns) need_value "$@"; cli_peer_latency_ns=$2; shift 2 ;;
         --peer-latency-ns=*) cli_peer_latency_ns=${1#*=}; shift ;;
         --sync-quantum-ns) need_value "$@"; cli_sync_quantum_ns=$2; shift 2 ;;
@@ -602,6 +610,8 @@ profile_mem_ctrl_frontend_latency=10ns
 profile_mem_ctrl_backend_latency=10ns
 profile_mem_ctrl_command_window=10ns
 profile_ub_port_count=1
+profile_peer_topology=direct
+profile_peer_port_map=""
 profile_udma_poll_interval=10ns
 profile_udma_iotlb_entries=64
 profile_dma_max_outstanding=16
@@ -827,6 +837,8 @@ mem_ctrl_frontend_latency="${OPENURMA_MEM_CTRL_FRONTEND_LATENCY:-$profile_mem_ct
 mem_ctrl_backend_latency="${OPENURMA_MEM_CTRL_BACKEND_LATENCY:-$profile_mem_ctrl_backend_latency}"
 mem_ctrl_command_window="${OPENURMA_MEM_CTRL_COMMAND_WINDOW:-$profile_mem_ctrl_command_window}"
 ub_port_count="${OPENURMA_UB_PORT_COUNT:-$profile_ub_port_count}"
+peer_topology="${OPENURMA_PEER_TOPOLOGY:-$profile_peer_topology}"
+peer_port_map="${OPENURMA_PEER_PORT_MAP:-$profile_peer_port_map}"
 peer_latency_ns="${OPENURMA_PEER_LATENCY_NS:-100}"
 sync_quantum_ns="${OPENURMA_SYNC_QUANTUM_NS:-$peer_latency_ns}"
 peer_link_rate_gbps="${OPENURMA_PEER_LINK_RATE_GBPS:-$profile_peer_link_rate_gbps}"
@@ -938,6 +950,8 @@ provider="${OPENURMA_PROVIDER:-$profile_provider}"
 [[ -n "$cli_mem_ctrl_backend_latency" ]] && mem_ctrl_backend_latency=$cli_mem_ctrl_backend_latency
 [[ -n "$cli_mem_ctrl_command_window" ]] && mem_ctrl_command_window=$cli_mem_ctrl_command_window
 [[ -n "$cli_ub_port_count" ]] && ub_port_count=$cli_ub_port_count
+[[ -n "$cli_peer_topology" ]] && peer_topology=$cli_peer_topology
+[[ -n "$cli_peer_port_map" ]] && peer_port_map=$cli_peer_port_map
 [[ -n "$cli_peer_latency_ns" ]] && peer_latency_ns=$cli_peer_latency_ns
 [[ -n "$cli_sync_quantum_ns" ]] && sync_quantum_ns=$cli_sync_quantum_ns
 [[ -n "$cli_peer_link_rate_gbps" ]] && peer_link_rate_gbps=$cli_peer_link_rate_gbps
@@ -1197,6 +1211,22 @@ esac
     die "memory read/write switch burst counts must be positive"
 (( ub_port_count > 0 && ub_port_count <= 16 )) ||
     die "UB port count must be between 1 and 16"
+case "$peer_topology" in
+    direct|l1-switch) ;;
+    *) die "peer topology must be direct or l1-switch" ;;
+esac
+if [[ -n "$peer_port_map" ]]; then
+    IFS=',' read -r -a peer_port_map_entries <<<"$peer_port_map"
+    (( ${#peer_port_map_entries[@]} == ub_port_count )) ||
+        die "peer port map must contain exactly $ub_port_count entries"
+    for mapped_port in "${peer_port_map_entries[@]}"; do
+        case "$mapped_port" in
+            ''|*[!0-9]*) die "peer port map entries must be decimal port indices" ;;
+        esac
+        (( mapped_port < ub_port_count )) ||
+            die "peer port map entry $mapped_port is outside 0..$((ub_port_count - 1))"
+    done
+fi
 (( wqebb_bytes > 0 )) || die "WQEBB bytes must be positive"
 (( sq_sge_bytes > 0 )) || die "SQ SGE bytes must be positive"
 (( udma_iotlb_entries >= 0 )) || die "UDMA IOTLB entries must be non-negative"
@@ -1329,6 +1359,8 @@ memory_controller_command_window=$mem_ctrl_command_window
 peer_latency_ns=$peer_latency_ns
 sync_quantum_ns=$sync_quantum_ns
 ub_port_count=$ub_port_count
+peer_topology=$peer_topology
+peer_port_map=${peer_port_map:-identity}
 peer_ring_bytes=$peer_ring_bytes
 peer_link_rate_gbps=$peer_link_rate_gbps
 peer_serialization_stages=$peer_serialization_stages
@@ -1580,6 +1612,8 @@ launch_node() {
         --link-delay-ns=0 \
         --peer-ring="$ring" --peer-node="$node" \
         --ub-port-count="$ub_port_count" \
+        --peer-topology="$peer_topology" \
+        --peer-port-map="$peer_port_map" \
         --peer-link-latency="${peer_latency_ns}ns" \
         --peer-link-rate-gbps="$peer_link_rate_gbps" \
         --peer-serialization-stages="$peer_serialization_stages" \
@@ -1631,6 +1665,7 @@ echo "  cache: private $l1i_size I + $l1d_size D + $l2_size L2; shared $l3_size 
 echo "  memory: $mem_size modeled, Linux limited to $guest_mem_limit; $mem_channels x $mem_type, $mem_ranks rank/channel"
 echo "  resolved parameters: $run_root/run-manifest.txt"
 echo "  UB peer ring: $ring (${ub_port_count} physical port(s), ${peer_link_rate_gbps} Gbit/s per port, ${peer_latency_ns} ns propagation, ${peer_serialization_stages} serialization stage(s) per port)"
+echo "  UB topology: $peer_topology (source-to-destination port map: ${peer_port_map:-identity})"
 echo "  UB switch service delay: $peer_switch_delay"
 echo "  dist-gem5 switch: localhost:$actual_dist_port (${sync_quantum_ns} ns quantum)"
 echo "  OOB relay: $tap0 <-> $tap1 (setup only)"
