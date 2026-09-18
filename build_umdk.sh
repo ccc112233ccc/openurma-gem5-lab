@@ -6,7 +6,7 @@
 # remains clean and the result can be copied directly into the guest initramfs.
 set -euo pipefail
 
-PINNED_UMDK_SHA="6d89296f378b07049bda06230b734e598d9cd173"
+PINNED_UMDK_SHA="23e77b724d138ea00114605308f0994853e72f20"
 UMDK_SRC="${UMDK_SRC:-/workspace/OpenURMA/integration/umdk/vendor/umdk}"
 BUILD_DIR="${UMDK_BUILD_DIR:-/workspace/openurma-gem5-lab/artifacts/umdk-build}"
 JOBS="${JOBS:-2}"
