@@ -47,14 +47,13 @@ device discovery, the official topology ioctl, aggregation-device creation,
 and multi-context provider selection are all executing through the stock
 stack.
 
-## Deliberately open item
+## Completed in the following stage
 
-An end-to-end `send_lat --aggr_mode balance` currently stops after the first
-physical target-jetty TP is activated.  `--tp_aware` is not a workaround:
-the official aggregation provider rejects `urma_get_tp_list` on the virtual
-device with `EINVAL`.  The next stage must complete the multi-pJetty
-import/activation and error-cleanup hardware protocols.  It must not bypass
-them in `urma_perftest` or modify the official provider/driver.
+The multi-pJetty import/activation path and the receive-completion identity
+contract are now implemented by the hardware model.  An end-to-end official
+`send_lat --use_bonding --aggr_mode balance` run completes on both nodes and
+returns cleanly to both shells.  See `ubagg-dataplane-evidence.md` for the
+command, physical-port trace and the exact remaining UMMU limitation.
 
 `urma_admin show --whole` reports `port_count: 2`, but this OLK UDMA driver
 fills only `port_attr[0]`; values printed for `port1` are therefore not used
