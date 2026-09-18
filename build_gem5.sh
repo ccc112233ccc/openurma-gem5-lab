@@ -21,9 +21,9 @@ jobs="${JOBS:-1}"
 
 # These are repository object IDs, not moving branch or tag names.
 readonly GEM5_COMMIT=36b6c5b99c8bbbd7445173f1655240ad4b1bffd9
-readonly OPENURMA_COMMIT=ef1b29426208c15dec2fe04ca2073114b9331e48
+readonly OPENURMA_COMMIT=536f6b1c9672f383bb6f7dbf7a897d07f2f55d00
 readonly OPENCLICKNP_COMMIT=c1c6acc58032a1894507d88659b3cca668b0e1a5
-readonly UMDK_COMMIT=097c3a5d6b2234d6a070e3bfb26f6f49f0ce26f8
+readonly UMDK_COMMIT=6d89296f378b07049bda06230b734e598d9cd173
 
 [[ "$(uname -s)" == Linux ]] ||
     die "run this inside the ARM64 Linux build container"
