@@ -77,6 +77,40 @@ The identities are derived from the official Jetty context's `seid_idx` and
 the endpoint EID; they are not selected by the benchmark or hard-coded per
 test case.
 
+## Official bonding WRITE path
+
+The same topology also completes the stock provider's one-sided WRITE path.
+Run node 0 without `-S` and node 1 with `-S 10.0.0.1`:
+
+```bash
+OPENURMA_DIST_SYNC=1 urma_perftest write_lat \
+  -d bonding_dev_0 --eid_idx 0 --ctp --use_bonding \
+  --aggr_mode balance -s 128 -P 21116 -J 1 -I 0 \
+  -l 1 -n 8 -p 0
+```
+
+Both commands returned zero.  After excluding five synchronized warm-up
+deltas, the two retained samples reported:
+
+```text
+node0: 128 B, min 1.51 us, max 1.77 us, avg 1.64 us
+node1: 128 B, min 1.41 us, max 1.51 us, avg 1.46 us
+```
+
+Packet traces show that the unchanged aggregation provider alternated every
+operation between physical Jetty 1025 / TPN 4 / port 1 and physical Jetty
+1024 / TPN 3 / port 0.  On each path the model decoded the official UDMA WQE,
+sent a WRITE request (`op=0x82`), performed the remote DMA write, returned an
+ACK (`op=0x83`) on the same port and generated the matching send CQE (JFC 9
+or JFC 8 respectively).
+
+`OPENURMA_DIST_SYNC=1` is optional simulator test instrumentation in
+`urma_perftest`; it brackets the measured loop with gem5's conservative
+virtual-time synchronization and uses the existing control socket for a
+rendezvous.  It does not replace the official driver/provider queue, memory
+registration, WQE, packet or completion paths, and normal perftest behavior
+is unchanged when the variable is absent.
+
 ## Administrative completion behavior
 
 The model now captures the official CEQ context, writes CEQEs for JFC
