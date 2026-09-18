@@ -196,6 +196,7 @@ fixed forwarding delay:
 bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
   --profile server --ub-port-count 2 \
   --peer-topology l1-switch --peer-port-map 0,1 \
+  --peer-port-selection tp-context \
   --peer-switch-delay 0ns
 ```
 
@@ -235,13 +236,23 @@ bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
 
 The official UBUS discovery response contains two active physical-port TLVs.
 The official UDMA provider still exposes one logical `udma0` device, which is
-normal for this topology. Transport flows are pinned by a stable jetty/token
-hash; each port owns an independent 400-Gbit/s serialization timeline and
-cross-process queue, so two flows assigned to different ports can progress
-concurrently while one flow retains packet order. The current direct wiring is
+normal for this topology. By default, the simulator no longer invents an
+egress port from Jetty, token or opcode fields. The unmodified provider writes
+the official 24-bit TPN into each SQE; the unmodified kernel/control path first
+obtains that TPN with `GET_TP_LIST` and activates it with `ACTIVE_TP`; the
+modeled hardware then resolves the active TPN to the port selected for that TP.
+All fragments of one WRITE stay on that port, and READ responses and WRITE
+ACKs return through the request's ingress port. `--peer-port-selection
+legacy-hash` exists only for explicit comparison with the earlier mock path.
+
+Each port owns an independent 400-Gbit/s serialization timeline and
+cross-process queue, so TPs assigned to different ports can progress
+concurrently while one TP retains packet order. The current direct wiring is
 port 0 to port 0 and port 1 to port 1; switch mode uses the explicit port map
-described above. This option models ports on one socket. It does not yet
-model two NUMA sockets or a separate UDMA instance per socket.
+described above. This checkpoint implements single-port TP pinning. It does
+not yet implement the official bonding-group table and hardware hash required
+for one TP to stripe over several ports, two NUMA sockets, or a separate UDMA
+instance per socket.
 
 ```bash
 bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh
@@ -265,7 +276,7 @@ bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
 Every model input has both a command-line option and an environment equivalent.
 Run `run-dual.sh --help` for the complete mapping. The principal controls are
 `--cpu-mode`, `--cpu-freq`, `--ub-port-count`, `--peer-topology`,
-`--peer-port-map`, `--peer-link-rate-gbps`,
+`--peer-port-map`, `--peer-port-selection`, `--peer-link-rate-gbps`,
 `--peer-serialization-stages`, `--peer-switch-delay`,
 `--peer-link-overhead-bytes`, `--sq-control-bytes`, `--wqebb-bytes`,
 `--sq-sge-bytes`, `--direct-wqe-max-blocks`,

@@ -212,10 +212,34 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   `run-official-dual-v2-20260917/` and is intentionally ignored by Git.
 - No official OLK driver or UMDK provider source file was modified.
 
+### `stage/2026-09-18-official-tp-port-routing`
+
+- The unmodified stock UDMA provider's SQE `tpn` field is now decoded by the
+  device model. The default data path selects an egress port only from a TP
+  route allocated by official `GET_TP_LIST` and enabled by official
+  `ACTIVE_TP`; it no longer hashes Jetty, token and opcode fields.
+- The modeled UDMA capability reports the configured physical-port count. A
+  two-port run keeps a separate 400-Gbit/s serialization timeline and peer
+  ring queue for every port, with explicit switch port mapping.
+- A traced stock `send_lat` run showed node 0 TPN 94 and node 1 TPN 1009
+  allocated and activated on port 0; every official SEND SQE carried the
+  matching TPN and used port 0 without a missing-route fallback.
+- A subsequent stock bidirectional 8-KiB `write_bw` allocated TPNs 232 and
+  426 on port 1. Every 8088+104-byte WRITE fragment used port 1, and every
+  target-generated ACK returned on ingress port 1. Both endpoints completed
+  five iterations and returned zero.
+- `legacy-hash` remains only as an explicit comparison mode. This checkpoint
+  implements hardware execution of a control-plane-programmed, single-port TP;
+  it does not yet implement an official bonding-group table or one-TP
+  multi-port hashing.
+- Reproduction and representative logs are recorded in
+  `official-udma/tp-port-routing-evidence.md`. No official OLK driver or UMDK
+  provider source file was modified.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:
 
-- broaden the official data-path matrix beyond the validated CTP SEND_IMM
-  case, then implement additional optional hardware blocks such as CDMA,
-  OBMM and Sentry only when their official drivers require them.
+- implement the official bonding-group table and hardware-selected multi-port
+  TP behavior, then broaden optional hardware blocks such as CDMA, OBMM and
+  Sentry only when their official drivers require them.
