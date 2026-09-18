@@ -108,7 +108,7 @@ if ! load_one uburma.ko; then
 fi
 if [ "$OPENURMA_PROVIDER" = official ]; then
     for module in ubfi.ko ubus.ko openurma_ub_v2m.ko ummu-core.ko ummu.ko \
-                  hisi_ubus.ko ubase.ko udma.ko; do
+                  hisi_ubus.ko ubase.ko udma.ko ubagg.ko; do
         load_one "$module" || emergency_shell "$module failed to load"
     done
 else

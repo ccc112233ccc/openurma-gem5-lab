@@ -17,6 +17,7 @@ modules=(
     "$kernel_root/drivers/ub/ubus/vendor/hisilicon/hisi_ubus.ko"
     "$kernel_root/drivers/ub/ubase/ubase.ko"
     "$kernel_root/drivers/ub/urma/hw/udma/udma.ko"
+    "$kernel_root/drivers/ub/urma/ubagg/ubagg.ko"
 )
 
 for module in "${modules[@]}"; do

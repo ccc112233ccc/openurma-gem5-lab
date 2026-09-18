@@ -21,6 +21,9 @@ EXTRA_BINS="${EXTRA_BINS:-}"
 EXTRA_MODULES="${EXTRA_MODULES:-}"
 STOCK_UDMA_PROVIDER="${STOCK_UDMA_PROVIDER:-}"
 UMMU_SHIM="${UMMU_SHIM:-}"
+UBAGG_PROVIDER="${UBAGG_PROVIDER:-}"
+UBAGG_CLI="${UBAGG_CLI:-}"
+LIBTPSA="${LIBTPSA:-}"
 KERNEL_BUNDLE_DIR="${KERNEL_BUNDLE_DIR:-$LAB_DIR/artifacts/kernel}"
 
 usage() {
@@ -42,6 +45,9 @@ Optional environment:
                  OpenURMA provider (auto-detected in ARM_BUILD when present)
   UMMU_SHIM      simulation libummu.so.1 paired with STOCK_UDMA_PROVIDER
                  (auto-detected next to ARM_BUILD when present)
+  UBAGG_PROVIDER official liburma_ubagg.so (auto-detected in ARM_BUILD)
+  UBAGG_CLI      official ubagg_cli executable (auto-detected in ARM_BUILD)
+  LIBTPSA        official UVS control-plane library (auto-detected in ARM_BUILD)
   KERNEL_BUNDLE_DIR
                  persistent workspace bundle for the exact vmlinux/in-tree
                  modules packaged in the image (default: artifacts/kernel)
@@ -134,6 +140,20 @@ URMA_ADMIN="$(find_one urma_admin \
     "$ARM_BUILD/urma/tools/urma_admin/urma_admin")"
 URMA_PERFTEST="$(find_one urma_perftest \
     "$ARM_BUILD/urma/tools/urma_perftest/urma_perftest")"
+if [[ -z "$UBAGG_PROVIDER" && -f "$ARM_BUILD/urma/lib/urma/bond/liburma_ubagg.so.0.0.1" ]]; then
+    UBAGG_PROVIDER="$ARM_BUILD/urma/lib/urma/bond/liburma_ubagg.so.0.0.1"
+fi
+if [[ -z "$UBAGG_CLI" && -f "$ARM_BUILD/urma/tools/ubagg_cli/ubagg_cli" ]]; then
+    UBAGG_CLI="$ARM_BUILD/urma/tools/ubagg_cli/ubagg_cli"
+fi
+if [[ -z "$LIBTPSA" && -f "$ARM_BUILD/urma/lib/uvs/core/libtpsa.so.0.0.1" ]]; then
+    LIBTPSA="$ARM_BUILD/urma/lib/uvs/core/libtpsa.so.0.0.1"
+fi
+if [[ -n "$UBAGG_PROVIDER" || -n "$UBAGG_CLI" || -n "$LIBTPSA" ]]; then
+    [[ -f "$UBAGG_PROVIDER" ]] || die "official ubagg provider not found: $UBAGG_PROVIDER"
+    [[ -f "$UBAGG_CLI" ]] || die "official ubagg CLI not found: $UBAGG_CLI"
+    [[ -f "$LIBTPSA" ]] || die "official UVS library not found: $LIBTPSA"
+fi
 
 # A BUILD_STOCK_UDMA=enable build places the untouched official provider in
 # ARM_BUILD and its simulation-only UMMU ABI dependency in a sibling build
@@ -160,6 +180,11 @@ if [[ -n "$STOCK_UDMA_PROVIDER" ]]; then
     is_arm64_elf "$STOCK_UDMA_PROVIDER" ||
         die "not an AArch64 ELF artifact: $STOCK_UDMA_PROVIDER"
     is_arm64_elf "$UMMU_SHIM" || die "not an AArch64 ELF artifact: $UMMU_SHIM"
+fi
+if [[ -n "$UBAGG_PROVIDER" ]]; then
+    is_arm64_elf "$UBAGG_PROVIDER" || die "not an AArch64 ELF artifact: $UBAGG_PROVIDER"
+    is_arm64_elf "$UBAGG_CLI" || die "not an AArch64 ELF artifact: $UBAGG_CLI"
+    is_arm64_elf "$LIBTPSA" || die "not an AArch64 ELF artifact: $LIBTPSA"
 fi
 
 module_release() {
@@ -247,6 +272,13 @@ cp -L "$LIBCOMMON" "$STAGE/lib/liburma_common.so.0"
 cp -L "$URMA_ADMIN" "$STAGE/usr/bin/urma_admin"
 cp -L "$URMA_PERFTEST" "$STAGE/usr/bin/urma_perftest"
 chmod 0755 "$STAGE/usr/bin/urma_admin" "$STAGE/usr/bin/urma_perftest"
+if [[ -n "$UBAGG_PROVIDER" ]]; then
+    cp -L "$UBAGG_PROVIDER" "$STAGE/lib/urma/liburma_ubagg.so"
+    cp -L "$UBAGG_CLI" "$STAGE/usr/bin/ubagg_cli"
+    cp -L "$LIBTPSA" "$STAGE/lib/libtpsa.so.0"
+    chmod 0755 "$STAGE/lib/urma/liburma_ubagg.so" "$STAGE/usr/bin/ubagg_cli" \
+        "$STAGE/lib/libtpsa.so.0"
+fi
 
 # A tiny honest wrapper around the collective dist-gem5 pseudo operation.
 # It is intentionally named "toggle", not "on": invoking it a second time
@@ -290,12 +322,24 @@ PROVIDER_SRC="$OPENURMA_ROOT/integration/umdk/provider/openurma_provider_kernel.
     -Wl,--no-as-needed -lurma -lurma_common -lpthread -ldl
 chmod 0755 "$STAGE/lib/urma/liburma_openurma.so"
 
+if [[ -n "$LIBTPSA" ]]; then
+    "$CC" -O2 -Wall -Wl,-rpath,/lib \
+        -I"$UMDK_SRC/urma/lib/uvs/core/include" \
+        -L"$(dirname "$LIBTPSA")" \
+        -o "$STAGE/usr/bin/ou-ubagg-topology" \
+        "$LAB_DIR/tools/ou-ubagg-topology-mxe.c" -Wl,--no-as-needed -ltpsa
+    chmod 0755 "$STAGE/usr/bin/ou-ubagg-topology"
+fi
+
 available_providers=legacy
 if [[ -n "$STOCK_UDMA_PROVIDER" ]]; then
     cp -L "$STOCK_UDMA_PROVIDER" "$STAGE/lib/urma/liburma-udma.so"
     cp -L "$UMMU_SHIM" "$STAGE/lib/libummu.so.1"
     chmod 0755 "$STAGE/lib/urma/liburma-udma.so" "$STAGE/lib/libummu.so.1"
     available_providers="$available_providers udma"
+fi
+if [[ -f "$STAGE/lib/urma/liburma_ubagg.so" ]]; then
+    available_providers="$available_providers ubagg"
 fi
 printf '%s\n' "$available_providers" > "$STAGE/etc/openurma-available-providers"
 
@@ -385,6 +429,10 @@ queue=(
     "${extra_staged[@]}"
     "${optional_runtime[@]}"
 )
+if [[ -f "$STAGE/usr/bin/ubagg_cli" ]]; then
+    queue+=("$STAGE/usr/bin/ubagg_cli" "$STAGE/usr/bin/ou-ubagg-topology" \
+        "$STAGE/lib/urma/liburma_ubagg.so" "$STAGE/lib/libtpsa.so.0")
+fi
 if [[ -f "$STAGE/lib/urma/liburma-udma.so" ]]; then
     queue+=("$STAGE/lib/urma/liburma-udma.so" "$STAGE/lib/libummu.so.1")
 fi
@@ -462,7 +510,11 @@ sha256_file() {
     for ko in $EXTRA_MODULES; do printf ' %s' "$(basename "$ko")"; done
     printf '\n'
     printf 'providers=%s\n' "$available_providers"
-    printf 'commands=urma_admin urma_perftest k_smoke k_dataplane twonode_write ou-dist-sync ou-cpu-switch ou-enable-sync ou-net-up ou-help ou-status ou-smoke ou-dataplane ou-peer-server ou-peer-client ou-lat-server ou-lat-client\n'
+    printf 'commands=urma_admin urma_perftest'
+    if [[ -n "$UBAGG_PROVIDER" ]]; then
+        printf ' ubagg_cli ou-ubagg-topology'
+    fi
+    printf ' k_smoke k_dataplane twonode_write ou-dist-sync ou-cpu-switch ou-enable-sync ou-net-up ou-help ou-status ou-smoke ou-dataplane ou-peer-server ou-peer-client ou-lat-server ou-lat-client\n'
     # These hashes bind the image to the mutable inputs most likely to change
     # during latency-model work. run-dual.sh compares them before boot, which
     # catches both an old image and a transiently truncated Docker bind mount.
@@ -476,6 +528,16 @@ sha256_file() {
     printf 'ou_lat_client_sha256=%s\n' "$(sha256_file "$LAB_DIR/overlay/usr/local/bin/ou-lat-client")"
     printf 'urma_perftest_path=%s\n' "$URMA_PERFTEST"
     printf 'urma_perftest_sha256=%s\n' "$(sha256_file "$URMA_PERFTEST")"
+    if [[ -n "$UBAGG_PROVIDER" ]]; then
+        printf 'ubagg_provider_path=%s\n' "$UBAGG_PROVIDER"
+        printf 'ubagg_provider_sha256=%s\n' "$(sha256_file "$UBAGG_PROVIDER")"
+        printf 'ubagg_cli_path=%s\n' "$UBAGG_CLI"
+        printf 'ubagg_cli_sha256=%s\n' "$(sha256_file "$UBAGG_CLI")"
+        printf 'libtpsa_path=%s\n' "$LIBTPSA"
+        printf 'libtpsa_sha256=%s\n' "$(sha256_file "$LIBTPSA")"
+        printf 'ubagg_topology_source_path=%s\n' "$LAB_DIR/tools/ou-ubagg-topology-mxe.c"
+        printf 'ubagg_topology_source_sha256=%s\n' "$(sha256_file "$LAB_DIR/tools/ou-ubagg-topology-mxe.c")"
+    fi
     printf 'k_smoke_source_path=%s\n' "$OPENURMA_ROOT/integration/umdk/tests/k_smoke.c"
     printf 'k_smoke_source_sha256=%s\n' "$(sha256_file "$OPENURMA_ROOT/integration/umdk/tests/k_smoke.c")"
     printf 'k_smoke_binary_sha256=%s\n' "$(sha256_file "$STAGE/usr/bin/k_smoke")"

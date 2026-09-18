@@ -165,14 +165,15 @@ IMAGE="$KSRC/arch/arm64/boot/Image"
 IPV6_KO="$KSRC/net/ipv6/ipv6.ko"
 UBCORE_KO="$KSRC/drivers/ub/urma/ubcore/ubcore.ko"
 UBURMA_KO="$KSRC/drivers/ub/urma/uburma/uburma.ko"
+UBAGG_KO="$KSRC/drivers/ub/urma/ubagg/ubagg.ko"
 OPENURMA_KO="$KMOD_DIR/openurma_ubcore.ko"
 
-for artifact in "$VMLINUX" "$IMAGE" "$IPV6_KO" "$UBCORE_KO" "$UBURMA_KO" "$OPENURMA_KO"; do
+for artifact in "$VMLINUX" "$IMAGE" "$IPV6_KO" "$UBCORE_KO" "$UBURMA_KO" "$UBAGG_KO" "$OPENURMA_KO"; do
     [[ -s "$artifact" ]] || fail "missing build artifact: $artifact"
 done
 
 kernel_release="$(make -s -C "$KSRC" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" kernelrelease)"
-for module in "$IPV6_KO" "$UBCORE_KO" "$UBURMA_KO" "$OPENURMA_KO"; do
+for module in "$IPV6_KO" "$UBCORE_KO" "$UBURMA_KO" "$UBAGG_KO" "$OPENURMA_KO"; do
     vermagic="$(strings "$module" | sed -n 's/^vermagic=//p' | head -1)"
     case "$vermagic" in
         "$kernel_release "*) ;;
@@ -187,6 +188,7 @@ install -m 0644 "$KSRC/.config" "$ARTIFACT_DIR/kernel.config"
 install -m 0644 "$IPV6_KO" "$ARTIFACT_DIR/modules/ipv6.ko"
 install -m 0644 "$UBCORE_KO" "$ARTIFACT_DIR/modules/ubcore.ko"
 install -m 0644 "$UBURMA_KO" "$ARTIFACT_DIR/modules/uburma.ko"
+install -m 0644 "$UBAGG_KO" "$ARTIFACT_DIR/modules/ubagg.ko"
 install -m 0644 "$OPENURMA_KO" "$ARTIFACT_DIR/modules/openurma_ubcore.ko"
 printf '%s\n' "$kernel_release" > "$ARTIFACT_DIR/kernelrelease.txt"
 (

@@ -112,6 +112,9 @@ liburma_common="$BUILD_DIR/urma/common/liburma_common.so.0.0.1"
 urma_admin="$BUILD_DIR/urma/tools/urma_admin/urma_admin"
 urma_perftest="$BUILD_DIR/urma/tools/urma_perftest/urma_perftest"
 stock_udma="$BUILD_DIR/urma/hw/udma/liburma-udma.so"
+ubagg_provider="$BUILD_DIR/urma/lib/urma/bond/liburma_ubagg.so.0.0.1"
+ubagg_cli="$BUILD_DIR/urma/tools/ubagg_cli/ubagg_cli"
+libtpsa="$BUILD_DIR/urma/lib/uvs/core/libtpsa.so.0.0.1"
 ummu_shim="$UMMU_SHIM_BUILD_DIR/libummu.so.1"
 
 verify_aarch64() {
@@ -130,6 +133,9 @@ verify_aarch64 "$liburma"
 verify_aarch64 "$liburma_common"
 verify_aarch64 "$urma_admin"
 verify_aarch64 "$urma_perftest"
+verify_aarch64 "$ubagg_provider"
+verify_aarch64 "$ubagg_cli"
+verify_aarch64 "$libtpsa"
 
 if [[ "$BUILD_STOCK_UDMA" == "enable" ]]; then
     verify_aarch64 "$stock_udma"
