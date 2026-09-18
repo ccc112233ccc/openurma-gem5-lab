@@ -1202,6 +1202,11 @@ esac
 (( udma_iotlb_entries >= 0 )) || die "UDMA IOTLB entries must be non-negative"
 (( dma_max_outstanding > 0 )) || die "DMA max outstanding must be positive"
 
+# PeerRing has a fixed 4-KiB index header plus one 64 x 8-KiB queue for
+# every direction and physical port. Keep this formula synchronized with
+# NICTopologySC::PeerRing and its slot-offset calculation.
+peer_ring_bytes=$((4096 + 2 * ub_port_count * 64 * 8192))
+
 print_resolved_config() {
     cat <<EOF
 manifest_version=1
@@ -1324,6 +1329,7 @@ memory_controller_command_window=$mem_ctrl_command_window
 peer_latency_ns=$peer_latency_ns
 sync_quantum_ns=$sync_quantum_ns
 ub_port_count=$ub_port_count
+peer_ring_bytes=$peer_ring_bytes
 peer_link_rate_gbps=$peer_link_rate_gbps
 peer_serialization_stages=$peer_serialization_stages
 peer_switch_delay=$peer_switch_delay
@@ -1444,8 +1450,8 @@ docker exec "$container" mkdir -p "$run_root/node0" "$run_root/node1" "$run_root
 print_resolved_config | docker exec -i "$container" sh -c \
     'umask 022; tee "$1" >/dev/null' _ "$run_root/run-manifest.txt"
 docker exec "$container" rm -f "$ring" "$tap0" "$tap1"
-# Must match static_assert(sizeof(NICTopologySC::PeerRing)) in NICTopologySC.cc.
-docker exec "$container" truncate -s 1048832 "$ring"
+# Must match the per-port trailing-slot ABI in NICTopologySC.cc.
+docker exec "$container" truncate -s "$peer_ring_bytes" "$ring"
 
 # The stock dist-gem5 switch owns the synchronization protocol.  It starts
 # first and waits for both node connections, just like util/dist/gem5-dist.sh.

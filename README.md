@@ -122,8 +122,8 @@ kill PID 1.
 ## Two independent interactive hosts
 
 `run-dual.sh` starts two separate gem5 processes.  Each process owns an OLK-6.6
-kernel, memory image, OpenURMA NIC and serial console.  The OpenURMA NICs exchange
-timestamped UB packets over a shared mmap ring. A host-relayed e1000 link carries
+kernel, memory image, OpenURMA NIC and serial console. The OpenURMA NICs exchange
+timestamped UB packets over independent per-port queues in one mmap region. A host-relayed e1000 link carries
 only the stock `urma_perftest` TCP handshake and resource exchange; it is kept
 outside the measured interval.
 
@@ -206,10 +206,10 @@ The default one-way UB propagation delay is 100 ns. It is also the positive
 lookahead: every ring DATA record carries an `arrival_tick`, and a receiver may
 not consume the record early. Arrival times are monotonic on each physical port;
 they need not be globally monotonic when several ports transmit concurrently.
-The current cross-process transport publishes all ports into one conservative
-FIFO, so an earlier-published packet can temporarily hold a later packet from a
-different port. This is safe but can understate multi-port concurrency; separate
-per-port transport queues are the next fidelity step.
+The cross-process transport gives every direction and physical port its own
+64-slot FIFO. Every record carries explicit source and destination port IDs.
+The receiver merges ready queue heads by virtual arrival time, so a delayed
+packet on one port cannot block an already-arrived packet on another port.
 During the actual latency loop, gem5's distributed conservative barrier uses
 the largest causal quantum by default: `quantum = lookahead = 100 ns`. This is
 also stock `DistEtherLink`'s default relationship and avoids twice as many
@@ -229,9 +229,10 @@ bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
 The official UBUS discovery response contains two active physical-port TLVs.
 The official UDMA provider still exposes one logical `udma0` device, which is
 normal for this topology. Transport flows are pinned by a stable jetty/token
-hash; each port owns an independent 400-Gbit/s serialization timeline, so two
-flows assigned to different ports can progress concurrently while one flow
-retains packet order. This option models ports on one socket. It does not yet
+hash; each port owns an independent 400-Gbit/s serialization timeline and
+cross-process queue, so two flows assigned to different ports can progress
+concurrently while one flow retains packet order. The current direct wiring is
+port 0 to port 0 and port 1 to port 1. This option models ports on one socket. It does not yet
 model two NUMA sockets or a separate UDMA instance per socket.
 
 ```bash
@@ -475,7 +476,7 @@ in the model; they are not hardware-comparable SEND results and are deliberately
 excluded here. Therefore this single-Jetty CTP SEND experiment does not reach
 the 400-Gbit/s line-rate plateau within the supported message-size range. Use a
 proper WRITE data path or additional legal parallel streams to study saturation.
-A finite 64-slot peer ring still applies backpressure and retries an unconsumed
+A finite 64-slot ring on each physical port still applies backpressure and retries an unconsumed
 SQ WQE; ring-full is no longer treated as a simulator panic. These numbers are
 SEND results and must not be reported as `write_bw` results. The independent
 RMA READ/WRITE path described below is used for larger transfers.
@@ -535,7 +536,7 @@ A non-inline RMA WQE does not contain the payload. Its 48-byte control section
 holds the remote segment/address and its 16-byte SGE holds local address,
 length and token, so a one-SGE READ/WRITE remains one 64-byte WQEBB as transfer
 length grows. The simulator therefore queues the WQE once and streams 8088-byte
-maximum link fragments through the finite 64-slot peer ring. It never requires
+maximum link fragments through a finite 64-slot physical-port ring. It never requires
 all fragments to fit in the ring at once.
 
 As a mechanism-only test beyond the advertised contract, 128-KiB WRITE and
