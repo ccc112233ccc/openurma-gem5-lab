@@ -21,7 +21,7 @@ jobs="${JOBS:-1}"
 
 # These are repository object IDs, not moving branch or tag names.
 readonly GEM5_COMMIT=36b6c5b99c8bbbd7445173f1655240ad4b1bffd9
-readonly OPENURMA_COMMIT=b5235eb3e3e7a1801c700642af6df7dc1f8fcccb
+readonly OPENURMA_COMMIT=7045b78d2481311a65b079e18ca1eb38f808e5e3
 readonly OPENCLICKNP_COMMIT=c1c6acc58032a1894507d88659b3cca668b0e1a5
 readonly UMDK_COMMIT=23e77b724d138ea00114605308f0994853e72f20
 

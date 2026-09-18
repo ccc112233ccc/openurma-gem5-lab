@@ -164,7 +164,7 @@ bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh
 ```
 
 It runs one `AtomicSimpleCPU` per guest with the UDMA provider and the same
-400 Gbit/s direct UB link used by the detailed profiles. It keeps the official
+400 Gbit/s-per-port direct UB link used by the detailed profiles. It keeps the official
 kernel modules, UMDK libraries, `urma_admin`, and `urma_perftest`; only detailed
 CPU/cache timing is bypassed. Use it for driver bring-up, command validation,
 resource setup, and end-to-end traffic checks.
@@ -179,7 +179,7 @@ That profile still boots with `AtomicSimpleCPU`, switches to the four-core
 `ArmO3CPU`/cache/DDR model for the measured ROI, and switches back afterward.
 
 The older `udma400` profile remains as a fast `atomic_cache` diagnostic. All
-three UDMA profiles use a 400 Gbit/s UB port and one serialization stage for the direct
+three UDMA profiles use 400 Gbit/s per UB port and one serialization stage for the direct
 link between the two simulated hosts. Their UDMA layout inputs are a 48-byte
 SEND control area and 64-byte WQEBBs; direct WQE is disabled so the official
 provider uses its normal memory-backed SQ. The defaults contain no fitted
@@ -203,8 +203,13 @@ The exact resolved values are written to `run-dual/run-manifest.txt`, so a
 result never depends on an unreported preset.
 
 The default one-way UB propagation delay is 100 ns. It is also the positive
-lookahead: every ring DATA record carries an `arrival_tick`, timestamps are
-monotonic in each direction, and a receiver may not consume the record early.
+lookahead: every ring DATA record carries an `arrival_tick`, and a receiver may
+not consume the record early. Arrival times are monotonic on each physical port;
+they need not be globally monotonic when several ports transmit concurrently.
+The current cross-process transport publishes all ports into one conservative
+FIFO, so an earlier-published packet can temporarily hold a later packet from a
+different port. This is safe but can understate multi-port concurrency; separate
+per-port transport queues are the next fidelity step.
 During the actual latency loop, gem5's distributed conservative barrier uses
 the largest causal quantum by default: `quantum = lookahead = 100 ns`. This is
 also stock `DistEtherLink`'s default relationship and avoids twice as many
@@ -212,6 +217,22 @@ barriers as a 50 ns quantum. Both values remain independently configurable, and
 the launcher enforces `0 < quantum <= lookahead`. UMDK setup is left outside
 this fine-grained epoch because synchronizing seconds of process startup at
 nanosecond resolution is correct but needlessly slow.
+
+Each simulated socket can advertise multiple physical UB ports without turning
+them into one wider link. For example, the current dual-port bring-up is:
+
+```bash
+bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
+  --profile fast --provider official --ub-port-count 2
+```
+
+The official UBUS discovery response contains two active physical-port TLVs.
+The official UDMA provider still exposes one logical `udma0` device, which is
+normal for this topology. Transport flows are pinned by a stable jetty/token
+hash; each port owns an independent 400-Gbit/s serialization timeline, so two
+flows assigned to different ports can progress concurrently while one flow
+retains packet order. This option models ports on one socket. It does not yet
+model two NUMA sockets or a separate UDMA instance per socket.
 
 ```bash
 bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh
@@ -234,7 +255,7 @@ bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
 
 Every model input has both a command-line option and an environment equivalent.
 Run `run-dual.sh --help` for the complete mapping. The principal controls are
-`--cpu-mode`, `--cpu-freq`, `--peer-link-rate-gbps`,
+`--cpu-mode`, `--cpu-freq`, `--ub-port-count`, `--peer-link-rate-gbps`,
 `--peer-serialization-stages`, `--peer-switch-delay`,
 `--peer-link-overhead-bytes`, `--sq-control-bytes`, `--wqebb-bytes`,
 `--sq-sge-bytes`, `--direct-wqe-max-blocks`,
