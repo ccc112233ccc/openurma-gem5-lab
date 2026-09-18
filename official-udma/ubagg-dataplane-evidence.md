@@ -111,6 +111,46 @@ rendezvous.  It does not replace the official driver/provider queue, memory
 registration, WQE, packet or completion paths, and normal perftest behavior
 is unchanged when the variable is absent.
 
+## Official bonding READ path
+
+One-sided READ uses the same official topology and resources.  Node 0 runs
+the command without `-S`; node 1 appends `-S 10.0.0.1`:
+
+```bash
+OPENURMA_DIST_SYNC=1 urma_perftest read_lat \
+  -d bonding_dev_0 --eid_idx 0 --ctp --use_bonding \
+  --aggr_mode balance -s 128 -P 21117 -J 1 -I 0 \
+  -l 1 -n 8 -p 0
+```
+
+The server normally has no READ worker because READ is one-sided.  With the
+optional distributed synchronization enabled it now remains as a collective
+gem5 synchronization participant until the client reports that its final
+response arrived.  Only the client posts official READ WQEs and reports
+latency; the server still performs no benchmark-side data operation.
+
+Both processes returned zero.  The client reported:
+
+```text
+node1: 128 B, min 2.78 us, max 2.98 us, avg 2.88 us
+```
+
+The trace contains eight complete hardware-model transactions.  Successive
+official WQEs alternate between these paths:
+
+```text
+physical Jetty 1025 / TPN 4 / port 1: READ_REQ 0x84 -> READ_RESP 0x85 -> JFC 9 CQE
+physical Jetty 1024 / TPN 3 / port 0: READ_REQ 0x84 -> READ_RESP 0x85 -> JFC 8 CQE
+```
+
+For each request, the responder resolves the imported remote segment, reads
+128 bytes through its UMMU-backed DMA path and returns the payload on the
+request's ingress port.  The requester writes that response into the local
+registered segment and raises the send completion only after the full response
+has arrived.  Thus the measured loop exercises the official provider's READ
+WQE layout plus modeled request, remote DMA, response, local DMA and CQE
+behavior rather than converting READ into a benchmark-side memory copy.
+
 ## Administrative completion behavior
 
 The model now captures the official CEQ context, writes CEQEs for JFC
