@@ -1,10 +1,15 @@
 # Official UB aggregation dataplane stage
 
 This stage runs the stock OLK 6.6 UB/UMMU/UBASE/UDMA modules, stock UMDK
-`liburma`, stock UDMA and UB aggregation providers, and stock
-`urma_perftest`.  No benchmark, provider or kernel-driver source is changed.
-The simulator supplies the missing device-side queue execution, completion
-events, packet transport and TP-to-port behavior.
+`liburma`, stock UDMA and UB aggregation providers, and `urma_perftest`.
+The provider and kernel-driver sources are unchanged.  The benchmark has an
+optional `OPENURMA_DIST_SYNC=1` coordination path: it brackets the measured
+loop with gem5's conservative synchronization, keeps the one-sided server in
+the collective, and executes the required single worker inline so Linux
+thread creation stays outside the 100-ns interval.  Its ordinary behavior is
+unchanged when the environment variable is absent.  The simulator supplies
+the missing device-side queue execution, completion events, packet transport
+and TP-to-port behavior.
 
 ## Reproduction
 
@@ -151,6 +156,42 @@ has arrived.  Thus the measured loop exercises the official provider's READ
 WQE layout plus modeled request, remote DMA, response, local DMA and CQE
 behavior rather than converting READ into a benchmark-side memory copy.
 
+The same READ path was also exercised with a 64-KiB payload.  The official
+provider still emitted one fixed-format WQE containing address and length;
+the hardware model fragmented the response into nine transport packets
+(eight 8088-byte fragments plus the final 832 bytes) and raised the CQE only
+after the complete response had been written to the registered destination.
+
+### Repeated execution in one boot
+
+Two complete 128-byte READ tests were run consecutively on the same guest
+pair, using ports 21117 and 21118, without rebooting or reinstalling the
+topology.  Both commands returned zero and both reported the same short-run
+statistics:
+
+```text
+128 B, 8 iterations, 5 warm-up deltas excluded, 2 measured samples
+min 2.78 us, max 2.98 us, median 2.86 us, avg 2.88 us
+```
+
+The second process pair created new physical Jettys 1026 and 1027, new TPs 5
+and 6, and new JFC/JFR contexts.  Its eight READ requests alternated between
+TP 6 / port 1 and TP 5 / port 0; all eight responses returned on the matching
+port.  There were no CRQ-write, SQ-WQE, SGE or payload-DMA errors.
+
+This repeatability required two device-lifetime behaviors in the model.  It
+retains queue-context TID roots after userspace teardown for already-programmed
+hardware queues, and it retains the first valid translation of the kernel
+UDMA mailbox DMA-pool pages just as it already does for CSQ, CRQ, AEQ and CEQ.
+Consequently a failed userspace UMMU invalidation cannot make a later official
+mailbox command read stale or unmapped memory.
+
+At the synchronization boundary, all non-halted CPU contexts now receive a
+common `quiesceUntil` deadline.  Interrupt and scheduler wakeups before that
+deadline are deferred, while the SystemC peer worker sleeps directly to the
+initial common tick rather than polling an empty ring every 10 ns.  Periodic
+100-ns synchronization remains active during the actual WQE/completion loop.
+
 ## Administrative completion behavior
 
 The model now captures the official CEQ context, writes CEQEs for JFC
@@ -161,11 +202,9 @@ run, and the earlier event-mode mailbox timeout (`ret=-16`) is gone.
 
 ## Remaining limitation
 
-The official UMMU driver currently logs `invalidate cfg_table failed,
-ret=-19` while releasing user contexts and TIDs.  Probe itself succeeds, but
-the model environment does not yet give `ummu_core_invalidate_cfg_table()` a
-matching registered device/domain for every UDMA TID.  This is a control-plane
-bookkeeping gap rather than a dropped UBASE mailbox completion: resource
-destruction completes and both applications return zero.  It remains the
-next UMMU integration item and is not hidden or converted into benchmark-side
-success.
+The official UMMU driver still logs `invalidate cfg_table failed, ret=-19`
+while releasing user contexts and TIDs.  Probe succeeds and the modeled
+hardware now preserves the mappings that genuinely have device lifetime, so
+resource destruction and subsequent recreation both complete.  The warning
+remains a UMMU control-plane bookkeeping gap to fix; it is not suppressed or
+converted into benchmark-side success.
