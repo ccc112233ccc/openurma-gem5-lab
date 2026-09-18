@@ -110,7 +110,34 @@ opcode 6 for READ). An 8192-byte operation is visibly split into 8088+104 bytes
 and a 65536-byte operation into nine fragments.
 
 This extends the useful transfer range beyond CTP SEND's official 4096-byte
-limit. The currently validated RMA range ends at 64 KiB; larger advertised
-sizes and negative token/permission checks remain separate gates. Complete
-local logs are retained under `run-rma-final-20260917/` and are excluded from
-Git.
+limit. The formal gate ends at the 64-KiB `max_read_size`/`max_write_size`
+currently returned by the modeled firmware. Negative token/permission checks
+remain separate gates. Complete local logs are retained under
+`run-rma-final-20260917/` and are excluded from Git.
+
+## Fixed-WQE large-transfer diagnostic
+
+Validation on 2026-09-18 removed an artificial simulator restriction that
+required every WRITE fragment to fit in the 64-slot peer ring simultaneously.
+The simulator now accepts the WQE once and streams fragments as ring capacity
+becomes available. This matches the official provider layout: the ordinary
+RMA control section is 48 bytes and one SGE is 16 bytes, so a non-inline,
+one-SGE READ or WRITE occupies one 64-byte WQEBB regardless of referenced
+payload length.
+
+The following deliberately out-of-contract diagnostics completed on both
+endpoints with five iterations, one Jetty and one outstanding operation:
+
+| operation | bytes | average MiB/s | fragments per WQE |
+| --- | ---: | ---: | ---: |
+| WRITE | 131072 | 44,563.75 | 17 |
+| WRITE | 1048576 | 47,983.57 | 130 |
+| READ | 1048576 | 49,567.88 | 130 response fragments |
+
+Each endpoint returned zero. The 1-MiB commands used `-s 1048576 -n 5 -l 1
+-Q 1 -B`; WRITE used port 21320 and READ used 21321. These results validate
+WQE decoding, UMMU traversal and multi-window link streaming, but do not claim
+that the current modeled device advertises a 1-MiB operation limit. That limit
+remains 64 KiB until a hardware-backed firmware capability profile supplies a
+larger value. Logs are retained in `run-rma-large-final-20260918/` and excluded
+from Git.

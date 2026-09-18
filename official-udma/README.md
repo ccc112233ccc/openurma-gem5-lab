@@ -30,6 +30,12 @@ the baseline and must not be reset as part of official-driver bring-up.
 | G6 | Two-node `urma_perftest send_lat` completes through official `udma.ko` | passed; two independent gem5 guests exchange CTP SEND_IMM traffic |
 | G7 | Two-node official-provider RMA READ/WRITE moves remote memory and completes | passed; bidirectional `read_bw` and `write_bw` validated at 128 B, 8 KiB and 64 KiB |
 
+G7 deliberately follows the 64-KiB READ/WRITE capability currently returned
+by the modeled firmware. Separate out-of-contract diagnostics have exercised a
+fixed one-WQEBB operation through 128 KiB and 1 MiB using streamed link
+fragments; see `dual-node-perftest-evidence.md`. They validate the mechanism but
+do not silently increase the advertised device limit.
+
 The intermediate one-guest loopback gate is also passed: two unmodified stock
 `urma_perftest` processes complete five bidirectional 128-byte iterations
 through the official kernel driver and provider. This validates the official

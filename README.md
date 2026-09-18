@@ -507,10 +507,31 @@ endpoints. As elsewhere, `MB/sec` is the benchmark's binary MiB/s label:
 
 Unlike CTP SEND's official 4-KiB message limit, RMA transfers are fragmented
 internally and have been validated here through 64 KiB. This is the currently
-verified range, not a claim that every larger provider-advertised size already
-works. Remote token-value and access-permission fault enforcement also remains
-a later correctness gate; the present path validates registered-address
-translation, payload movement, ordering and completion behavior.
+advertised device-contract range: the modeled firmware reports 64 KiB in the
+official driver's separate `max_read_size` and `max_write_size` fields.
+
+A non-inline RMA WQE does not contain the payload. Its 48-byte control section
+holds the remote segment/address and its 16-byte SGE holds local address,
+length and token, so a one-SGE READ/WRITE remains one 64-byte WQEBB as transfer
+length grows. The simulator therefore queues the WQE once and streams 8088-byte
+maximum link fragments through the finite 64-slot peer ring. It never requires
+all fragments to fit in the ring at once.
+
+As a mechanism-only test beyond the advertised contract, 128-KiB WRITE and
+1-MiB READ/WRITE also completed on both endpoints:
+
+| operation | bytes | average MiB/s | link fragments per WQE |
+| --- | ---: | ---: | ---: |
+| WRITE | 131072 | 44,563.75 | 17 |
+| WRITE | 1048576 | 47,983.57 | 130 |
+| READ | 1048576 | 49,567.88 | 130 response fragments |
+
+These rows prove fixed-size WQE decoding and multi-window streaming; they do
+not raise the device capability exposed to the official driver. A future
+hardware profile may supply larger firmware-derived READ/WRITE limits without
+changing WQE layout. Remote token-value and access-permission fault enforcement
+also remains a later correctness gate; the present path validates
+registered-address translation, payload movement, ordering and completion.
 
 There is a second, upstream `send_lat` sampling detail which matters when
 comparing short and long runs. SEND-LAT actually defaults to a JFR depth of 512
