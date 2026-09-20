@@ -34,10 +34,10 @@ cd openurma-gem5-lab
 ./setup.sh --sources-only
 ```
 
-完整构建成功后启动默认的快速双节点：
+完整构建成功后，以快速 CPU 模式启动官方完整驱动栈双节点：
 
 ```bash
-./run-dual.sh
+./run-dual.sh --profile fast --provider official
 ./status-dual.sh
 ```
 

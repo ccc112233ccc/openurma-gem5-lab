@@ -68,4 +68,4 @@ echo "[setup] building the complete stack; the first build can take a long time"
 docker exec -e JOBS="$jobs" "$container" \
     bash /workspace/openurma-gem5-lab/scripts/build-all.sh
 echo "[setup] PASS"
-echo "Start the two guests with: ./run-dual.sh"
+echo "Start the official two-node stack with: ./run-dual.sh --profile fast --provider official"
