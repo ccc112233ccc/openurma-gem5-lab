@@ -41,6 +41,12 @@ cd openurma-gem5-lab
 ./status-dual.sh
 ```
 
+等 `status-dual.sh` 显示两个 `guest shell ready` 后，完成双端控制网络初始化：
+
+```bash
+./sync-dual.sh
+```
+
 再开两个终端连接串口：
 
 ```bash
