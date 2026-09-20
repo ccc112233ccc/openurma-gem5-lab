@@ -1,0 +1,214 @@
+From 05fc6b2642c560cf42bdc4a47f0042154993dbba Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Sat, 19 Sep 2026 00:28:46 +0800
+Subject: [PATCH 27/27] Preserve device DMA state across official RMA runs
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 87 ++++++++++++++++---
+ .../gem5_scaffold/src/NICTopologySC.hh        |  5 ++
+ integration/umdk/vendor/umdk                  |  2 +-
+ 3 files changed, 79 insertions(+), 15 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 7fd8ad1..7839082 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -45,6 +45,7 @@ using namespace openclicknp;
+ #include "mem/port_proxy.hh"
+ #include "mem/physical.hh"
+ #include "cpu/thread_context.hh"
++#include "dev/net/dist_iface.hh"
+ #include "arch/arm/regs/misc.hh"
+ #include "sim/core.hh"
+ #include "sim/cur_tick.hh"
+@@ -957,9 +958,18 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+             std::memcpy(desc.data(), event.data() + event_offset, chunk);
+             event_offset += chunk;
+         }
+-        if (!ummu_dma(base + uint64_t(tail) * DescriptorBytes,
+-                      desc.data(), desc.size(), true))
++        const uint64_t descriptor_iova =
++            base + uint64_t(tail) * DescriptorBytes;
++        // CRQ is an administrative ring programmed for the lifetime of the
++        // device.  Use the same retained DMA translation as CSQ/AEQ/CEQ:
++        // destroying a userspace UDMA context must not invalidate an already
++        // programmed control queue in hardware.
++        if (!ubase_cmdq_dma(descriptor_iova, desc.data(), desc.size(), true)) {
++            std::cerr << "[NIC ubase] failed to write CRQ descriptor iova=0x"
++                      << std::hex << descriptor_iova << std::dec
++                      << " tail=" << tail << "\n";
+             return false;
++        }
+         tail = (tail + 1) % depth;
+     }
+     ubase_cmdq_regs_[CrqTail] = tail;
+@@ -1058,7 +1068,8 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+         openurma_udma::storeLe32(context.data(), 1U << 16); // READY state
+         openurma_udma::storeLe32(context.data() + 26 * sizeof(uint32_t),
+                                  1U << 26);
+-        if (!ummu_dma(context_iova, context.data(), context.size(), true)) {
++        if (!ubase_cmdq_dma(context_iova, context.data(), context.size(),
++                            true)) {
+             std::cerr << "[NIC udma official] failed to return JFS query id="
+                       << tag << "\n";
+         }
+@@ -1066,7 +1077,8 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+ 
+     if (command == CreateAeqContext && context_iova) {
+         std::array<uint8_t, 64> context{};
+-        if (ummu_dma(context_iova, context.data(), context.size(), false)) {
++        if (ubase_cmdq_dma(context_iova, context.data(), context.size(),
++                           false)) {
+             const uint32_t word1 = openurma_udma::loadLe32(context.data() + 4);
+             const uint32_t word2 = openurma_udma::loadLe32(context.data() + 8);
+             const uint32_t word3 = openurma_udma::loadLe32(context.data() + 12);
+@@ -1085,7 +1097,8 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+ 
+     if (command == CreateCeqContext && context_iova) {
+         std::array<uint8_t, 64> context{};
+-        if (ummu_dma(context_iova, context.data(), context.size(), false)) {
++        if (ubase_cmdq_dma(context_iova, context.data(), context.size(),
++                           false)) {
+             const uint32_t word1 = openurma_udma::loadLe32(context.data() + 4);
+             const uint32_t word2 = openurma_udma::loadLe32(context.data() + 8);
+             const uint32_t word3 = openurma_udma::loadLe32(context.data() + 12);
+@@ -1108,7 +1121,12 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+     if ((command == CreateJfsContext || command == CreateJfcContext ||
+          command == CreateJfrContext) && context_iova) {
+         std::array<uint8_t, 128> context{};
+-        if (ummu_dma(context_iova, context.data(), context.size(), false)) {
++        // The mailbox comes from the driver's device-lifetime DMA pool, not
++        // from the userspace queue TID being created.  Retain its first valid
++        // page translation just like CSQ/CRQ/AEQ/CEQ so a userspace TID
++        // teardown cannot make later mailbox commands unreadable.
++        if (ubase_cmdq_dma(context_iova, context.data(), context.size(),
++                           false)) {
+             const auto dw = [&context](size_t index) {
+                 return openurma_udma::loadLe32(
+                     context.data() + index * sizeof(uint32_t));
+@@ -2904,6 +2922,12 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+                                         jetty.sq_va, jetty.sq_bytes,
+                                         wqe_offset, raw.data(), raw.size(),
+                                         false)) {
++                std::cerr << "[NIC udma] SQ WQE DMA failed jetty="
++                          << jetty.id << " context=" << jetty.context_id
++                          << " token=" << jetty.token_id << " sq_va=0x"
++                          << std::hex << jetty.sq_va << " offset=0x"
++                          << wqe_offset << std::dec << " bytes="
++                          << raw.size() << "\n";
+                 return false;
+             }
+         }
+@@ -3015,6 +3039,10 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+                         jetty.sq_bytes,
+                         wqe_offset + 48 + index * raw_sge.size(),
+                         raw_sge.data(), raw_sge.size(), false)) {
++                    std::cerr << "[NIC udma] SQ SGE DMA failed jetty="
++                              << jetty.id << " context=" << jetty.context_id
++                              << " token=" << jetty.token_id << " index="
++                              << index << "\n";
+                     return false;
+                 }
+                 openurma_udma::Sge sge{
+@@ -3034,6 +3062,11 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+                         jetty.official, jetty.context_id,
+                         jetty.payload_token_id, sge.va,
+                         payload.data() + copied, sge.length, false))) {
++                    std::cerr << "[NIC udma] SQ payload DMA failed jetty="
++                              << jetty.id << " context=" << jetty.context_id
++                              << " token=" << jetty.payload_token_id
++                              << " va=0x" << std::hex << sge.va << std::dec
++                              << " len=" << sge.length << "\n";
+                     return false;
+                 }
+                 copied += sge.length;
+@@ -3041,8 +3074,12 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+         }
+ 
+         if ((wqe.opcode() == 0 || wqe.opcode() == 1) &&
+-            payload.size() > OU_PEER_MAX_PAYLOAD)
++            payload.size() > OU_PEER_MAX_PAYLOAD) {
++            std::cerr << "[NIC udma] SEND payload exceeds modeled packet jetty="
++                      << jetty.id << " len=" << payload.size()
++                      << " max=" << OU_PEER_MAX_PAYLOAD << "\n";
+             return false;
++        }
+ 
+         UdmaRxWork rx{wqe.remoteJetty(), wqe.opcode(),
+                       wqe.immediate(), payload};
+@@ -3190,8 +3227,25 @@ NICTopologySC::timing_dma_worker()
+             (peer_node_id_ >= 0 || !udma_rx_pending_.empty());
+         if (timing_dma_queue_.empty() && udma_sq_work_.empty()) {
+             if (needs_poll) {
+-                const gem5::Tick ticks = std::max<gem5::Tick>(
++                gem5::Tick ticks = std::max<gem5::Tick>(
+                     1, udma_poll_interval_);
++                const gem5::Tick startup_sync =
++                    gem5::DistIface::startupSyncTick();
++                // toggleSync() has stopped every local CPU until all gem5
++                // processes reach the first common tick.  No peer can issue
++                // a new WQE in this interval, so avoid millions of empty
++                // shared-ring polls.  Periodic synchronized execution keeps
++                // the normal configured polling interval.
++                if (startup_sync > gem5::curTick()) {
++                    if (ou_packet_trace_enabled()) {
++                        std::cerr
++                            << "[NIC peer] sleeping to initial dist sync "
++                            << "current=" << gem5::curTick()
++                            << " target=" << startup_sync << "\n";
++                    }
++                    ticks = std::max(ticks,
++                                     startup_sync - gem5::curTick());
++                }
+                 sc_core::wait(sc_core::sc_time::from_value(ticks),
+                               timing_dma_kick_);
+             } else {
+@@ -3505,14 +3559,19 @@ NICTopologySC::ummu_translate_iova_tid(uint32_t token_id, uint64_t iova)
+     if (!tct_base)
+         return 0;
+ 
++    uint64_t ttbr = 0;
+     std::array<uint8_t, TctEntryBytes> entry{};
+-    if (!ou_dma(tct_base + uint64_t(token_id) * TctEntryBytes,
+-                entry.data(), entry.size(), false) ||
+-        !(openurma_udma::loadLe64(entry.data()) & 1U)) {
+-        return 0;
++    if (ou_dma(tct_base + uint64_t(token_id) * TctEntryBytes,
++               entry.data(), entry.size(), false) &&
++        (openurma_udma::loadLe64(entry.data()) & 1U)) {
++        ttbr = openurma_udma::loadLe64(entry.data() + 16) & AddressMask;
++        if (ttbr)
++            ummu_tid_ttbrs_[token_id] = ttbr;
++    } else {
++        const auto cached = ummu_tid_ttbrs_.find(token_id);
++        if (cached != ummu_tid_ttbrs_.end())
++            ttbr = cached->second;
+     }
+-    const uint64_t ttbr = openurma_udma::loadLe64(entry.data() + 16) &
+-                          AddressMask;
+     return ttbr ? ou_walk(ttbr, iova) : 0;
+ }
+ 
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 67124df..2aed175 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -306,6 +306,11 @@ class NICTopologySC : public sc_core::sc_module
+     bool ubase_emit_ue2ue_ctrlq_response(const std::vector<uint8_t> &request);
+     uint32_t ubase_cmdq_src_ = 0;
+     std::unordered_map<uint64_t, uint64_t> ubase_cmdq_dma_pages_;
++    // Queue contexts retain the translation root that was valid when the
++    // device consumed them.  The stock stack can remove the originating TCT
++    // entry while a long-lived UBCM Jetty continues to use its already-
++    // programmed rings and later receive-buffer pages.
++    std::unordered_map<uint32_t, uint64_t> ummu_tid_ttbrs_;
+     uint64_t ubase_aeq_iova_ = 0;
+     uint32_t ubase_aeq_depth_ = 0;
+     uint32_t ubase_aeq_producer_ = 0;
+diff --git a/integration/umdk/vendor/umdk b/integration/umdk/vendor/umdk
+index 9861720..34960cc 160000
+--- a/integration/umdk/vendor/umdk
++++ b/integration/umdk/vendor/umdk
+@@ -1 +1 @@
+-Subproject commit 9861720ed04bcbd76690759edd6334b2532d2282
++Subproject commit 34960cc2610cda1319e999f15dc19ea62a1dde91

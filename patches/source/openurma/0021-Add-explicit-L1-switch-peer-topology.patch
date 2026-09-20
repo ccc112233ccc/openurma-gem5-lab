@@ -1,0 +1,253 @@
+From c5ce596bd8aa5f07186f305ddfe91432d8138eaf Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 12:02:09 +0800
+Subject: [PATCH 21/27] Add explicit L1 switch peer topology
+
+---
+ .../configs/single_node_fs_clean.py           |  8 +-
+ .../gem5_scaffold/src/NICTopologySC.cc        | 90 ++++++++++++++++---
+ .../gem5_scaffold/src/NICTopologySC.hh        |  3 +
+ .../gem5_scaffold/src/NICTopologySC.py        |  8 +-
+ 4 files changed, 93 insertions(+), 16 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index 4831b3e..283c8df 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -435,6 +435,8 @@ def create(args):
+         iomem_base=IOMEM_BASE,
+         peer_link_rate=f"{args.peer_link_rate_gbps:g}Gbps",
+         ub_port_count=args.ub_port_count,
++        peer_topology=args.peer_topology,
++        peer_port_map=args.peer_port_map,
+         peer_serialization_stages=args.peer_serialization_stages,
+         peer_switch_delay=args.peer_switch_delay,
+         peer_link_overhead_bytes=args.peer_link_overhead_bytes,
+@@ -770,8 +772,12 @@ def main():
+         help="UB SerDes line rate in decimal Gbit/s")
+     parser.add_argument("--ub-port-count", type=positive_int, default=1,
+         help="physical UB egress ports, each with an independent SerDes queue")
++    parser.add_argument("--peer-topology", choices=("direct", "l1-switch"),
++        default="direct", help="direct cables or one explicit L1 switch")
++    parser.add_argument("--peer-port-map", default="",
++        help="comma-separated source-to-destination port map; default identity")
+     parser.add_argument("--peer-serialization-stages", type=int, default=1,
+-        help="number of equal-rate serialization stages; 2 models one L1 switch")
++        help="number of equal-rate serialization stages per physical link")
+     parser.add_argument("--peer-switch-delay", default="0ns",
+         help="fixed one-way switch/fabric service delay")
+     parser.add_argument("--peer-link-overhead-bytes", type=int, default=0,
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 8992bb9..ac06eda 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -13,7 +13,9 @@
+ #include <iostream>
+ #include <limits>
+ #include <ostream>
++#include <sstream>
+ #include <deque>
++#include <exception>
+ #include <vector>
+ #include <cstdlib>
+ #include <tlm_utils/simple_initiator_socket.h>
+@@ -3148,10 +3150,14 @@ NICTopologySC::peer_path_ticks(uint32_t payload_bytes) const
+ {
+     const uint64_t wire_bytes = static_cast<uint64_t>(payload_bytes) +
+                                 peer_link_overhead_bytes_;
+-    const gem5::Tick serial = checked_tick_product(
++    const gem5::Tick link_serial = checked_tick_product(
+         serialization_ticks(wire_bytes), peer_serialization_stages_);
+-    return checked_tick_sum(
+-        checked_tick_sum(serial, peer_switch_delay_), peer_link_latency_);
++    const gem5::Tick one_link = checked_tick_sum(
++        link_serial, peer_link_latency_);
++    if (peer_l1_switch_)
++        return checked_tick_sum(
++            checked_tick_product(one_link, 2), peer_switch_delay_);
++    return checked_tick_sum(one_link, peer_switch_delay_);
+ }
+ 
+ void
+@@ -3941,17 +3947,22 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+     uint64_t flow_hash = uint64_t(dcna) * 0x9e3779b185ebca87ULL;
+     flow_hash ^= uint64_t(rtoken) * 0xc2b2ae3d27d4eb4fULL;
+     flow_hash ^= uint64_t(op) * 0x165667b19e3779f9ULL;
+-    const uint32_t port = static_cast<uint32_t>(flow_hash % ub_port_count_);
++    const uint32_t src_port = static_cast<uint32_t>(
++        flow_hash % ub_port_count_);
++    const uint32_t dst_port = peer_port_map_[src_port];
+     if (peer_port_stage_free_ticks_.size() != ub_port_count_) {
+         peer_port_stage_free_ticks_.assign(
+             ub_port_count_,
+             std::vector<gem5::Tick>(peer_serialization_stages_, 0));
++        peer_switch_egress_stage_free_ticks_.assign(
++            ub_port_count_,
++            std::vector<gem5::Tick>(peer_serialization_stages_, 0));
+         peer_port_packets_.assign(ub_port_count_, 0);
+         peer_port_bytes_.assign(ub_port_count_, 0);
+         peer_port_rx_packets_.assign(ub_port_count_, 0);
+         peer_port_rx_bytes_.assign(ub_port_count_, 0);
+     }
+-    auto &stage_free_ticks = peer_port_stage_free_ticks_[port];
++    auto &stage_free_ticks = peer_port_stage_free_ticks_[src_port];
+     gem5::Tick arrival_tick = tx_tick;
+     for (uint32_t stage = 0; stage < peer_serialization_stages_;
+          ++stage) {
+@@ -3962,10 +3973,22 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+     }
+     peer_tx_free_tick_ = stage_free_ticks.empty() ?
+         tx_tick : stage_free_ticks.front();
+-    ++peer_port_packets_[port];
+-    peer_port_bytes_[port] += wire_bytes;
+-    arrival_tick = checked_tick_sum(arrival_tick, peer_switch_delay_);
++    ++peer_port_packets_[src_port];
++    peer_port_bytes_[src_port] += wire_bytes;
+     arrival_tick = checked_tick_sum(arrival_tick, peer_link_latency_);
++    arrival_tick = checked_tick_sum(arrival_tick, peer_switch_delay_);
++    if (peer_l1_switch_) {
++        auto &egress_free_ticks =
++            peer_switch_egress_stage_free_ticks_[dst_port];
++        for (uint32_t stage = 0; stage < peer_serialization_stages_;
++             ++stage) {
++            const gem5::Tick start = std::max(
++                arrival_tick, egress_free_ticks[stage]);
++            arrival_tick = checked_tick_sum(start, serialization);
++            egress_free_ticks[stage] = arrival_tick;
++        }
++        arrival_tick = checked_tick_sum(arrival_tick, peer_link_latency_);
++    }
+     link_ticks_ = checked_tick_sum(link_ticks_, arrival_tick - tx_tick);
+ 
+     if (ring_) {                                  // cross-process ring
+@@ -3975,13 +3998,13 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+                  plen, OU_RING_SLOT - sizeof(OuRingSlotHeader));
+         panic_if(peer_link_latency_ == 0,
+                  "cross-process peer channel requires positive lookahead");
+-        PeerRing::Dir &d = ring_->dir[tx_dir_][port];
++        PeerRing::Dir &d = ring_->dir[tx_dir_][dst_port];
+         const uint64_t head = __atomic_load_n(&d.head.value, __ATOMIC_RELAXED);
+         const uint64_t tail = __atomic_load_n(&d.tail.value, __ATOMIC_ACQUIRE);
+         panic_if(head - tail >= OU_RING_SLOTS,
+                  "peer ring full (head=%llu tail=%llu); refusing silent overwrite",
+                  (unsigned long long)head, (unsigned long long)tail);
+-        uint8_t *s = peer_ring_slot(tx_dir_, port, head);
++        uint8_t *s = peer_ring_slot(tx_dir_, dst_port, head);
+         auto *hdr = reinterpret_cast<OuRingSlotHeader *>(s);
+         std::memset(hdr, 0, sizeof(*hdr));
+         hdr->plen = plen;
+@@ -3989,14 +4012,15 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+         hdr->tx_tick = tx_tick;
+         hdr->arrival_tick = arrival_tick;
+         hdr->seq = peer_tx_seq_++;
+-        hdr->src_port = port;
+-        hdr->dst_port = port;
++        hdr->src_port = src_port;
++        hdr->dst_port = dst_port;
+         ou_build_pkt(s + sizeof(*hdr), op, dcna, rtoken, rva,
+                      len, imm, order, payload);
+         __atomic_store_n(&d.head.value, head + 1, __ATOMIC_RELEASE);
+         if (ou_packet_trace_enabled()) {
+             std::cerr << "[NIC peer-tx ring] seq=" << hdr->seq
+-                      << " port=" << port
++                      << " src_port=" << src_port
++                      << " dst_port=" << dst_port
+                       << " op=0x" << std::hex << (int)op << std::dec
+                       << " len=" << len << " tx=" << tx_tick
+                       << " arrival=" << arrival_tick << "\n";
+@@ -4875,9 +4899,41 @@ gem5::NICTopologySCParams::create() const
+     panic_if(ub_port_count == 0 || ub_port_count > 16,
+              "ub_port_count must be between 1 and 16");
+     nic->ub_port_count_ = ub_port_count;
++    panic_if(peer_topology != "direct" && peer_topology != "l1-switch",
++             "peer_topology must be 'direct' or 'l1-switch'");
++    nic->peer_l1_switch_ = peer_topology == "l1-switch";
++    nic->peer_port_map_.clear();
++    if (peer_port_map.empty()) {
++        for (uint32_t port = 0; port < ub_port_count; ++port)
++            nic->peer_port_map_.push_back(port);
++    } else {
++        std::stringstream mapping(peer_port_map);
++        std::string token;
++        while (std::getline(mapping, token, ',')) {
++            panic_if(token.empty(), "peer_port_map contains an empty entry");
++            size_t parsed = 0;
++            unsigned long port = 0;
++            try {
++                port = std::stoul(token, &parsed, 10);
++            } catch (const std::exception &) {
++                panic("peer_port_map entry '%s' is not a decimal port",
++                      token.c_str());
++            }
++            panic_if(parsed != token.size() || port >= ub_port_count,
++                     "peer_port_map entry '%s' is outside [0,%u)",
++                     token.c_str(), ub_port_count);
++            nic->peer_port_map_.push_back(static_cast<uint32_t>(port));
++        }
++        panic_if(nic->peer_port_map_.size() != ub_port_count,
++                 "peer_port_map needs exactly %u entries, got %zu",
++                 ub_port_count, nic->peer_port_map_.size());
++    }
+     nic->peer_port_stage_free_ticks_.assign(
+         ub_port_count,
+         std::vector<gem5::Tick>(peer_serialization_stages, 0));
++    nic->peer_switch_egress_stage_free_ticks_.assign(
++        ub_port_count,
++        std::vector<gem5::Tick>(peer_serialization_stages, 0));
+     nic->peer_port_packets_.assign(ub_port_count, 0);
+     nic->peer_port_bytes_.assign(ub_port_count, 0);
+     nic->peer_port_rx_packets_.assign(ub_port_count, 0);
+@@ -4885,6 +4941,14 @@ gem5::NICTopologySCParams::create() const
+     nic->peer_serialization_stages_ = peer_serialization_stages;
+     nic->peer_switch_delay_ = peer_switch_delay;
+     nic->peer_link_overhead_bytes_ = peer_link_overhead_bytes;
++    std::cerr << "[NIC peer topology] mode=" << peer_topology
++              << " port_map=";
++    for (uint32_t port = 0; port < nic->peer_port_map_.size(); ++port) {
++        if (port)
++            std::cerr << ',';
++        std::cerr << port << "->" << nic->peer_port_map_[port];
++    }
++    std::cerr << "\n";
+     nic->sq_control_bytes_ = sq_control_bytes;
+     nic->wqebb_bytes_ = wqebb_bytes;
+     nic->sq_sge_bytes_ = sq_sge_bytes;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index f472774..3326932 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -179,11 +179,14 @@ class NICTopologySC : public sc_core::sc_module
+     // Network/MemoryBandwidth Params arrive as simulation ticks per byte.
+     double      peer_link_ticks_per_byte_ = 0.0;
+     uint32_t    ub_port_count_ = 1;
++    bool        peer_l1_switch_ = false;
++    std::vector<uint32_t> peer_port_map_;
+     uint32_t    peer_serialization_stages_ = 1;
+     gem5::Tick  peer_switch_delay_ = 0;
+     uint32_t    peer_link_overhead_bytes_ = 0;
+     gem5::Tick  peer_tx_free_tick_ = 0;
+     std::vector<std::vector<gem5::Tick>> peer_port_stage_free_ticks_;
++    std::vector<std::vector<gem5::Tick>> peer_switch_egress_stage_free_ticks_;
+     std::vector<uint64_t> peer_port_packets_;
+     std::vector<uint64_t> peer_port_bytes_;
+     std::vector<uint64_t> peer_port_rx_packets_;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.py b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+index 022d8a4..1f50e80 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.py
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+@@ -74,9 +74,13 @@ class NICTopologySC(SystemC_ScModule):
+     ub_port_count = Param.Unsigned(1,
+         "Number of physical UB egress ports. Each port owns an independent "
+         "serialization pipeline; flows are assigned deterministically.")
++    peer_topology = Param.String("direct",
++        "UB peer topology: direct or l1-switch")
++    peer_port_map = Param.String("",
++        "Comma-separated source-to-destination port map. Empty means identity.")
+     peer_serialization_stages = Param.Unsigned(1,
+-        "Number of equal-rate serialization stages in the peer path. Use 2 "
+-        "for endpoint -> L1 switch -> endpoint; 0 disables serialization.")
++        "Number of equal-rate serialization stages per physical link; "
++        "0 disables serialization.")
+     peer_switch_delay = Param.Latency("0ns",
+         "Fixed one-way switch/fabric delay, added after serialization. This "
+         "is a physical parameter, not a latency-fit offset.")

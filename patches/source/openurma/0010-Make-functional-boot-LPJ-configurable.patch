@@ -1,0 +1,34 @@
+From 2dfff31df68814bee393ce20ebe4100e8cf3e055 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 16:25:44 +0800
+Subject: [PATCH 10/27] Make functional boot LPJ configurable
+
+---
+ eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index 36684f1..2b7e130 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -556,7 +556,7 @@ def create(args):
+     # descendant via inherited environment.
+     cmdline_extras.append("GLIBC_TUNABLES=glibc.pthread.rseq=0")
+     system.workload.command_line = " ".join([
+-        "console=ttyAMA0", "lpj=19988480", "norandmaps",
++        "console=ttyAMA0", f"lpj={args.loops_per_jiffy}", "norandmaps",
+         f"root={args.root_device}", "rw",
+         f"mem={args.guest_mem_limit or args.mem_size}",
+     ] + cmdline_extras)
+@@ -602,6 +602,11 @@ def main():
+         help="physical base of the VExpress_GEM5_V1 64-KiB gem5 pseudo-op "
+              "MMIO range")
+     parser.add_argument("--cpu-freq", default="3GHz")
++    parser.add_argument("--loops-per-jiffy", type=positive_int,
++        default=19988480,
++        help="Linux lpj= calibration override; scale this with --cpu-freq "
++             "for functional low-frequency boot, while keeping the server "
++             "profile value for performance experiments")
+     parser.add_argument("--num-cpus", type=positive_int, default=1,
+         help="visible CPU cores; cache-enabled configurations use private L2s")
+     parser.add_argument("--benchmark-cpu", type=int, default=-1,

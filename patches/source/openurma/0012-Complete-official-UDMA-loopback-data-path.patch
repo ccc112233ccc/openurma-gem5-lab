@@ -1,0 +1,476 @@
+From 5372409757cfa3e6ea2976f0d8b1b54df25e79d0 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 18:02:32 +0800
+Subject: [PATCH 12/27] Complete official UDMA loopback data path
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 195 +++++++++++++++---
+ .../gem5_scaffold/src/NICTopologySC.hh        |  15 ++
+ 2 files changed, 181 insertions(+), 29 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index be09542..58f0a2d 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -728,6 +728,7 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+     constexpr uint8_t TpAclService = 1;
+     constexpr uint8_t GetTpList = 0x21;
+     constexpr uint8_t ActiveTp = 0x22;
++    constexpr uint8_t DeactiveTp = 0x23;
+     constexpr uint8_t QuerySeid = 0x01;
+     constexpr uint8_t NotifyControlPlaneInit = 0x15;
+ 
+@@ -748,8 +749,10 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+     const bool tp_list_query = service == TpAclService &&
+         opcode == GetTpList;
+     const bool active_tp = service == TpAclService && opcode == ActiveTp;
++    const bool deactive_tp = service == TpAclService &&
++                             opcode == DeactiveTp;
+     if (!qos_query && !control_plane_init && !seid_query && !tp_list_query &&
+-        !active_tp)
++        !active_tp && !deactive_tp)
+         return false;
+ 
+     const uint16_t requested_output = uint16_t(request[12]) |
+@@ -903,6 +906,7 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+ {
+     constexpr uint8_t CreateAeqContext = 0x34;
+     constexpr uint8_t CreateJfsContext = 0x04;
++    constexpr uint8_t QueryJfsContext = 0x06;
+     constexpr uint8_t DestroyJfsContext = 0x07;
+     constexpr uint8_t CreateJfcContext = 0x24;
+     constexpr uint8_t DestroyJfcContext = 0x27;
+@@ -916,6 +920,21 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+     const uint16_t sequence = static_cast<uint16_t>(control);
+     const bool event_enabled = control & (1U << 16);
+ 
++    if (command == QueryJfsContext && context_iova) {
++        // The official destroy path polls the queried hardware context until
++        // all outstanding CQEs are flushed.  Queue work is synchronous in
++        // this model, so a completed query can report READY and flush-done.
++        // DW26 bit 26 is flush_cqe_done in struct udma_jetty_ctx.
++        std::array<uint8_t, 128> context{};
++        openurma_udma::storeLe32(context.data(), 1U << 16); // READY state
++        openurma_udma::storeLe32(context.data() + 26 * sizeof(uint32_t),
++                                 1U << 26);
++        if (!ummu_dma(context_iova, context.data(), context.size(), true)) {
++            std::cerr << "[NIC udma official] failed to return JFS query id="
++                      << tag << "\n";
++        }
++    }
++
+     if (command == CreateAeqContext && context_iova) {
+         std::array<uint8_t, 64> context{};
+         if (ummu_dma(context_iova, context.data(), context.size(), false)) {
+@@ -961,11 +980,13 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+                     jfc.cq_bytes = depth * openurma_udma::CqeBytes;
+                     jfc.depth = depth;
+                     jfc.official = true;
++                    jfc.token_id = dw(2) & 0x000fffffU;
+                     udma_jfcs_[tag] = jfc;
+                     std::cerr << "[NIC udma official] JFC id=" << tag
+                               << " cq_iova=0x" << std::hex << cq_iova
+                               << " ci_iova=0x" << ci_iova << std::dec
+-                              << " depth=" << depth << "\n";
++                              << " depth=" << depth
++                              << " tid=" << jfc.token_id << "\n";
+                 }
+             } else if (command == CreateJfrContext) {
+                 const uint32_t rqe_shift = (dw(0) >> 8) & 0xfU;
+@@ -994,13 +1015,19 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+                     jfr.rqe_stride = jfr.max_sge * openurma_udma::SgeBytes;
+                     jfr.rq_bytes = jfr.depth * jfr.rqe_stride;
+                     jfr.official = true;
++                    jfr.token_id = ((dw(1) & 0x3fU) << 14) |
++                                   ((dw(0) >> 18) & 0x3fffU);
++                    jfr.payload_token_id = (dw(3) >> 2) & 0x000fffffU;
+                     udma_jfrs_[tag] = jfr;
+                     std::cerr << "[NIC udma official] JFR id=" << tag
+                               << " rq_iova=0x" << std::hex << rq_iova
+                               << " idx_iova=0x" << idx_iova
+                               << " pi_iova=0x" << pi_iova << std::dec
+                               << " jfc=" << jfc_id
+-                              << " depth=" << jfr.depth << "\n";
++                              << " depth=" << jfr.depth
++                              << " tid=" << jfr.token_id
++                              << " payload_tid=" << jfr.payload_token_id
++                              << "\n";
+                 }
+             } else {
+                 const uint32_t sq_shift = (dw(0) >> 8) & 0xfU;
+@@ -1022,6 +1049,10 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+                         uint64_t(tag) * openurma_udma::HardwarePageBytes;
+                     jetty.official = true;
+                     jetty.is_jetty = ((dw(0) >> 19) & 1U) == 0;
++                    jetty.token_id = ((dw(1) & 0xffU) << 12) |
++                                     ((dw(0) >> 20) & 0xfffU);
++                    jetty.payload_token_id =
++                        (dw(9) >> 2) & 0x000fffffU;
+                     udma_jettys_[tag] = jetty;
+                     std::cerr << "[NIC udma official] "
+                               << (jetty.is_jetty ? "Jetty" : "JFS")
+@@ -1033,7 +1064,10 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+                               << jetty.send_jfc_id << " jfr="
+                               << jetty.jfr_id << " recv_jfc="
+                               << jetty.recv_jfc_id << " depth="
+-                              << jetty.max_wqebbs << "\n";
++                              << jetty.max_wqebbs
++                              << " tid=" << jetty.token_id
++                              << " payload_tid="
++                              << jetty.payload_token_id << "\n";
+                 }
+             }
+             timing_dma_kick_.notify(sc_core::SC_ZERO_TIME);
+@@ -2061,15 +2095,17 @@ NICTopologySC::udma_dma_ring(uint32_t context_id, uint64_t base,
+ 
+ bool
+ NICTopologySC::udma_dma_resource(bool official, uint32_t context_id,
++                                  uint32_t token_id,
+                                   uint64_t address, void *buf, uint32_t len,
+                                   bool write)
+ {
+-    return official ? ummu_dma(address, buf, len, write) :
++    return official ? ummu_dma_tid(token_id, address, buf, len, write) :
+                       udma_dma_va(context_id, address, buf, len, write);
+ }
+ 
+ bool
+ NICTopologySC::udma_dma_resource_ring(bool official, uint32_t context_id,
++                                       uint32_t token_id,
+                                        uint64_t base, uint32_t ring_bytes,
+                                        uint64_t offset, void *buf,
+                                        uint32_t len, bool write)
+@@ -2085,7 +2121,8 @@ NICTopologySC::udma_dma_resource_ring(bool official, uint32_t context_id,
+         const uint64_t ring_offset = (offset + done) % ring_bytes;
+         const uint32_t chunk = std::min<uint32_t>(
+             len - done, ring_bytes - static_cast<uint32_t>(ring_offset));
+-        if (!ummu_dma(base + ring_offset, bytes + done, chunk, write))
++        if (!ummu_dma_tid(token_id, base + ring_offset, bytes + done, chunk,
++                          write))
+             return false;
+         done += chunk;
+     }
+@@ -2094,10 +2131,11 @@ NICTopologySC::udma_dma_resource_ring(bool official, uint32_t context_id,
+ 
+ bool
+ NICTopologySC::udma_dma_resource_payload(bool official, uint32_t context_id,
++                                          uint32_t token_id,
+                                           uint64_t address, void *buf,
+                                           uint32_t len, bool write)
+ {
+-    return official ? ummu_dma(address, buf, len, write) :
++    return official ? ummu_dma_tid(token_id, address, buf, len, write) :
+                       udma_dma_payload(context_id, address, buf, len, write);
+ }
+ 
+@@ -2452,7 +2490,8 @@ NICTopologySC::udma_write_cqe(uint32_t jfc_id, bool receive, bool jetty,
+     UdmaJfc &jfc = found->second;
+ 
+     std::array<uint8_t, sizeof(uint32_t)> consumer_raw{};
+-    if (!udma_dma_resource(jfc.official, jfc.context_id, jfc.ci_va,
++    if (!udma_dma_resource(jfc.official, jfc.context_id, jfc.token_id,
++                           jfc.ci_va,
+                            consumer_raw.data(), consumer_raw.size(), false)) {
+         return false;
+     }
+@@ -2470,7 +2509,8 @@ NICTopologySC::udma_write_cqe(uint32_t jfc_id, bool receive, bool jetty,
+         user_data, immediate);
+     const uint64_t offset = (jfc.producer & (jfc.depth - 1U)) *
+                             openurma_udma::CqeBytes;
+-    if (!udma_dma_resource_ring(jfc.official, jfc.context_id, jfc.cq_va,
++    if (!udma_dma_resource_ring(jfc.official, jfc.context_id, jfc.token_id,
++                                jfc.cq_va,
+                                 jfc.cq_bytes, offset, cqe.data(), cqe.size(),
+                                 true)) {
+         return false;
+@@ -2514,7 +2554,8 @@ NICTopologySC::udma_process_rx(UdmaRxWork &work)
+     UdmaJfr &jfr = jfr_found->second;
+ 
+     std::array<uint8_t, sizeof(uint32_t)> pi_raw{};
+-    if (!udma_dma_resource(jfr.official, jfr.context_id, jfr.pi_va,
++    if (!udma_dma_resource(jfr.official, jfr.context_id, jfr.token_id,
++                           jfr.pi_va,
+                            pi_raw.data(), pi_raw.size(), false)) {
+         return fail(3, "pi-dma");
+     }
+@@ -2534,7 +2575,7 @@ NICTopologySC::udma_process_rx(UdmaRxWork &work)
+     std::array<uint8_t, sizeof(uint32_t)> rqe_index_raw{};
+     const uint64_t index_offset =
+         (jfr.consumer & (jfr.depth - 1U)) * sizeof(uint32_t);
+-    if (!udma_dma_resource(jfr.official, jfr.context_id,
++    if (!udma_dma_resource(jfr.official, jfr.context_id, jfr.token_id,
+                            jfr.idx_va + index_offset, rqe_index_raw.data(),
+                            rqe_index_raw.size(), false)) {
+         return fail(5, "index-dma");
+@@ -2558,7 +2599,7 @@ NICTopologySC::udma_process_rx(UdmaRxWork &work)
+             static_cast<uint64_t>(rqe_index) * jfr.rqe_stride +
+             static_cast<uint64_t>(index) * openurma_udma::SgeBytes;
+         if (sge_offset + raw_sge.size() > jfr.rq_bytes ||
+-            !udma_dma_resource(jfr.official, jfr.context_id,
++            !udma_dma_resource(jfr.official, jfr.context_id, jfr.token_id,
+                                jfr.rq_va + sge_offset, raw_sge.data(),
+                                raw_sge.size(), false)) {
+             return fail(7, "sge-dma");
+@@ -2568,7 +2609,8 @@ NICTopologySC::udma_process_rx(UdmaRxWork &work)
+         const uint32_t chunk = std::min<uint32_t>(
+             capacity, static_cast<uint32_t>(work.payload.size() - copied));
+         if (chunk && (!va || !udma_dma_resource_payload(
+-                                jfr.official, jfr.context_id, va,
++                                jfr.official, jfr.context_id,
++                                jfr.payload_token_id, va,
+                                 work.payload.data() + copied, chunk, true))) {
+             if (ou_packet_trace_enabled() && work.last_failure_stage != 8) {
+                 std::cerr << "[NIC udma] RX payload DMA failed rqe="
+@@ -2634,10 +2676,17 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+             (jetty.consumer & (block_count - 1U)) *
+             openurma_udma::WqebbBytes;
+         std::array<uint8_t, openurma_udma::WqebbBytes> raw{};
+-        if (!udma_dma_resource_ring(jetty.official, jetty.context_id,
+-                                    jetty.sq_va, jetty.sq_bytes, wqe_offset,
+-                                    raw.data(), raw.size(), false)) {
+-            return false;
++        if (work.has_direct_wqe &&
++            static_cast<uint32_t>(jetty.consumer) + 1U == work.producer) {
++            raw = work.direct_wqe;
++        } else {
++            if (!udma_dma_resource_ring(jetty.official, jetty.context_id,
++                                        jetty.token_id,
++                                        jetty.sq_va, jetty.sq_bytes,
++                                        wqe_offset, raw.data(), raw.size(),
++                                        false)) {
++                return false;
++            }
+         }
+         const openurma_udma::SqWqe wqe(raw);
+         const bool expected_owner =
+@@ -2667,6 +2716,7 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+             payload.resize(wqe.inlineLength());
+             if (!payload.empty() &&
+                 !udma_dma_resource_ring(jetty.official, jetty.context_id,
++                                        jetty.token_id,
+                                         jetty.sq_va, jetty.sq_bytes,
+                                         wqe_offset + 48, payload.data(),
+                                         payload.size(), false)) {
+@@ -2681,7 +2731,8 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+             for (uint32_t index = 0; index < wqe.sgeCount(); ++index) {
+                 std::array<uint8_t, openurma_udma::SgeBytes> raw_sge{};
+                 if (!udma_dma_resource_ring(
+-                        jetty.official, jetty.context_id, jetty.sq_va,
++                        jetty.official, jetty.context_id, jetty.token_id,
++                        jetty.sq_va,
+                         jetty.sq_bytes,
+                         wqe_offset + 48 + index * raw_sge.size(),
+                         raw_sge.data(), raw_sge.size(), false)) {
+@@ -2701,7 +2752,8 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+             for (const auto &sge : sges) {
+                 if (sge.length && (!sge.va ||
+                     !udma_dma_resource_payload(
+-                        jetty.official, jetty.context_id, sge.va,
++                        jetty.official, jetty.context_id,
++                        jetty.payload_token_id, sge.va,
+                         payload.data() + copied, sge.length, false))) {
+                     return false;
+                 }
+@@ -3029,6 +3081,48 @@ NICTopologySC::ummu_translate_iova(uint64_t iova)
+     return 0;
+ }
+ 
++uint64_t
++NICTopologySC::ummu_translate_iova_tid(uint32_t token_id, uint64_t iova)
++{
++    // Queue contexts carry the TID selected when userspace registered the
++    // backing pages.  Different processes commonly map their rings at the
++    // same IOVA, so walking the first TCT entry that happens to translate the
++    // address is ambiguous.  Hardware indexes the TCT with this TID.
++    constexpr uint64_t AddressMask = 0x0000fffffffff000ULL;
++    constexpr uint32_t TectTag = 0;
++    constexpr size_t TectEntryBytes = 64;
++    constexpr size_t TctEntryBytes = 64;
++    constexpr size_t TctEntries = 1024;
++
++    if (token_id >= TctEntries)
++        return 0;
++    const uint64_t tect_base = openurma_udma::loadLe64(
++        ummu_regs_.data() + 0x70) & AddressMask;
++    if (!tect_base)
++        return 0;
++
++    std::array<uint8_t, TectEntryBytes> tect{};
++    if (!ou_dma(tect_base + TectTag * TectEntryBytes,
++                tect.data(), tect.size(), false) ||
++        !(openurma_udma::loadLe64(tect.data()) & 1U)) {
++        return 0;
++    }
++    const uint64_t tct_base = openurma_udma::loadLe64(tect.data() + 8) &
++                              AddressMask;
++    if (!tct_base)
++        return 0;
++
++    std::array<uint8_t, TctEntryBytes> entry{};
++    if (!ou_dma(tct_base + uint64_t(token_id) * TctEntryBytes,
++                entry.data(), entry.size(), false) ||
++        !(openurma_udma::loadLe64(entry.data()) & 1U)) {
++        return 0;
++    }
++    const uint64_t ttbr = openurma_udma::loadLe64(entry.data() + 16) &
++                          AddressMask;
++    return ttbr ? ou_walk(ttbr, iova) : 0;
++}
++
+ bool
+ NICTopologySC::ummu_dma(uint64_t iova, void *buf, uint32_t len, bool write)
+ {
+@@ -3046,6 +3140,24 @@ NICTopologySC::ummu_dma(uint64_t iova, void *buf, uint32_t len, bool write)
+     return true;
+ }
+ 
++bool
++NICTopologySC::ummu_dma_tid(uint32_t token_id, uint64_t iova, void *buf,
++                            uint32_t len, bool write)
++{
++    auto *bytes = static_cast<uint8_t *>(buf);
++    while (len) {
++        const uint32_t chunk = std::min<uint32_t>(
++            len, 4096U - static_cast<uint32_t>(iova & 0xfff));
++        const uint64_t pa = ummu_translate_iova_tid(token_id, iova);
++        if (!pa || !ou_dma(pa, bytes, chunk, write))
++            return false;
++        iova += chunk;
++        bytes += chunk;
++        len -= chunk;
++    }
++    return true;
++}
++
+ // Walk the ARM64 guest page table (4 KB granule, 48-bit VA, 4 levels L0..L3) at
+ // `ttbr0` to translate a guest VA -> guest PA, reading table entries straight from
+ // guest physical memory. Handles 1 GB (L1) / 2 MB (L2) block descriptors. 0 = unmapped.
+@@ -3696,15 +3808,31 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
+     }
+ 
+     if (udma_mode_ && cmd == tlm::TLM_WRITE_COMMAND && data && len >= 4) {
+-        for (const auto &entry : udma_jettys_) {
+-            const UdmaJetty &jetty = entry.second;
+-            if (off == jetty.dsqe_page_offset) {
+-                // A one-WQEBB direct SQE is copied to the device page in one
+-                // 64-byte transaction or as ordered 8-byte stores. The SQE
+-                // is already present in the normal SQ ring before the MMIO
+-                // barrier, so its 16-bit final producer index is sufficient
+-                // to drive the same queue engine without duplicating decode.
+-                const uint32_t low = openurma_udma::loadLe32(data) & 0xffffU;
++        for (auto &entry : udma_jettys_) {
++            UdmaJetty &jetty = entry.second;
++            if (off >= jetty.dsqe_page_offset &&
++                off + len <= jetty.dsqe_page_offset +
++                             openurma_udma::WqebbBytes) {
++                // The official userspace provider copies a complete one-WQEBB
++                // SQE directly into this device page.  gem5 may present the
++                // architectural 64-byte store as one transaction or several
++                // smaller writes, so retain every byte and submit only after
++                // the whole WQE has arrived.  Consuming this MMIO image is
++                // essential: the cached shadow SQ is not required to be
++                // coherent with a functional device-side DMA read.
++                const uint32_t begin = static_cast<uint32_t>(
++                    off - jetty.dsqe_page_offset);
++                std::memcpy(jetty.direct_wqe.data() + begin, data, len);
++                for (uint32_t index = 0; index < len; ++index)
++                    jetty.direct_wqe_valid |= uint64_t{1} << (begin + index);
++                if (jetty.direct_wqe_valid != ~uint64_t{0}) {
++                    trans.set_response_status(tlm::TLM_OK_RESPONSE);
++                    return;
++                }
++                const auto direct_wqe = jetty.direct_wqe;
++                jetty.direct_wqe_valid = 0;
++                const uint32_t low =
++                    openurma_udma::loadLe32(direct_wqe.data()) & 0xffffU;
+                 uint32_t producer =
+                     (static_cast<uint32_t>(jetty.consumer) & ~0xffffU) | low;
+                 if (producer < static_cast<uint32_t>(jetty.consumer))
+@@ -3714,11 +3842,20 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
+                               << " off=0x" << std::hex << off << std::dec
+                               << " producer=" << producer << "\n";
+                 }
+-                if (!udma_enqueue_sq(jetty.id, producer)) {
++                if (!udma_mode_ || udma_sq_work_.size() >=
++                                      OU_MAX_MODELED_QUEUE_ENTRIES) {
+                     ++udma_queue_errors_;
+                     trans.set_response_status(
+                         tlm::TLM_GENERIC_ERROR_RESPONSE);
+                 } else {
++                    ++udma_sq_doorbells_;
++                    UdmaSqWork work{};
++                    work.jetty_id = jetty.id;
++                    work.producer = producer;
++                    work.has_direct_wqe = true;
++                    work.direct_wqe = direct_wqe;
++                    udma_sq_work_.push_back(std::move(work));
++                    timing_dma_kick_.notify(sc_core::SC_ZERO_TIME);
+                     trans.set_response_status(tlm::TLM_OK_RESPONSE);
+                 }
+                 return;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index ef77da1..db68b99 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -370,6 +370,7 @@ class NICTopologySC : public sc_core::sc_module
+         uint32_t depth = 0;
+         uint64_t producer = 0;
+         bool official = false;
++        uint32_t token_id = 0;
+     };
+     struct UdmaJfr {
+         uint32_t id = 0;
+@@ -385,6 +386,8 @@ class NICTopologySC : public sc_core::sc_module
+         uint32_t rqe_stride = 16;
+         uint64_t consumer = 0;
+         bool official = false;
++        uint32_t token_id = 0;
++        uint32_t payload_token_id = 0;
+     };
+     struct UdmaJetty {
+         uint32_t id = 0;
+@@ -401,10 +404,16 @@ class NICTopologySC : public sc_core::sc_module
+         uint32_t bound_remote_id = 0;
+         bool official = false;
+         bool is_jetty = true;
++        std::array<uint8_t, 64> direct_wqe{};
++        uint64_t direct_wqe_valid = 0;
++        uint32_t token_id = 0;
++        uint32_t payload_token_id = 0;
+     };
+     struct UdmaSqWork {
+         uint32_t jetty_id = 0;
+         uint32_t producer = 0;
++        bool has_direct_wqe = false;
++        std::array<uint8_t, 64> direct_wqe{};
+     };
+     struct UdmaRxWork {
+         uint32_t target_jetty = 0;
+@@ -485,13 +494,16 @@ class NICTopologySC : public sc_core::sc_module
+                        uint32_t ring_bytes, uint64_t offset, void *buf,
+                        uint32_t len, bool write);
+     bool udma_dma_resource(bool official, uint32_t context_id,
++                           uint32_t token_id,
+                            uint64_t address, void *buf, uint32_t len,
+                            bool write);
+     bool udma_dma_resource_ring(bool official, uint32_t context_id,
++                                uint32_t token_id,
+                                 uint64_t base, uint32_t ring_bytes,
+                                 uint64_t offset, void *buf, uint32_t len,
+                                 bool write);
+     bool udma_dma_resource_payload(bool official, uint32_t context_id,
++                                   uint32_t token_id,
+                                    uint64_t address, void *buf, uint32_t len,
+                                    bool write);
+     bool udma_dma_pa(uint64_t pa, void *buf, uint32_t len, bool write);
+@@ -636,7 +648,10 @@ class NICTopologySC : public sc_core::sc_module
+     // cache-coherent functional access to guest physical memory via a CPU data port
+     bool ou_dma(uint64_t pa, void *buf, uint32_t len, bool write);
+     uint64_t ummu_translate_iova(uint64_t iova);
++    uint64_t ummu_translate_iova_tid(uint32_t token_id, uint64_t iova);
+     bool ummu_dma(uint64_t iova, void *buf, uint32_t len, bool write);
++    bool ummu_dma_tid(uint32_t token_id, uint64_t iova, void *buf,
++                      uint32_t len, bool write);
+     // walk the ARM64 (4 KB granule, 48-bit) guest page table at ttbr0: VA -> PA.
+     uint64_t ou_walk(uint64_t ttbr0, uint64_t va);
+     // UDMA's equivalent walker issues every PTE fetch at its already-physical

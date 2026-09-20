@@ -1,0 +1,90 @@
+From b3816ae5a5fd8660425b21bfd3578120b4df23ac Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 22:29:56 +0800
+Subject: [PATCH 3/8] Support synchronized bidirectional RMA bandwidth tests
+
+---
+ .../tools/urma_perftest/perftest_run_test.c   | 32 +++++++++++++++++--
+ 1 file changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index ecf66d8..8b5bfab 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -102,13 +102,15 @@ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+         return 0;
+     }
+     supported = cfg->cmd == PERFTEST_SEND_LAT ||
+-        (cfg->cmd == PERFTEST_SEND_BW && !cfg->bidirection);
++        (cfg->cmd == PERFTEST_SEND_BW && !cfg->bidirection) ||
++        ((cfg->cmd == PERFTEST_READ_BW ||
++          cfg->cmd == PERFTEST_WRITE_BW) && cfg->bidirection);
+     if (!supported || cfg->time_type.bs.iterations != 1 ||
+         cfg->pair_num != 1 || cfg->jettys != 1) {
+         (void)fprintf(stderr,
+             "Distributed virtual-time synchronization currently supports only "
+-            "iteration-mode send_lat or unidirectional send_bw with one pair "
+-            "and one jetty.\n");
++            "iteration-mode send_lat, unidirectional send_bw, or bidirectional "
++            "read/write_bw with one pair and one jetty.\n");
+         return -1;
+     }
+ 
+@@ -127,6 +129,12 @@ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+     return 0;
+ }
+ 
++static bool dist_sync_rma_bw(const perftest_config_t *cfg)
++{
++    return dist_sync_requested() &&
++        (cfg->cmd == PERFTEST_READ_BW || cfg->cmd == PERFTEST_WRITE_BW);
++}
++
+ /*
+  * Delimit the traffic loop in gem5's statistics stream.  The pseudo-op
+  * arguments are delay and period in x0/x1; both are zero so the operation is
+@@ -3265,6 +3273,7 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+     bw_report_data_t *local_bw_report, bw_report_data_t *remote_bw_report)
+ {
+     uint32_t i;
++    bool dist_sync_active = false;
+     int ret = prepare_jfs_wr(ctx, cfg);
+     if (ret != 0) {
+         return -1;
+@@ -3282,12 +3291,26 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+             }
+         }
+     }
++    if (dist_sync_rma_bw(cfg)) {
++        ret = toggle_dist_sync("enable bidirectional RMA bandwidth loop");
++        if (ret != 0) {
++            goto err_dest_jfs_wr;
++        }
++        dist_sync_active = true;
++    }
+     ret = run_once_bw(ctx, cfg);
+     if (ret != 0) {
+         (void)fprintf(stderr, "Failed to run once bw, size: %u, ret: %d, api_type: %d.\n",
+             cfg->size, ret, (int)cfg->api_type);
+         goto err_dest_jfs_wr;
+     }
++    if (dist_sync_active) {
++        ret = toggle_dist_sync("disable bidirectional RMA bandwidth loop");
++        dist_sync_active = false;
++        if (ret != 0) {
++            goto err_dest_jfs_wr;
++        }
++    }
+     if (cfg->bidirection) {
+         for (i = 0; i < cfg->pair_num; i++) {
+             ret = sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].after);
+@@ -3316,6 +3339,9 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+     return 0;
+ 
+ err_dest_jfs_wr:
++    if (dist_sync_active) {
++        (void)toggle_dist_sync("disable failed bidirectional RMA bandwidth loop");
++    }
+     destroy_jfs_wr(ctx);
+     return -1;
+ }

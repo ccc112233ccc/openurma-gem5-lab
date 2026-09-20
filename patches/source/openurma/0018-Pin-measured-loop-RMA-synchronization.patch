@@ -1,0 +1,16 @@
+From b5235eb3e3e7a1801c700642af6df7dc1f8fcccb Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 10:31:55 +0800
+Subject: [PATCH 18/27] Pin measured-loop RMA synchronization
+
+---
+ integration/umdk/vendor/umdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/integration/umdk/vendor/umdk b/integration/umdk/vendor/umdk
+index 6d89296..23e77b7 160000
+--- a/integration/umdk/vendor/umdk
++++ b/integration/umdk/vendor/umdk
+@@ -1 +1 @@
+-Subproject commit 6d89296f378b07049bda06230b734e598d9cd173
++Subproject commit 23e77b724d138ea00114605308f0994853e72f20

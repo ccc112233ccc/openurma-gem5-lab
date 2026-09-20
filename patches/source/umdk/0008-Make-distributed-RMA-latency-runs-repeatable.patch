@@ -1,0 +1,154 @@
+From 34960cc2610cda1319e999f15dc19ea62a1dde91 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Sat, 19 Sep 2026 00:28:07 +0800
+Subject: [PATCH 8/8] Make distributed RMA latency runs repeatable
+
+---
+ .../tools/urma_perftest/perftest_run_test.c   | 87 ++++++++++++++-----
+ 1 file changed, 64 insertions(+), 23 deletions(-)
+
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index e4d4a86..b41174b 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -384,19 +384,21 @@ static int rma_lat_dist_sync_begin(perftest_config_t *cfg, uint32_t id, bool *ac
+         return 0;
+     }
+ 
+-    if (toggle_dist_sync("enable RMA latency loop") != 0) {
+-        return -1;
+-    }
+-    *active = true;
+     /*
+-     * The toggle schedules the first conservative barrier.  Exchange one
+-     * token on the already-connected control socket so the leading guest
+-     * cannot issue its first one-sided request before its peer reaches that
+-     * barrier.
++     * Exchange the readiness token before enabling the 100-ns conservative
++     * barrier.  The control socket is carried by the simulated TCP stack and
++     * can otherwise spend millions of fine-grained barriers waiting for a
++     * delayed ACK or retransmission on a later invocation.  Once both peers
++     * have reached this point, DistIface's collective toggle itself aligns
++     * their event queues before either process can issue a one-sided WQE.
+      */
+     if (sync_time(cfg->comm.sock_fd[id], "rma_lat_dist_active") != 0) {
+         return -1;
+     }
++    if (toggle_dist_sync("enable RMA latency loop") != 0) {
++        return -1;
++    }
++    *active = true;
+     return 0;
+ }
+ 
+@@ -1525,21 +1527,33 @@ static int run_lat_test(perftest_context_t *ctx, perftest_config_t *cfg, void *(
+         args[i].id = i;
+     }
+ 
+-    uint32_t created = 0;
+-    for (; created < cfg->jettys; created++) {
+-        int status = pthread_create(&args[created].thread_id, NULL, fn, (void *)&args[created]);
+-        if (status != 0) {
+-            (void)fprintf(stderr, "Failed to create latency worker %u, status:%d.\n", created, status);
+-            break;
++    bool worker_failed = false;
++    if (dist_sync_requested() && cfg->jettys == 1) {
++        /*
++         * Distributed timing deliberately supports one pair and one Jetty.
++         * Run that single worker inline so pthread creation and Linux task
++         * scheduling stay outside the 100-ns conservative-sync interval.
++         * The provider, WQE and completion path is identical; only the
++         * otherwise redundant userspace worker hand-off is removed.
++         */
++        worker_failed = fn((void *)&args[0]) != NULL;
++    } else {
++        uint32_t created = 0;
++        for (; created < cfg->jettys; created++) {
++            int status = pthread_create(&args[created].thread_id, NULL, fn, (void *)&args[created]);
++            if (status != 0) {
++                (void)fprintf(stderr, "Failed to create latency worker %u, status:%d.\n", created, status);
++                break;
++            }
+         }
+-    }
+ 
+-    bool worker_failed = created != cfg->jettys;
+-    for (uint32_t i = 0; i < created; i++) {
+-        void *thread_ret = NULL;
+-        int status = pthread_join(args[i].thread_id, &thread_ret);
+-        if (status != 0 || thread_ret != NULL) {
+-            worker_failed = true;
++        worker_failed = created != cfg->jettys;
++        for (uint32_t i = 0; i < created; i++) {
++            void *thread_ret = NULL;
++            int status = pthread_join(args[i].thread_id, &thread_ret);
++            if (status != 0 || thread_ret != NULL) {
++                worker_failed = true;
++            }
+         }
+     }
+ 
+@@ -1641,6 +1655,7 @@ int run_read_lat(perftest_context_t *ctx, perftest_config_t *cfg)
+ {
+     int ret = 0;
+     bool dist_sync_active = false;
++    bool wr_prepared = false;
+     const bool is_server = cfg->comm.server_ip == NULL;
+ 
+     /*
+@@ -1650,8 +1665,25 @@ int run_read_lat(perftest_context_t *ctx, perftest_config_t *cfg)
+      * served the final READ response.  This coordination is enabled only by
+      * OPENURMA_DIST_SYNC and leaves the ordinary perftest protocol unchanged.
+      */
++    /*
++     * WR construction can fault in newly allocated provider pages.  Keep it
++     * outside the fine-grained distributed barrier just like the rest of
++     * resource creation.  For a fixed-size run, only posted READs and their
++     * completions belong to the synchronized measurement interval.  The
++     * existing --all loop still rebuilds its WR for every selected size.
++     */
++    if (!is_server && !cfg->all) {
++        if (prepare_jfs_wr(ctx, cfg) != 0) {
++            return -1;
++        }
++        wr_prepared = true;
++    }
++
+     if (rma_lat_dist_sync_begin(cfg, 0, &dist_sync_active) != 0) {
+         rma_lat_dist_sync_end(&dist_sync_active);
++        if (wr_prepared) {
++            destroy_jfs_wr(ctx);
++        }
+         return -1;
+     }
+     if (is_server) {
+@@ -1674,11 +1706,17 @@ int run_read_lat(perftest_context_t *ctx, perftest_config_t *cfg)
+                 break;
+             }
+         }
+-    } else {
+-        if (run_read_lat_once(ctx, cfg) != 0) {
++    } else if (wr_prepared) {
++        if ((cfg->jetty_mode == PERFTEST_JETTY_SIMPLEX ?
++             run_lat_test(ctx, cfg, run_read_lat_simplex) :
++             run_lat_test(ctx, cfg, run_read_lat_duplex)) != 0) {
+             (void)fprintf(stderr, "Failed to run once, size: %u.\n", cfg->size);
+             ret = -1;
+         }
++        destroy_jfs_wr(ctx);
++        wr_prepared = false;
++    } else {
++        ret = -1;
+     }
+ 
+     if (dist_sync_active &&
+@@ -1686,6 +1724,9 @@ int run_read_lat(perftest_context_t *ctx, perftest_config_t *cfg)
+         ret = -1;
+     }
+     rma_lat_dist_sync_end(&dist_sync_active);
++    if (wr_prepared) {
++        destroy_jfs_wr(ctx);
++    }
+     return ret;
+ }
+ 

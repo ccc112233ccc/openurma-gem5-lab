@@ -1,0 +1,35 @@
+From 6d89296f378b07049bda06230b734e598d9cd173 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 10:21:28 +0800
+Subject: [PATCH 4/8] Align ranks before synchronized RMA bandwidth loops
+
+---
+ src/urma/tools/urma_perftest/perftest_run_test.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index 8b5bfab..bdf14fb 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -3292,6 +3292,21 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+         }
+     }
+     if (dist_sync_rma_bw(cfg)) {
++        /*
++         * A toggle schedules periodic synchronization at the later rank's
++         * current tick.  Align once before the measured toggle so the earlier
++         * rank cannot fill a finite peer queue while catching up to that
++         * future activation tick.  The ON/OFF pair completes at a common
++         * barrier and carries no benchmark traffic.
++         */
++        ret = toggle_dist_sync("enable pre-loop RMA rendezvous");
++        if (ret != 0) {
++            goto err_dest_jfs_wr;
++        }
++        ret = toggle_dist_sync("disable pre-loop RMA rendezvous");
++        if (ret != 0) {
++            goto err_dest_jfs_wr;
++        }
+         ret = toggle_dist_sync("enable bidirectional RMA bandwidth loop");
+         if (ret != 0) {
+             goto err_dest_jfs_wr;

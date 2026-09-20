@@ -15,15 +15,15 @@ note() {
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 lab_dir="${OPENURMA_LAB_ROOT:-$script_dir}"
 gem5_root="${GEM5_ROOT:-$lab_dir/gem5}"
-openurma_root="${OPENURMA_ROOT:-$lab_dir/../OpenURMA}"
-openclicknp_root="${OPENCLICKNP_ROOT:-$lab_dir/../OpenClickNP}"
+openurma_root="${OPENURMA_ROOT:-$lab_dir/sources/OpenURMA}"
+openclicknp_root="${OPENCLICKNP_ROOT:-$lab_dir/sources/OpenClickNP}"
 jobs="${JOBS:-1}"
 
 # These are repository object IDs, not moving branch or tag names.
-readonly GEM5_COMMIT=36b6c5b99c8bbbd7445173f1655240ad4b1bffd9
-readonly OPENURMA_COMMIT=a0b781bb4c04b8aec479bff55486d58051cd5337
+readonly GEM5_COMMIT=c8affd15e10f596e6eb7b2dbc64163affc3876c0
+readonly OPENURMA_COMMIT=05fc6b2642c560cf42bdc4a47f0042154993dbba
 readonly OPENCLICKNP_COMMIT=c1c6acc58032a1894507d88659b3cca668b0e1a5
-readonly UMDK_COMMIT=23e77b724d138ea00114605308f0994853e72f20
+readonly UMDK_COMMIT=34960cc2610cda1319e999f15dc19ea62a1dde91
 
 [[ "$(uname -s)" == Linux ]] ||
     die "run this inside the ARM64 Linux build container"
@@ -192,4 +192,6 @@ note "building gem5.opt with gold low-memory linking, OpenURMA EXTRAS, and JOBS=
 )
 
 [[ -x "$gem5_root/build/ARM/gem5.opt" ]] || die "gem5.opt was not produced"
+"$gem5_root/build/ARM/gem5.opt" -h >/dev/null ||
+    die "gem5.opt was produced but is not executable"
 note "ready: $gem5_root/build/ARM/gem5.opt"

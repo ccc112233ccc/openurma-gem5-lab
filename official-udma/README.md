@@ -9,10 +9,10 @@ this track passes.
 
 | Component | Revision |
 | --- | --- |
-| gem5 | `b1a44b89c7bae73fae2dc547bc1f871452075b85` (`v24.0.0.1`) |
+| gem5 | `c8affd15e10f596e6eb7b2dbc64163affc3876c0` (lab target) |
 | OLK 6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |
-| OpenURMA | `0ae5dce300154d761f97095864bda0cf2546b265` |
-| vendored UMDK | `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58` |
+| OpenURMA | `05fc6b2642c560cf42bdc4a47f0042154993dbba` (lab target) |
+| vendored UMDK | `34960cc2610cda1319e999f15dc19ea62a1dde91` (lab target) |
 
 The working trees contain the current laboratory changes.  They are inputs to
 the baseline and must not be reset as part of official-driver bring-up.
@@ -46,14 +46,14 @@ passes in the independent two-guest run documented by
 Build the reproducible official-driver image inside the existing container:
 
 ```sh
-docker exec openurma-repro-20260909 \
+docker exec openurma-gem5-lab \
   bash /workspace/openurma-gem5-lab/official-udma/build_initramfs.sh
 ```
 
 Then start the fastest functional two-node configuration with:
 
 ```sh
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
+./run-dual.sh \
   --profile fast --provider official
 ```
 
@@ -91,7 +91,7 @@ the macOS checkout must not be used for a kernel build.
 Run the reproducible targeted build inside the existing ARM64 build container:
 
 ```sh
-docker exec openurma-repro-20260909 \
+docker exec openurma-gem5-lab \
   bash /workspace/openurma-gem5-lab/official-udma/build_modules.sh
 ```
 

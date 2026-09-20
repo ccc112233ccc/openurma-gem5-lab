@@ -1,0 +1,102 @@
+From ef1b29426208c15dec2fe04ca2073114b9331e48 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 20:52:57 +0800
+Subject: [PATCH 15/27] model peer ring backpressure
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 36 ++++++++++++++++++-
+ .../gem5_scaffold/src/NICTopologySC.hh        |  2 ++
+ 2 files changed, 37 insertions(+), 1 deletion(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 0df70fc..7aa6c3e 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -2675,6 +2675,13 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+     }
+ 
+     while (static_cast<uint32_t>(jetty.consumer) != work.producer) {
++        // A full shared ring is normal finite-queue backpressure.  Keep this
++        // WQE unconsumed so the worker can retry it after virtual time advances
++        // and the peer drains an arrived packet.
++        if (has_peer_ && peer_ring_tx_full()) {
++            udma_sq_backpressured_ = true;
++            return false;
++        }
+         const uint64_t wqe_offset =
+             (jetty.consumer & (block_count - 1U)) *
+             openurma_udma::WqebbBytes;
+@@ -2835,11 +2842,19 @@ NICTopologySC::timing_dma_worker()
+ 
+         udma_poll_peer_ring();
+ 
++        bool sq_backpressured = false;
+         while (!udma_sq_work_.empty()) {
+             const UdmaSqWork work = udma_sq_work_.front();
+             udma_sq_work_.pop_front();
+-            if (!udma_process_sq(work))
++            udma_sq_backpressured_ = false;
++            if (!udma_process_sq(work)) {
++                if (udma_sq_backpressured_) {
++                    udma_sq_work_.push_front(work);
++                    sq_backpressured = true;
++                    break;
++                }
+                 ++udma_queue_errors_;
++            }
+         }
+ 
+         // Try each pending receive at most once per worker activation. If the
+@@ -2853,6 +2868,13 @@ NICTopologySC::timing_dma_worker()
+                 udma_rx_pending_.push_back(std::move(work));
+         }
+ 
++        if (sq_backpressured) {
++            const gem5::Tick ticks = std::max<gem5::Tick>(
++                1, udma_poll_interval_);
++            sc_core::wait(sc_core::sc_time::from_value(ticks),
++                          timing_dma_kick_);
++        }
++
+         while (!timing_dma_queue_.empty()) {
+             TimingDmaRequest request = std::move(timing_dma_queue_.front());
+             timing_dma_queue_.pop_front();
+@@ -3573,6 +3595,18 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+     }
+ }
+ 
++bool
++NICTopologySC::peer_ring_tx_full()
++{
++    peer_ring_map();
++    if (!ring_)
++        return false;
++    PeerRing::Dir &d = ring_->dir[tx_dir_];
++    const uint64_t head = __atomic_load_n(&d.head.value, __ATOMIC_RELAXED);
++    const uint64_t tail = __atomic_load_n(&d.tail.value, __ATOMIC_ACQUIRE);
++    return head - tail >= OU_RING_SLOTS;
++}
++
+ // Wire-packet build shared by both transports.
+ static inline void
+ ou_build_pkt(uint8_t *pkt, uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rva,
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index db68b99..8476c56 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -185,6 +185,7 @@ class NICTopologySC : public sc_core::sc_module
+     gem5::Tick  peer_last_rx_arrival_ = 0;
+     uint64_t    peer_tx_seq_ = 0;
+     void peer_ring_map();
++    bool peer_ring_tx_full();
+     void peer_ring_drain(sc_core::sc_time &delay);
+     void peer_apply(const uint8_t *pkt, size_t pktlen);
+ 
+@@ -466,6 +467,7 @@ class NICTopologySC : public sc_core::sc_module
+     uint64_t udma_rx_packets_ = 0;
+     uint64_t udma_cqes_ = 0;
+     uint64_t udma_queue_errors_ = 0;
++    bool udma_sq_backpressured_ = false;
+ 
+     void udma_reset_resources();
+     void udma_accept_control(const uint8_t *data, uint64_t offset,

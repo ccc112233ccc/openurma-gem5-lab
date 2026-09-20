@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="${LAB_DIR:-$SCRIPT_DIR}"
-OPENURMA_ROOT="${OPENURMA_ROOT:-$LAB_DIR/../OpenURMA}"
+OPENURMA_ROOT="${OPENURMA_ROOT:-$LAB_DIR/sources/OpenURMA}"
 GEM5_ROOT="${GEM5_ROOT:-$LAB_DIR/gem5}"
 KSRC="${KSRC:-}"
 ARM_BUILD="${ARM_BUILD:-}"
@@ -35,7 +35,7 @@ Usage:
     ./build-interactive-initramfs.sh
 
 Optional environment:
-  OPENURMA_ROOT  OpenURMA checkout (default: ../OpenURMA)
+  OPENURMA_ROOT  OpenURMA checkout (default: sources/OpenURMA)
   OUT            output .cpio.gz path
   CROSS_COMPILE  tool prefix (default: aarch64-linux-gnu-)
   EXTRA_BINS     space-separated extra ARM64 executables to place in /usr/bin

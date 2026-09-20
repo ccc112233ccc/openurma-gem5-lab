@@ -1,0 +1,224 @@
+From d50de02f5801122b6ffa7495a9b3688842de9924 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 12:03:24 +0800
+Subject: [PATCH 04/27] sim: model official UMMU probe contract
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 123 +++++++++++++++++-
+ .../gem5_scaffold/src/NICTopologySC.hh        |   6 +
+ 2 files changed, 124 insertions(+), 5 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index a1930e3..899e354 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -161,6 +161,7 @@ bool ou_decomp_trace_enabled();
+ 
+ constexpr uint64_t OuUbiosRootOffset = 0x10000;
+ constexpr uint64_t OuUbiosUbcOffset = 0x11000;
++constexpr uint64_t OuUbiosUmmuOffset = 0x11c00;
+ constexpr uint64_t OuUbiosMsgqOffset = 0x12000;
+ constexpr uint64_t OuUbiosHpaOffset = 0x20000;
+ constexpr uint64_t OuUbiosHpaSize = 0x00e00000;
+@@ -168,6 +169,21 @@ constexpr uint64_t OuUbaseIoOffset = 0x00300000;
+ constexpr uint64_t OuUbaseCmdqSrcOffset = OuUbaseIoOffset + 0x18004;
+ constexpr uint64_t OuUbaseCmdqOffset = OuUbaseIoOffset + 0x18400;
+ constexpr uint64_t OuUbaseCmdqBytes = 0x2c;
++constexpr uint64_t OuUmmuIoOffset = 0x00f00000;
++constexpr uint64_t OuUmmuIoBytes = 0x5000;
++
++constexpr uint32_t OuUmmuCap0 = 0x10;
++constexpr uint32_t OuUmmuCap1 = 0x14;
++constexpr uint32_t OuUmmuCap2 = 0x18;
++constexpr uint32_t OuUmmuCap3 = 0x1c;
++constexpr uint32_t OuUmmuCr0 = 0x30;
++constexpr uint32_t OuUmmuCr0Ack = 0x34;
++constexpr uint32_t OuUmmuGbpa = 0x50;
++constexpr uint32_t OuUmmuMcmdqOffset = 0x100;
++constexpr uint32_t OuUmmuMcmdqStride = 0x10;
++constexpr uint32_t OuUmmuMcmdqProd = 0x8;
++constexpr uint32_t OuUmmuMcmdqCons = 0xc;
++constexpr uint32_t OuUmmuMcmdqEnable = 1U << 31;
+ 
+ template <class T>
+ void
+@@ -180,13 +196,16 @@ ouStoreLe(std::vector<uint8_t> &bytes, size_t offset, T value)
+ std::vector<uint8_t>
+ ouBuildUbiosRoot(uint64_t base)
+ {
+-    std::vector<uint8_t> table(48, 0);
++    std::vector<uint8_t> table(56, 0);
+     const char name[] = "ubios";
+     std::memcpy(table.data(), name, sizeof(name) - 1);
+     ouStoreLe<uint32_t>(table, 16, table.size());
+     table[20] = 1;
+-    ouStoreLe<uint16_t>(table, 32, 1);
+-    ouStoreLe<uint64_t>(table, 40, base + OuUbiosUbcOffset);
++    ouStoreLe<uint16_t>(table, 32, 2);
++    // Publish UMMU first so UBFI has created and annotated its platform
++    // device before UBUS entities refer to ummu_map 0.
++    ouStoreLe<uint64_t>(table, 40, base + OuUbiosUmmuOffset);
++    ouStoreLe<uint64_t>(table, 48, base + OuUbiosUbcOffset);
+     return table;
+ }
+ 
+@@ -214,7 +233,7 @@ ouBuildUbiosUbc(uint64_t base)
+     ouStoreLe<uint64_t>(table, node + 16, OuUbiosHpaSize);
+     table[node + 24] = 48;                   // addressable width
+     table[node + 25] = 1;                    // coherent DMA
+-    ouStoreLe<uint16_t>(table, node + 26, 0xffff); // no UMMU table yet
++    ouStoreLe<uint16_t>(table, node + 26, 0);      // UMMU table index 0
+     ouStoreLe<uint16_t>(table, node + 28, 0);
+     ouStoreLe<uint64_t>(table, node + 32, base + OuUbiosMsgqOffset);
+     ouStoreLe<uint64_t>(table, node + 40, 0x1000);
+@@ -226,17 +245,46 @@ ouBuildUbiosUbc(uint64_t base)
+     return table;
+ }
+ 
++std::vector<uint8_t>
++ouBuildUbiosUmmu(uint64_t base)
++{
++    // Linux ABI: 32-byte ub_table_header, 8-byte count/reserved area, then
++    // one naturally aligned 160-byte struct ummu_node.
++    std::vector<uint8_t> table(40 + 160, 0);
++    const char name[] = "ummu";
++    std::memcpy(table.data(), name, sizeof(name) - 1);
++    ouStoreLe<uint32_t>(table, 16, table.size());
++    table[20] = 1;
++    ouStoreLe<uint16_t>(table, 32, 1);
++
++    const size_t node = 40;
++    ouStoreLe<uint64_t>(table, node + 0, base + OuUmmuIoOffset);
++    ouStoreLe<uint64_t>(table, node + 8, OuUmmuIoBytes);
++    ouStoreLe<uint32_t>(table, node + 16, 0);
++    ouStoreLe<uint16_t>(table, node + 20, 0xffff); // no NUMA proximity
++    ouStoreLe<uint16_t>(table, node + 22, 0);
++    ouStoreLe<uint32_t>(table, node + 44, 1);      // minimum TID
++    ouStoreLe<uint32_t>(table, node + 48, 2048);   // maximum TID
++    // Keep vendor_id zero: select the architecture-generic UMMU behavior.
++    ouStoreLe<uint16_t>(table, node + 78, 0);
++    return table;
++}
++
+ bool
+ ouReadFirmwareTable(uint64_t base, uint64_t off, uint8_t *data, size_t len)
+ {
+     std::vector<uint8_t> table;
+     uint64_t table_offset = 0;
+-    if (off >= OuUbiosRootOffset && off < OuUbiosRootOffset + 48) {
++    if (off >= OuUbiosRootOffset && off < OuUbiosRootOffset + 56) {
+         table = ouBuildUbiosRoot(base);
+         table_offset = OuUbiosRootOffset;
+     } else if (off >= OuUbiosUbcOffset && off < OuUbiosUbcOffset + 440) {
+         table = ouBuildUbiosUbc(base);
+         table_offset = OuUbiosUbcOffset;
++    } else if (off >= OuUbiosUmmuOffset &&
++               off < OuUbiosUmmuOffset + 200) {
++        table = ouBuildUbiosUmmu(base);
++        table_offset = OuUbiosUmmuOffset;
+     } else {
+         return false;
+     }
+@@ -248,6 +296,57 @@ ouReadFirmwareTable(uint64_t base, uint64_t off, uint8_t *data, size_t len)
+ 
+ } // anonymous namespace
+ 
++bool
++NICTopologySC::ummu_access(tlm::tlm_command cmd, uint64_t off,
++                           uint8_t *data, size_t len)
++{
++    if (off < OuUmmuIoOffset || off + len > OuUmmuIoOffset + OuUmmuIoBytes ||
++        !data || !len)
++        return false;
++
++    const uint32_t reg = static_cast<uint32_t>(off - OuUmmuIoOffset);
++    if (cmd == tlm::TLM_READ_COMMAND) {
++        std::memcpy(data, ummu_regs_.data() + reg, len);
++        return true;
++    }
++    if (cmd != tlm::TLM_WRITE_COMMAND)
++        return false;
++
++    std::memcpy(ummu_regs_.data() + reg, data, len);
++
++    // Architectural register handshakes complete synchronously in this
++    // functional model.  The driver still executes its normal polling paths.
++    if (reg <= OuUmmuCr0 && reg + len >= OuUmmuCr0 + sizeof(uint32_t)) {
++        std::memcpy(ummu_regs_.data() + OuUmmuCr0Ack,
++                    ummu_regs_.data() + OuUmmuCr0, sizeof(uint32_t));
++    }
++    if (reg <= OuUmmuGbpa && reg + len >= OuUmmuGbpa + sizeof(uint32_t)) {
++        uint32_t gbpa = openurma_udma::loadLe32(
++            ummu_regs_.data() + OuUmmuGbpa);
++        gbpa &= ~(1U << 31); // hardware clears GBPA.UPDATE after applying it
++        openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuGbpa, gbpa);
++    }
++
++    // Each modeled MCMDQ consumes all published commands immediately.  Bit 31
++    // in CONS is the queue-enable acknowledgement; the remaining index/wrap
++    // bits follow PROD.  This is sufficient for the official driver's queue
++    // ordering and CMD_SYNC polling contract without inventing translations.
++    if (reg >= OuUmmuMcmdqOffset &&
++        reg < OuUmmuMcmdqOffset + 0x1000) {
++        const uint32_t local = (reg - OuUmmuMcmdqOffset) %
++                               OuUmmuMcmdqStride;
++        if (local == OuUmmuMcmdqProd && len == sizeof(uint32_t)) {
++            const uint32_t prod = openurma_udma::loadLe32(data);
++            const uint32_t queue = reg - local;
++            const uint32_t cons = prod & ~OuUmmuMcmdqEnable;
++            openurma_udma::storeLe32(
++                ummu_regs_.data() + queue + OuUmmuMcmdqCons,
++                cons | (prod & OuUmmuMcmdqEnable));
++        }
++    }
++    return true;
++}
++
+ uint32_t
+ NICTopologySC::ubios_config_read(uint32_t byte_addr, bool endpoint) const
+ {
+@@ -959,6 +1058,15 @@ NICTopologySC::NICTopologySC(sc_core::sc_module_name nm)
+     _dma_unbound_target.register_b_transport(
+         this, &NICTopologySC::dma_unbound_b);
+ 
++    // Minimal architecture-generic capabilities backed by the behavior in
++    // ummu_access(): 2048 TIDs, an 8-bit endpoint tag, one 256-entry MCMDQ,
++    // one 256-entry event queue, AArch64 stage-1 translation, 4 KiB pages,
++    // 40-bit output addresses, range/broadcast invalidation and coherency.
++    openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap0, 0x00000b08);
++    openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap1, 0x00042208);
++    openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap2, 0x00009056);
++    openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap3, 0x00000010);
++
+     SC_THREAD(timing_dma_worker);
+ 
+     if (impl_->cqe_stream) impl_->cqe_stream->out_1.bind(_cqe_tap);
+@@ -3062,6 +3170,11 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
+         return;
+     }
+ 
++    if (ummu_access(cmd, off, data, len)) {
++        trans.set_response_status(tlm::TLM_OK_RESPONSE);
++        return;
++    }
++
+     // The first official-driver milestone exposes a real firmware-discovered
+     // controller and a reserved message-queue aperture. Queue semantics are
+     // added incrementally; reads are deterministic and writes are retained as
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index ba02fb2..10fc6ed 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -267,6 +267,12 @@ class NICTopologySC : public sc_core::sc_module
+     uint32_t ubios_root_cna_ = 0;
+     uint32_t ubios_endpoint_cna_ = 0;
+     std::unordered_map<uint32_t, uint32_t> ubios_endpoint_config_;
++    // Architecture-generic UMMU register aperture.  Capability registers are
++    // synthesized by the model while writable state is retained byte-for-byte
++    // so the stock driver can use both 32-bit and 64-bit MMIO accesses.
++    std::array<uint8_t, 0x5000> ummu_regs_{};
++    bool ummu_access(tlm::tlm_command cmd, uint64_t off,
++                     uint8_t *data, size_t len);
+     // UBASE command queue lives in endpoint resource 2 (the IO resource).
+     // The stock driver programs a coherent CSQ/CRQ pair here and rings CSQ
+     // tail after publishing one or more 32-byte descriptors.

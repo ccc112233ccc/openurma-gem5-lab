@@ -1,0 +1,89 @@
+From 9861720ed04bcbd76690759edd6334b2532d2282 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 19:58:54 +0800
+Subject: [PATCH 7/8] Keep server synchronized during one-sided READ latency
+
+---
+ .../tools/urma_perftest/perftest_run_test.c   | 40 +++++++++++++++----
+ 1 file changed, 33 insertions(+), 7 deletions(-)
+
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index 3a40e56..e4d4a86 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -102,6 +102,7 @@ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+         return 0;
+     }
+     supported = cfg->cmd == PERFTEST_SEND_LAT ||
++        cfg->cmd == PERFTEST_READ_LAT ||
+         cfg->cmd == PERFTEST_WRITE_LAT ||
+         (cfg->cmd == PERFTEST_SEND_BW && !cfg->bidirection) ||
+         ((cfg->cmd == PERFTEST_READ_BW ||
+@@ -110,7 +111,7 @@ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+         cfg->pair_num != 1 || cfg->jettys != 1) {
+         (void)fprintf(stderr,
+             "Distributed virtual-time synchronization currently supports only "
+-            "iteration-mode send_lat/write_lat, unidirectional send_bw, or bidirectional "
++            "iteration-mode send/read/write_lat, unidirectional send_bw, or bidirectional "
+             "read/write_bw with one pair and one jetty.\n");
+         return -1;
+     }
+@@ -1638,9 +1639,28 @@ static int run_read_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
+ 
+ int run_read_lat(perftest_context_t *ctx, perftest_config_t *cfg)
+ {
+-    /* Only Client read test. */
+-    if (cfg->comm.server_ip == NULL) {
+-        return 0;
++    int ret = 0;
++    bool dist_sync_active = false;
++    const bool is_server = cfg->comm.server_ip == NULL;
++
++    /*
++     * READ is one-sided: normally only the client enters the traffic loop.
++     * In a distributed gem5 run the otherwise-idle server must nevertheless
++     * remain inside DistIface's collective synchronization until it has
++     * served the final READ response.  This coordination is enabled only by
++     * OPENURMA_DIST_SYNC and leaves the ordinary perftest protocol unchanged.
++     */
++    if (rma_lat_dist_sync_begin(cfg, 0, &dist_sync_active) != 0) {
++        rma_lat_dist_sync_end(&dist_sync_active);
++        return -1;
++    }
++    if (is_server) {
++        if (dist_sync_active &&
++            sync_time(cfg->comm.sock_fd[0], "read_lat_dist_done") != 0) {
++            ret = -1;
++        }
++        rma_lat_dist_sync_end(&dist_sync_active);
++        return ret;
+     }
+ 
+     (void)printf("%s\n", cfg->time_type.bs.iterations == 1 ? RESULT_LAT_FMT : RESULT_LAT_DUR_FMT);
+@@ -1650,17 +1670,23 @@ int run_read_lat(perftest_context_t *ctx, perftest_config_t *cfg)
+             cfg->size = (1U << i);
+             if (run_read_lat_once(ctx, cfg) != 0) {
+                 (void)fprintf(stderr, "Failed to run once, size: %u.\n", cfg->size);
+-                return -1;
++                ret = -1;
++                break;
+             }
+         }
+     } else {
+         if (run_read_lat_once(ctx, cfg) != 0) {
+             (void)fprintf(stderr, "Failed to run once, size: %u.\n", cfg->size);
+-            return -1;
++            ret = -1;
+         }
+     }
+ 
+-    return 0;
++    if (dist_sync_active &&
++        sync_time(cfg->comm.sock_fd[0], "read_lat_dist_done") != 0) {
++        ret = -1;
++    }
++    rma_lat_dist_sync_end(&dist_sync_active);
++    return ret;
+ }
+ 
+ static void *run_write_lat_duplex(void *arg)

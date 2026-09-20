@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-container="${OPENURMA_CONTAINER:-openurma-repro-20260909}"
+container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
 m5term="${OPENURMA_M5TERM:-/workspace/openurma-gem5-lab/gem5/util/term/m5term}"
 port="${OPENURMA_M5TERM_PORT:-3456}"
 takeover="${OPENURMA_ATTACH_TAKEOVER:-1}"

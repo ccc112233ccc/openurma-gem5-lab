@@ -27,7 +27,7 @@ addToPath(str(GEM5_CONFIGS / "example" / "arm"))
 
 
 OPENURMA_ROOT = Path(
-    os.environ.get("OPENURMA_ROOT", str(LAB_ROOT.parent / "OpenURMA"))
+    os.environ.get("OPENURMA_ROOT", str(LAB_ROOT / "sources" / "OpenURMA"))
 )
 UPSTREAM = OPENURMA_ROOT / (
     "eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py"

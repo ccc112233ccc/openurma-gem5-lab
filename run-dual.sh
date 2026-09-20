@@ -1028,7 +1028,7 @@ else
 fi
 
 lab_host="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-container="${OPENURMA_CONTAINER:-openurma-repro-20260909}"
+container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
 lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
 gem5="${OPENURMA_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
 m5_path="${OPENURMA_M5_PATH:-$lab/system}"

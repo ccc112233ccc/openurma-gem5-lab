@@ -1,0 +1,211 @@
+From 8a1f2c81951c0bf19292997ba1939eed436730ea Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 10:23:23 +0800
+Subject: [PATCH 02/27] Model UBASE command queue and USI capability
+
+Observable milestone: the unchanged UBASE driver reports firmware 1.0.0.0 and reaches UB MSI descriptor setup. The first failing boundary is now mailbox status/EQC creation (-16). Validated in openurma-gem5-lab/run-official-usi-v3-20260917. No official OLK driver source was modified.
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 106 +++++++++++++++++-
+ .../gem5_scaffold/src/NICTopologySC.hh        |   7 ++
+ 2 files changed, 108 insertions(+), 5 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index cae6ede..f860058 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -164,6 +164,9 @@ constexpr uint64_t OuUbiosUbcOffset = 0x11000;
+ constexpr uint64_t OuUbiosMsgqOffset = 0x12000;
+ constexpr uint64_t OuUbiosHpaOffset = 0x20000;
+ constexpr uint64_t OuUbiosHpaSize = 0x00e00000;
++constexpr uint64_t OuUbaseIoOffset = 0x00300000;
++constexpr uint64_t OuUbaseCmdqOffset = OuUbaseIoOffset + 0x18400;
++constexpr uint64_t OuUbaseCmdqBytes = 0x2c;
+ 
+ template <class T>
+ void
+@@ -256,6 +259,7 @@ NICTopologySC::ubios_config_read(uint32_t byte_addr, bool endpoint) const
+       case 0x3c: return 0x00000000;
+       case 0x40: return endpoint ? 0x11000000 : 0x12000000;
+       case 0x44: return endpoint ? 0xcc08a001 : 0xcc080000;
++      case 0x40004: return endpoint ? 0x00000008 : 0;
+       case 0x40024: return endpoint ? 0x000001c0 : 0;
+       case 0x40034: return endpoint ? 0x00000100 : 0;
+       case 0x40038: return endpoint ? 0x00000100 : 0;
+@@ -267,6 +271,7 @@ NICTopologySC::ubios_config_read(uint32_t byte_addr, bool endpoint) const
+       case 0x40050: return endpoint ? 0x00200000 : 0;
+       case 0x40054: return 0x00000000;
+       case 0x40084: return 0; // 4 KiB system page size
++      case 0x40c08: return endpoint ? 0x00000003 : 0; // 2^3 Type-1 USI vectors
+       default:   return 0;
+     }
+ }
+@@ -312,9 +317,11 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+ 
+         const bool config_request = task_type == 0 && payload_len == 48;
+         const bool token_request = task_type == 0 && payload_len == 36;
++        const bool header_request = task_type == 0 && payload_len == 32;
+         const bool enum_request = task_type == 1 && opcode <= 2 &&
+             payload_len >= 44;
+-        if (!config_request && !token_request && !enum_request) {
++        if (!config_request && !token_request && !header_request &&
++            !enum_request) {
+             std::cerr << "[NIC ubios] unsupported UBC message task="
+                       << unsigned(task_type) << " opcode=0x" << std::hex
+                       << unsigned(opcode) << std::dec << " len="
+@@ -329,8 +336,8 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+             break;
+         uint32_t req_addr = 0;
+         uint8_t response_opcode = opcode;
+-        if (config_request || token_request) {
+-            if (config_request) {
++        if (config_request || token_request || header_request) {
++            if (config_request || header_request) {
+                 response = request;
+             } else {
+                 response.assign(40, 0);
+@@ -354,7 +361,7 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+             openurma_udma::storeLe32(response.data() + 16, tph1);
+             // msg_extended_header.plen is the payload length, not the full
+             // packet length carried in the CQE.
+-            response[28] = config_request ? 16 : 8;
++            response[28] = config_request ? 16 : (token_request ? 8 : 0);
+             response[29] &= 0xf0;
+             response[30] = 0;
+             response_opcode = opcode | 1;
+@@ -370,7 +377,7 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+                 openurma_udma::storeLe32(response.data() + 32,
+                                          ubios_config_read(req_addr * 4,
+                                                            endpoint));
+-            } else {
++            } else if (token_request) {
+                 // Security token query response.
+                 openurma_udma::storeLe32(response.data() + 32, 1);
+                 openurma_udma::storeLe32(response.data() + 36, 0x4f55524d);
+@@ -474,6 +481,10 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+         else if (token_request)
+             std::cerr << "[NIC ubios] completed token query msn=" << msn
+                       << "\n";
++        else if (header_request)
++            std::cerr << "[NIC ubios] completed header-only control msn="
++                      << msn << " code=0x" << std::hex
++                      << unsigned(request[31]) << std::dec << "\n";
+         else
+             std::cerr << "[NIC ubios] completed enum command="
+                       << unsigned(opcode) << " msn=" << msn
+@@ -511,6 +522,87 @@ NICTopologySC::ubios_msgq_access(tlm::tlm_command cmd, uint64_t off,
+     return true;
+ }
+ 
++void
++NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
++{
++    constexpr size_t CsqAddrL = 0x00 / 4;
++    constexpr size_t CsqAddrH = 0x04 / 4;
++    constexpr size_t CsqDepth = 0x08 / 4;
++    constexpr size_t CsqTail = 0x10 / 4;
++    constexpr size_t CsqHead = 0x14 / 4;
++    constexpr uint32_t DescriptorBytes = 32;
++    constexpr uint8_t FlagOut = 1U << 1;
++
++    const uint64_t base = ubase_cmdq_regs_[CsqAddrL] |
++        (uint64_t(ubase_cmdq_regs_[CsqAddrH]) << 32);
++    // The depth register uses units of eight descriptors in this ABI.
++    const uint32_t depth = ubase_cmdq_regs_[CsqDepth] << 3;
++    if (!base || !depth)
++        return;
++
++    uint32_t head = ubase_cmdq_regs_[CsqHead] % depth;
++    const uint32_t tail = new_pi % depth;
++    while (head != tail) {
++        std::array<uint8_t, DescriptorBytes> desc{};
++        const uint64_t pa = base + uint64_t(head) * DescriptorBytes;
++        if (!ou_dma(pa, desc.data(), desc.size(), false)) {
++            std::cerr << "[NIC ubase] failed to read CSQ descriptor pa=0x"
++                      << std::hex << pa << std::dec << "\n";
++            break;
++        }
++
++        const uint16_t opcode = uint16_t(desc[0]) |
++            (uint16_t(desc[1]) << 8);
++        // Hardware owns the descriptor after Tail advances.  Successful
++        // completion sets OUT, clears the return code and writes response
++        // data in place before publishing the new Head.
++        desc[2] |= FlagOut;
++        desc[4] = 0;
++        desc[5] = 0;
++        if (opcode == 0x0001) {
++            // QUERY_FW_VER: four one-byte components, reported as 1.0.0.0.
++            openurma_udma::storeLe32(desc.data() + 8, 0x01000000);
++        }
++        if (!ou_dma(pa, desc.data(), desc.size(), true)) {
++            std::cerr << "[NIC ubase] failed to write CSQ descriptor pa=0x"
++                      << std::hex << pa << std::dec << "\n";
++            break;
++        }
++
++        head = (head + 1) % depth;
++        ubase_cmdq_regs_[CsqHead] = head;
++        std::cerr << "[NIC ubase] completed CSQ opcode=0x" << std::hex
++                  << opcode << std::dec << " head=" << head << "\n";
++    }
++    ubase_cmdq_regs_[CsqTail] = tail;
++}
++
++bool
++NICTopologySC::ubase_cmdq_access(tlm::tlm_command cmd, uint64_t off,
++                                 uint8_t *data, size_t len)
++{
++    if (off < OuUbaseCmdqOffset ||
++        off + len > OuUbaseCmdqOffset + OuUbaseCmdqBytes ||
++        !data || len != sizeof(uint32_t) || (off & 3))
++        return false;
++
++    const size_t index = (off - OuUbaseCmdqOffset) / 4;
++    if (cmd == tlm::TLM_READ_COMMAND) {
++        openurma_udma::storeLe32(data, ubase_cmdq_regs_[index]);
++    } else if (cmd == tlm::TLM_WRITE_COMMAND) {
++        const uint32_t value = openurma_udma::loadLe32(data);
++        ubase_cmdq_regs_[index] = value;
++        // A new CSQ base denotes a fresh ring, including after probe retry.
++        if (index == 0x00 / 4)
++            ubase_cmdq_regs_[0x14 / 4] = 0;
++        if (index == 0x10 / 4)
++            ubase_cmdq_kick(value);
++    } else {
++        return false;
++    }
++    return true;
++}
++
+ namespace {
+ 
+ gem5::Tick
+@@ -2753,6 +2845,10 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
+         trans.set_response_status(tlm::TLM_OK_RESPONSE);
+         return;
+     }
++    if (ubase_cmdq_access(cmd, off, data, len)) {
++        trans.set_response_status(tlm::TLM_OK_RESPONSE);
++        return;
++    }
+     if (off >= OuUbiosMsgqOffset && off < OuUbiosHpaOffset) {
+         if (cmd == tlm::TLM_READ_COMMAND && data && len)
+             std::memset(data, 0, len);
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 714c798..6d63f6f 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -262,6 +262,13 @@ class NICTopologySC : public sc_core::sc_module
+     uint32_t ubios_config_read(uint32_t byte_addr, bool endpoint) const;
+     uint32_t ubios_root_cna_ = 0;
+     uint32_t ubios_endpoint_cna_ = 0;
++    // UBASE command queue lives in endpoint resource 2 (the IO resource).
++    // The stock driver programs a coherent CSQ/CRQ pair here and rings CSQ
++    // tail after publishing one or more 32-byte descriptors.
++    std::array<uint32_t, 0x2c / sizeof(uint32_t)> ubase_cmdq_regs_{};
++    bool ubase_cmdq_access(tlm::tlm_command cmd, uint64_t off,
++                           uint8_t *data, size_t len);
++    void ubase_cmdq_kick(uint32_t new_pi);
+     bool dma_external_bound_ = false;
+     bool dma_native_bound_ = false;
+     uint32_t dma_max_outstanding_ = 16;

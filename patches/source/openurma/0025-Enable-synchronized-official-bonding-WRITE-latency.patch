@@ -1,0 +1,16 @@
+From 760be337cef7f73f8fe9d9f6ce002c3c65e1f551 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 17:38:58 +0800
+Subject: [PATCH 25/27] Enable synchronized official bonding WRITE latency
+
+---
+ integration/umdk/vendor/umdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/integration/umdk/vendor/umdk b/integration/umdk/vendor/umdk
+index 23e77b7..af72746 160000
+--- a/integration/umdk/vendor/umdk
++++ b/integration/umdk/vendor/umdk
+@@ -1 +1 @@
+-Subproject commit 23e77b724d138ea00114605308f0994853e72f20
++Subproject commit af727461f26b4b0317348c871534569b959ee7b3

@@ -1,0 +1,88 @@
+From bd60afa64bb8f4883578fb60c136f67e4933ec32 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 16:44:27 +0800
+Subject: [PATCH 11/27] Support official JFS and direct SQE submission
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 36 ++++++++++++++++---
+ .../gem5_scaffold/src/NICTopologySC.hh        |  1 +
+ 2 files changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index be0768b..be09542 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -1021,8 +1021,11 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+                     jetty.dsqe_page_offset = OuUdmaMemOffset + 0x1000 +
+                         uint64_t(tag) * openurma_udma::HardwarePageBytes;
+                     jetty.official = true;
++                    jetty.is_jetty = ((dw(0) >> 19) & 1U) == 0;
+                     udma_jettys_[tag] = jetty;
+-                    std::cerr << "[NIC udma official] Jetty id=" << tag
++                    std::cerr << "[NIC udma official] "
++                              << (jetty.is_jetty ? "Jetty" : "JFS")
++                              << " id=" << tag
+                               << " sq_iova=0x" << std::hex << sq_iova
+                               << " db_off=0x" << jetty.dsqe_page_offset +
+                                      openurma_udma::DoorbellOffset
+@@ -2722,7 +2725,7 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+         if (wqe.completionEnabled()) {
+             const uint16_t completed_index = static_cast<uint16_t>(
+                 (jetty.consumer + wqebbs - 1U) & (block_count - 1U));
+-            if (!udma_write_cqe(jetty.send_jfc_id, false, true,
++            if (!udma_write_cqe(jetty.send_jfc_id, false, jetty.is_jetty,
+                                 wqe.opcode(), completed_index, jetty.id,
+                                 payload.size(), jetty.user_queue,
+                                 wqe.immediate())) {
+@@ -3692,12 +3695,37 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
+         return;
+     }
+ 
+-    if (udma_mode_ && cmd == tlm::TLM_WRITE_COMMAND && data && len == 4) {
++    if (udma_mode_ && cmd == tlm::TLM_WRITE_COMMAND && data && len >= 4) {
+         for (const auto &entry : udma_jettys_) {
+             const UdmaJetty &jetty = entry.second;
++            if (off == jetty.dsqe_page_offset) {
++                // A one-WQEBB direct SQE is copied to the device page in one
++                // 64-byte transaction or as ordered 8-byte stores. The SQE
++                // is already present in the normal SQ ring before the MMIO
++                // barrier, so its 16-bit final producer index is sufficient
++                // to drive the same queue engine without duplicating decode.
++                const uint32_t low = openurma_udma::loadLe32(data) & 0xffffU;
++                uint32_t producer =
++                    (static_cast<uint32_t>(jetty.consumer) & ~0xffffU) | low;
++                if (producer < static_cast<uint32_t>(jetty.consumer))
++                    producer += 0x10000U;
++                if (ou_packet_trace_enabled()) {
++                    std::cerr << "[NIC udma] direct SQE jetty=" << jetty.id
++                              << " off=0x" << std::hex << off << std::dec
++                              << " producer=" << producer << "\n";
++                }
++                if (!udma_enqueue_sq(jetty.id, producer)) {
++                    ++udma_queue_errors_;
++                    trans.set_response_status(
++                        tlm::TLM_GENERIC_ERROR_RESPONSE);
++                } else {
++                    trans.set_response_status(tlm::TLM_OK_RESPONSE);
++                }
++                return;
++            }
+             const uint64_t doorbell = jetty.dsqe_page_offset +
+                                       openurma_udma::DoorbellOffset;
+-            if (off == doorbell) {
++            if (off == doorbell && len == 4) {
+                 const uint32_t producer = openurma_udma::loadLe32(data);
+                 if (ou_packet_trace_enabled()) {
+                     std::cerr << "[NIC udma] SQ doorbell jetty=" << jetty.id
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 644b445..ef77da1 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -400,6 +400,7 @@ class NICTopologySC : public sc_core::sc_module
+         uint64_t consumer = 0;
+         uint32_t bound_remote_id = 0;
+         bool official = false;
++        bool is_jetty = true;
+     };
+     struct UdmaSqWork {
+         uint32_t jetty_id = 0;

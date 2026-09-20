@@ -1,0 +1,413 @@
+From f7c594163eac329b5e56793e024287a9470c1b1b Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 11:33:59 +0800
+Subject: [PATCH 03/27] Model UBASE CtrlQ responses and Type-1 MSI delivery
+
+---
+ .../configs/single_node_fs_clean.py           |   3 +
+ .../gem5_scaffold/src/NICTopologySC.cc        | 232 +++++++++++++++++-
+ .../gem5_scaffold/src/NICTopologySC.hh        |  10 +
+ .../gem5_scaffold/src/NICTopologySC.py        |   3 +
+ 4 files changed, 247 insertions(+), 1 deletion(-)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index b7b342f..2c7285b 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -477,6 +477,9 @@ def create(args):
+     # packets directly at membus bypasses the component that generates valid
+     # ownership/invalidation transactions for the CPU cache hierarchy.
+     system.nic.dma = system.iobus.cpu_side_ports
++    # MSI writes target the board's on-chip interrupt controller, which is
++    # attached directly to membus rather than behind the off-chip IO bus.
++    system.nic.msi = system.membus.cpu_side_ports
+ 
+     # SC-to-SC binding: wire TX feeds into the loopback, loopback's
+     # output feeds into wire RX. Pure SystemC TLM ports — no gem5
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index f860058..a1930e3 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -165,6 +165,7 @@ constexpr uint64_t OuUbiosMsgqOffset = 0x12000;
+ constexpr uint64_t OuUbiosHpaOffset = 0x20000;
+ constexpr uint64_t OuUbiosHpaSize = 0x00e00000;
+ constexpr uint64_t OuUbaseIoOffset = 0x00300000;
++constexpr uint64_t OuUbaseCmdqSrcOffset = OuUbaseIoOffset + 0x18004;
+ constexpr uint64_t OuUbaseCmdqOffset = OuUbaseIoOffset + 0x18400;
+ constexpr uint64_t OuUbaseCmdqBytes = 0x2c;
+ 
+@@ -250,6 +251,11 @@ ouReadFirmwareTable(uint64_t base, uint64_t off, uint8_t *data, size_t len)
+ uint32_t
+ NICTopologySC::ubios_config_read(uint32_t byte_addr, bool endpoint) const
+ {
++    if (endpoint) {
++        const auto saved = ubios_endpoint_config_.find(byte_addr & ~3U);
++        if (saved != ubios_endpoint_config_.end())
++            return saved->second;
++    }
+     // Minimal root-controller configuration image. The GUID is intentionally
+     // stable; later registers are added only when an official enumeration
+     // request reaches them, keeping the modeled contract evidence-driven.
+@@ -276,6 +282,67 @@ NICTopologySC::ubios_config_read(uint32_t byte_addr, bool endpoint) const
+     }
+ }
+ 
++void
++NICTopologySC::ubios_config_write(uint32_t byte_addr, uint32_t byte_enable,
++                                  uint32_t value, bool endpoint)
++{
++    if (!endpoint)
++        return;
++    const uint32_t aligned = byte_addr & ~3U;
++    uint32_t merged = ubios_config_read(aligned, true);
++    for (uint32_t byte = 0; byte < 4; ++byte) {
++        if (byte_enable & (1U << byte)) {
++            const uint32_t mask = 0xffU << (byte * 8);
++            merged = (merged & ~mask) | (value & mask);
++        }
++    }
++    ubios_endpoint_config_[aligned] = merged;
++}
++
++bool
++NICTopologySC::ubase_raise_type1_msi(uint32_t vector)
++{
++    // These registers are populated by the stock UBUS MSI code through
++    // configuration messages.  The model consumes the programmed MSI tuple;
++    // it does not assume a particular interrupt controller or SPI number.
++    constexpr uint32_t Enable = 0x40c04;
++    constexpr uint32_t EnabledVectors = 0x40c0c;
++    constexpr uint32_t Data = 0x40c10;
++    constexpr uint32_t AddressLow = 0x40c14;
++    constexpr uint32_t AddressHigh = 0x40c18;
++    constexpr uint32_t Mask = 0x40c20;
++
++    const auto reg = [this](uint32_t address) {
++        const auto it = ubios_endpoint_config_.find(address);
++        return it == ubios_endpoint_config_.end() ? 0U : it->second;
++    };
++    const uint32_t enabled_log2 = reg(EnabledVectors);
++    const uint32_t count = enabled_log2 < 31 ? (1U << enabled_log2) : 0;
++    if (!(reg(Enable) & 1U) || vector >= count ||
++        (reg(Mask) & (1U << vector)))
++        return false;
++
++    const uint64_t address = reg(AddressLow) |
++        (uint64_t(reg(AddressHigh)) << 32);
++    uint32_t data = reg(Data) + vector;
++    if (!system_ || !address || !msi_native_bound_ ||
++        !system_->isAtomicMode())
++        return false;
++
++    // The GICv2m SETSPI register has a write side effect, so this must be a
++    // real atomic MMIO transaction rather than a functional debugger access.
++    gem5::Request::Flags flags;
++    auto request = std::make_shared<gem5::Request>(
++        address, sizeof(data), flags, dma_requestor_id_);
++    gem5::Packet packet(request, gem5::MemCmd::WriteReq);
++    packet.dataStatic(reinterpret_cast<uint8_t *>(&data));
++    msi_port.sendAtomic(&packet);
++    std::cerr << "[NIC ubase] raised Type-1 MSI vector=" << vector
++              << " address=0x" << std::hex << address << " data=0x" << data
++              << std::dec << "\n";
++    return true;
++}
++
+ void
+ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+ {
+@@ -374,6 +441,15 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+                     openurma_udma::loadLe32(request.data() + 4) & 0xffff;
+                 const bool endpoint = ubios_endpoint_cna_ &&
+                     dcna == ubios_endpoint_cna_;
++                const uint8_t subcode = (request[31] >> 4) & 0xf;
++                if (subcode == 1 || subcode == 3) {
++                    const uint32_t control =
++                        openurma_udma::loadLe32(request.data() + 32);
++                    ubios_config_write(req_addr * 4,
++                        (control >> 4) & 0xf,
++                        openurma_udma::loadLe32(request.data() + 44),
++                        endpoint);
++                }
+                 openurma_udma::storeLe32(response.data() + 32,
+                                          ubios_config_read(req_addr * 4,
+                                                            endpoint));
+@@ -493,6 +569,113 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+     }
+ }
+ 
++bool
++NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
++    const std::vector<uint8_t> &request)
++{
++    constexpr size_t Ue2ueHeaderBytes = 16;
++    constexpr size_t CtrlqHeaderBytes = 12;
++    constexpr size_t CtrlqDataBytes = 20;
++    constexpr size_t DescriptorBytes = 32;
++    constexpr uint8_t FlagOut = 1U << 1;
++    constexpr uint16_t Ue2ueCtrlqSubcommand = 3;
++    constexpr uint8_t QosService = 4;
++    constexpr uint8_t QueryVl = 1;
++    constexpr uint8_t QuerySl = 2;
++    constexpr uint8_t DeviceRegisterService = 2;
++    constexpr uint8_t NotifyControlPlaneInit = 0x15;
++
++    if (request.size() < Ue2ueHeaderBytes + CtrlqHeaderBytes ||
++        (uint16_t(request[4]) | (uint16_t(request[5]) << 8)) !=
++            Ue2ueCtrlqSubcommand)
++        return false;
++
++    const uint8_t *ctrlq = request.data() + Ue2ueHeaderBytes;
++    const uint8_t service = ctrlq[1];
++    const uint8_t opcode = ctrlq[3];
++    const bool qos_query = service == QosService &&
++        (opcode == QuerySl || opcode == QueryVl);
++    const bool control_plane_init = service == DeviceRegisterService &&
++        opcode == NotifyControlPlaneInit;
++    if (!qos_query && !control_plane_init)
++        return false;
++
++    const uint16_t requested_output = uint16_t(request[12]) |
++        (uint16_t(request[13]) << 8);
++    const size_t response_bytes = qos_query ? CtrlqDataBytes :
++        requested_output;
++    std::vector<uint8_t> event(Ue2ueHeaderBytes + CtrlqHeaderBytes +
++                               response_bytes, 0);
++    std::memcpy(event.data(), request.data(), Ue2ueHeaderBytes);
++    // A response carries its payload as input data to the receiver.  Preserve
++    // the UE identities and sequence, but convert the transport direction and
++    // sizes exactly as the official peer-side UBASE code would do.
++    event[10] = static_cast<uint8_t>(response_bytes);
++    event[11] = static_cast<uint8_t>(response_bytes >> 8);
++    event[12] = 0;
++    event[13] = 0;
++    event[14] = 1U << 1; // is_resp
++    // The CRQ callback keys the response by the outer UE2UE sequence.  The
++    // base block mirrors the request identity and reports successful status.
++    std::memcpy(event.data() + Ue2ueHeaderBytes, ctrlq, CtrlqHeaderBytes);
++    uint8_t *response = event.data() + Ue2ueHeaderBytes + CtrlqHeaderBytes;
++    if (service == QosService && opcode == QuerySl) {
++        // Expose SL0 for the NIC itself and for both UDMA transport modes,
++        // plus a finite RC resource count.  These are capability values,
++        // independent of timing.
++        response[0] = 0x01; // unic_sl_bitmap = BIT(0)
++        response[2] = 0x00;
++        response[3] = 0x04; // rc_max_cnt = 1024
++        response[4] = 0x01; // udma_tp_sl_bitmap = BIT(0)
++        response[6] = 0x01; // udma_ctp_sl_bitmap = BIT(0)
++    } else if (service == QosService) {
++        response[0] = 0x01; // vl_bitmap = BIT(0)
++    }
++
++    constexpr size_t CrqAddrL = 0x18 / 4;
++    constexpr size_t CrqAddrH = 0x1c / 4;
++    constexpr size_t CrqDepth = 0x20 / 4;
++    constexpr size_t CrqTail = 0x24 / 4;
++    const uint64_t base = ubase_cmdq_regs_[CrqAddrL] |
++        (uint64_t(ubase_cmdq_regs_[CrqAddrH]) << 32);
++    const uint32_t depth = ubase_cmdq_regs_[CrqDepth] << 3;
++    if (!base || !depth)
++        return false;
++
++    const uint32_t num = static_cast<uint32_t>(
++        (event.size() + 8 + DescriptorBytes - 1) / DescriptorBytes);
++    uint32_t tail = ubase_cmdq_regs_[CrqTail] % depth;
++    size_t event_offset = 0;
++    for (uint32_t index = 0; index < num; ++index) {
++        std::array<uint8_t, DescriptorBytes> desc{};
++        if (index == 0) {
++            desc[0] = 0x0e;
++            desc[1] = 0xf0;
++            desc[2] = FlagOut;
++            desc[3] = static_cast<uint8_t>(num);
++            const size_t chunk = std::min(event.size(), DescriptorBytes - 8);
++            std::memcpy(desc.data() + 8, event.data(), chunk);
++            event_offset = chunk;
++        } else {
++            const size_t chunk = std::min(event.size() - event_offset,
++                                          DescriptorBytes);
++            std::memcpy(desc.data(), event.data() + event_offset, chunk);
++            event_offset += chunk;
++        }
++        if (!ou_dma(base + uint64_t(tail) * DescriptorBytes,
++                    desc.data(), desc.size(), true))
++            return false;
++        tail = (tail + 1) % depth;
++    }
++    ubase_cmdq_regs_[CrqTail] = tail;
++    ubase_cmdq_src_ |= 1U << 1;
++    std::cerr << "[NIC ubase] emitted UE2UE CtrlQ response service="
++              << unsigned(service) << " opcode=0x" << std::hex
++              << unsigned(opcode) << std::dec << " crq_tail=" << tail
++              << "\n";
++    return ubase_raise_type1_msi(0);
++}
++
+ bool
+ NICTopologySC::ubios_msgq_access(tlm::tlm_command cmd, uint64_t off,
+                                  uint8_t *data, size_t len)
+@@ -553,6 +736,21 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+ 
+         const uint16_t opcode = uint16_t(desc[0]) |
+             (uint16_t(desc[1]) << 8);
++        const uint32_t descriptor_count = std::max<uint32_t>(1, desc[3]);
++        std::vector<uint8_t> command_data;
++        if (opcode == 0xf00e) {
++            command_data.insert(command_data.end(), desc.begin() + 8,
++                                desc.end());
++            for (uint32_t index = 1; index < descriptor_count; ++index) {
++                std::array<uint8_t, DescriptorBytes> continuation{};
++                const uint32_t pos = (head + index) % depth;
++                if (!ou_dma(base + uint64_t(pos) * DescriptorBytes,
++                            continuation.data(), continuation.size(), false))
++                    break;
++                command_data.insert(command_data.end(), continuation.begin(),
++                                    continuation.end());
++            }
++        }
+         // Hardware owns the descriptor after Tail advances.  Successful
+         // completion sets OUT, clears the return code and writes response
+         // data in place before publishing the new Head.
+@@ -562,6 +760,11 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+         if (opcode == 0x0001) {
+             // QUERY_FW_VER: four one-byte components, reported as 1.0.0.0.
+             openurma_udma::storeLe32(desc.data() + 8, 0x01000000);
++        } else if (opcode == 0x7001) {
++            // QUERY_MB_ST: bit 0 is the driver's completion-status bit.  A
++            // value of one means that the preceding mailbox command finished
++            // successfully; bit 1 remains clear because hardware is idle.
++            openurma_udma::storeLe32(desc.data() + 8, 0x00000001);
+         }
+         if (!ou_dma(pa, desc.data(), desc.size(), true)) {
+             std::cerr << "[NIC ubase] failed to write CSQ descriptor pa=0x"
+@@ -569,7 +772,10 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+             break;
+         }
+ 
+-        head = (head + 1) % depth;
++        if (opcode == 0xf00e && !command_data.empty())
++            ubase_emit_ue2ue_ctrlq_response(command_data);
++
++        head = (head + descriptor_count) % depth;
+         ubase_cmdq_regs_[CsqHead] = head;
+         std::cerr << "[NIC ubase] completed CSQ opcode=0x" << std::hex
+                   << opcode << std::dec << " head=" << head << "\n";
+@@ -577,6 +783,23 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+     ubase_cmdq_regs_[CsqTail] = tail;
+ }
+ 
++bool
++NICTopologySC::ubase_misc_access(tlm::tlm_command cmd, uint64_t off,
++                                 uint8_t *data, size_t len)
++{
++    if (off != OuUbaseCmdqSrcOffset || !data || len != sizeof(uint32_t))
++        return false;
++    if (cmd == tlm::TLM_READ_COMMAND) {
++        openurma_udma::storeLe32(data, ubase_cmdq_src_);
++    } else if (cmd == tlm::TLM_WRITE_COMMAND) {
++        // Interrupt source is write-one-to-clear.
++        ubase_cmdq_src_ &= ~openurma_udma::loadLe32(data);
++    } else {
++        return false;
++    }
++    return true;
++}
++
+ bool
+ NICTopologySC::ubase_cmdq_access(tlm::tlm_command cmd, uint64_t off,
+                                  uint8_t *data, size_t len)
+@@ -720,6 +943,7 @@ NICTopologySC::NICTopologySC(sc_core::sc_module_name nm)
+     peer_tx_wrapper(peer_tx_out,   std::string(name()) + ".peer_tx_out",
+                     gem5::InvalidPortID),
+     dma_port(std::string(name()) + ".dma", *this),
++    msi_port(std::string(name()) + ".msi", *this),
+     _doorbell_drv("_doorbell_drv"),
+     _wire_rx_drv ("_wire_rx_drv"),
+     _cqe_tap     ("_cqe_tap"),
+@@ -750,6 +974,7 @@ void
+ NICTopologySC::before_end_of_elaboration()
+ {
+     dma_native_bound_ = dma_port.isConnected();
++    msi_native_bound_ = msi_port.isConnected();
+     dma_external_bound_ = dma_out.size() != 0;
+     if (!dma_external_bound_) {
+         // Keep legacy configs that do not know about dma_out elaboratable. Any
+@@ -2849,6 +3074,10 @@ NICTopologySC::mmio_b(tlm::tlm_generic_payload &trans,
+         trans.set_response_status(tlm::TLM_OK_RESPONSE);
+         return;
+     }
++    if (ubase_misc_access(cmd, off, data, len)) {
++        trans.set_response_status(tlm::TLM_OK_RESPONSE);
++        return;
++    }
+     if (off >= OuUbiosMsgqOffset && off < OuUbiosHpaOffset) {
+         if (cmd == tlm::TLM_READ_COMMAND && data && len)
+             std::memset(data, 0, len);
+@@ -3409,6 +3638,7 @@ NICTopologySC::gem5_getPort(const std::string &if_name, int idx)
+     // Names must match the Python Param names declared in NICTopologySC.py.
+     if (if_name == "mmio_socket") return mmio_wrapper;
+     if (if_name == "dma")         return dma_port;
++    if (if_name == "msi")         return msi_port;
+     if (if_name == "dma_out")     return dma_wrapper;
+     if (if_name == "wire_rx_in")  return wire_rx_wrapper;
+     if (if_name == "wire_tx_out") return wire_tx_wrapper;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 6d63f6f..ba02fb2 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -161,6 +161,7 @@ class NICTopologySC : public sc_core::sc_module
+         TimingDmaPort(const std::string &name, NICTopologySC &owner);
+     };
+     TimingDmaPort dma_port;
++    TimingDmaPort msi_port;
+ 
+     // True when peer_tx_out is cross-connected (two-node); set by create().
+     bool has_peer_ = false;
+@@ -260,8 +261,12 @@ class NICTopologySC : public sc_core::sc_module
+                            uint8_t *data, size_t len);
+     void ubios_msgq_kick(uint32_t new_pi);
+     uint32_t ubios_config_read(uint32_t byte_addr, bool endpoint) const;
++    void ubios_config_write(uint32_t byte_addr, uint32_t byte_enable,
++                            uint32_t value, bool endpoint);
++    bool ubase_raise_type1_msi(uint32_t vector);
+     uint32_t ubios_root_cna_ = 0;
+     uint32_t ubios_endpoint_cna_ = 0;
++    std::unordered_map<uint32_t, uint32_t> ubios_endpoint_config_;
+     // UBASE command queue lives in endpoint resource 2 (the IO resource).
+     // The stock driver programs a coherent CSQ/CRQ pair here and rings CSQ
+     // tail after publishing one or more 32-byte descriptors.
+@@ -269,8 +274,13 @@ class NICTopologySC : public sc_core::sc_module
+     bool ubase_cmdq_access(tlm::tlm_command cmd, uint64_t off,
+                            uint8_t *data, size_t len);
+     void ubase_cmdq_kick(uint32_t new_pi);
++    bool ubase_misc_access(tlm::tlm_command cmd, uint64_t off,
++                           uint8_t *data, size_t len);
++    bool ubase_emit_ue2ue_ctrlq_response(const std::vector<uint8_t> &request);
++    uint32_t ubase_cmdq_src_ = 0;
+     bool dma_external_bound_ = false;
+     bool dma_native_bound_ = false;
++    bool msi_native_bound_ = false;
+     uint32_t dma_max_outstanding_ = 16;
+     gem5::RequestorID dma_requestor_id_ = gem5::Request::invldRequestorId;
+     TimingDmaRequest *dma_active_request_ = nullptr;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.py b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+index e20a9d4..c08d99f 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.py
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+@@ -19,6 +19,7 @@ class NICTopologySC(SystemC_ScModule):
+                       become no-ops (uburma driver pokes a few extra
+                       offsets that aren't part of the WR/CQ contract).
+       dma           — device-initiated traffic directly into gem5 memory.
++      msi           — interrupt-message writes to the on-chip system bus.
+       dma_out       — compatibility TLM fallback for older configs.
+       wire_rx_in    — peer NIC / WireLoopback pushes incoming flits.
+       wire_tx_out   — outgoing wire flits to peer / WireLoopback.
+@@ -44,6 +45,8 @@ class NICTopologySC(SystemC_ScModule):
+     dma            = RequestPort(
+         "Native DMA request port — dynamically uses atomic requests during "
+         "fast-forward and timing requests after a CPU/memory-mode switch")
++    msi            = RequestPort(
++        "MSI request port — routes interrupt-message writes to on-chip MMIO")
+     wire_rx_in     = TlmTargetSocket(512,
+         "Incoming wire flits from peer NIC / WireLoopback")
+     wire_tx_out    = TlmInitiatorSocket(512,

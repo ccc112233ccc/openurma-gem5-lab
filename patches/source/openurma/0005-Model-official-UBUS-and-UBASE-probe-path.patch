@@ -1,0 +1,374 @@
+From 8febf16f625ba27617bc8e8a0ee1f518238a3169 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 12:52:04 +0800
+Subject: [PATCH 05/27] Model official UBUS and UBASE probe path
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 208 ++++++++++++++++--
+ .../gem5_scaffold/src/NICTopologySC.hh        |   8 +
+ 2 files changed, 195 insertions(+), 21 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 899e354..fc775c4 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -350,11 +350,11 @@ NICTopologySC::ummu_access(tlm::tlm_command cmd, uint64_t off,
+ uint32_t
+ NICTopologySC::ubios_config_read(uint32_t byte_addr, bool endpoint) const
+ {
+-    if (endpoint) {
+-        const auto saved = ubios_endpoint_config_.find(byte_addr & ~3U);
+-        if (saved != ubios_endpoint_config_.end())
+-            return saved->second;
+-    }
++    const auto &config = endpoint ? ubios_endpoint_config_ :
++                                    ubios_root_config_;
++    const auto saved = config.find(byte_addr & ~3U);
++    if (saved != config.end())
++        return saved->second;
+     // Minimal root-controller configuration image. The GUID is intentionally
+     // stable; later registers are added only when an official enumeration
+     // request reaches them, keeping the modeled contract evidence-driven.
+@@ -376,6 +376,8 @@ NICTopologySC::ubios_config_read(uint32_t byte_addr, bool endpoint) const
+       case 0x40050: return endpoint ? 0x00200000 : 0;
+       case 0x40054: return 0x00000000;
+       case 0x40084: return 0; // 4 KiB system page size
++      case 0x40090: return endpoint ? 0 : 256; // root EID-UPI entries
++      case 0x40404: return endpoint ? 0 : 0x00004040; // 16-entry queues
+       case 0x40c08: return endpoint ? 0x00000003 : 0; // 2^3 Type-1 USI vectors
+       default:   return 0;
+     }
+@@ -385,17 +387,16 @@ void
+ NICTopologySC::ubios_config_write(uint32_t byte_addr, uint32_t byte_enable,
+                                   uint32_t value, bool endpoint)
+ {
+-    if (!endpoint)
+-        return;
+     const uint32_t aligned = byte_addr & ~3U;
+-    uint32_t merged = ubios_config_read(aligned, true);
++    uint32_t merged = ubios_config_read(aligned, endpoint);
+     for (uint32_t byte = 0; byte < 4; ++byte) {
+         if (byte_enable & (1U << byte)) {
+             const uint32_t mask = 0xffU << (byte * 8);
+             merged = (merged & ~mask) | (value & mask);
+         }
+     }
+-    ubios_endpoint_config_[aligned] = merged;
++    auto &config = endpoint ? ubios_endpoint_config_ : ubios_root_config_;
++    config[aligned] = merged;
+ }
+ 
+ bool
+@@ -428,16 +429,26 @@ NICTopologySC::ubase_raise_type1_msi(uint32_t vector)
+         !system_->isAtomicMode())
+         return false;
+ 
++    // Linux's DMA-IOMMU layer rewrites the GICv2m doorbell in the MSI
++    // message to a device-visible IOVA.  A physical UDMA device sends that
++    // address through UMMU just like its queue traffic; doing a raw system
++    // write here would incorrectly target the IOVA itself (typically near
++    // the top of the 48-bit aperture) rather than the GICv2m frame.
++    const uint64_t physical = ummu_translate_iova(address);
++    if (!physical)
++        return false;
++
+     // The GICv2m SETSPI register has a write side effect, so this must be a
+     // real atomic MMIO transaction rather than a functional debugger access.
+     gem5::Request::Flags flags;
+     auto request = std::make_shared<gem5::Request>(
+-        address, sizeof(data), flags, dma_requestor_id_);
++        physical, sizeof(data), flags, dma_requestor_id_);
+     gem5::Packet packet(request, gem5::MemCmd::WriteReq);
+     packet.dataStatic(reinterpret_cast<uint8_t *>(&data));
+     msi_port.sendAtomic(&packet);
+     std::cerr << "[NIC ubase] raised Type-1 MSI vector=" << vector
+-              << " address=0x" << std::hex << address << " data=0x" << data
++              << " iova=0x" << std::hex << address << " pa=0x" << physical
++              << " data=0x" << data
+               << std::dec << "\n";
+     return true;
+ }
+@@ -484,10 +495,12 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+         const bool config_request = task_type == 0 && payload_len == 48;
+         const bool token_request = task_type == 0 && payload_len == 36;
+         const bool header_request = task_type == 0 && payload_len == 32;
++        const bool private_eu_request = task_type == 2 && opcode == 2 &&
++            (payload_len == 4 || payload_len == 12);
+         const bool enum_request = task_type == 1 && opcode <= 2 &&
+             payload_len >= 44;
+         if (!config_request && !token_request && !header_request &&
+-            !enum_request) {
++            !private_eu_request && !enum_request) {
+             std::cerr << "[NIC ubios] unsupported UBC message task="
+                       << unsigned(task_type) << " opcode=0x" << std::hex
+                       << unsigned(opcode) << std::dec << " len="
+@@ -502,7 +515,20 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+             break;
+         uint32_t req_addr = 0;
+         uint8_t response_opcode = opcode;
+-        if (config_request || token_request || header_request) {
++        if (private_eu_request) {
++            // HiSilicon private EU-table message.  A write request is 12
++            // bytes and receives the 4-byte status header; a read request is
++            // the inverse.  Bit 15 is the official EU_CFG_SUCCESS flag.
++            const uint32_t request_header = openurma_udma::loadLe32(
++                request.data());
++            const bool write = (request_header & 0xf) == 1;
++            response.assign(write ? 4 : 12, 0);
++            openurma_udma::storeLe32(response.data(),
++                                     request_header | (1U << 15));
++            if (!write && response.size() >= request.size())
++                std::memcpy(response.data() + 4, request.data() + 4,
++                            request.size() - 4);
++        } else if (config_request || token_request || header_request) {
+             if (config_request || header_request) {
+                 response = request;
+             } else {
+@@ -533,6 +559,18 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+             response_opcode = opcode | 1;
+             response[31] = response_opcode;
+ 
++            if (header_request && request[31] == 0x28) {
++                // UB_OBTAIN_ENTITY_INFO: one primary entity containing one
++                // UE range.  The response payload is the official 8-byte
++                // base followed by one 4-byte ue_map.
++                response.resize(44, 0);
++                response[28] = 12;
++                response[31] = 0x29;
++                response_opcode = 0x29;
++                response[36] = 1; // entity_nums (u16)
++                response[38] = 1; // mue_nums (u16)
++            }
++
+             if (config_request) {
+                 // Config-read payload: DW1 is a dword address.
+                 req_addr = openurma_udma::loadLe32(request.data() + 36);
+@@ -761,8 +799,8 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+             std::memcpy(desc.data(), event.data() + event_offset, chunk);
+             event_offset += chunk;
+         }
+-        if (!ou_dma(base + uint64_t(tail) * DescriptorBytes,
+-                    desc.data(), desc.size(), true))
++        if (!ummu_dma(base + uint64_t(tail) * DescriptorBytes,
++                      desc.data(), desc.size(), true))
+             return false;
+         tail = (tail + 1) % depth;
+     }
+@@ -775,6 +813,69 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+     return ubase_raise_type1_msi(0);
+ }
+ 
++bool
++NICTopologySC::ubase_emit_mailbox_event(uint16_t sequence)
++{
++    constexpr uint32_t EntryBytes = 64;
++    constexpr uint8_t MailboxEvent = 0x13;
++    if (!ubase_aeq_iova_ || !ubase_aeq_depth_)
++        return false;
++
++    std::array<uint8_t, EntryBytes> event{};
++    uint32_t header = MailboxEvent;
++    // The official consumer accepts an entry when owner differs from the
++    // wrap bit of its monotonically increasing consumer index.
++    if (!(ubase_aeq_producer_ & ubase_aeq_depth_))
++        header |= 1U << 31;
++    openurma_udma::storeLe32(event.data(), header);
++    event[12] = static_cast<uint8_t>(sequence);
++    event[13] = static_cast<uint8_t>(sequence >> 8);
++    event[14] = 0; // successful mailbox status
++
++    const uint32_t slot = ubase_aeq_producer_ & (ubase_aeq_depth_ - 1);
++    if (!ummu_dma(ubase_aeq_iova_ + uint64_t(slot) * EntryBytes,
++                  event.data(), event.size(), true))
++        return false;
++    ++ubase_aeq_producer_;
++    std::cerr << "[NIC ubase] emitted mailbox AEQ event seq=" << sequence
++              << " slot=" << slot << "\n";
++    return ubase_raise_type1_msi(1);
++}
++
++void
++NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
++{
++    constexpr uint8_t CreateAeqContext = 0x34;
++    const uint64_t context_iova = openurma_udma::loadLe32(desc.data() + 8) |
++        (uint64_t(openurma_udma::loadLe32(desc.data() + 12)) << 32);
++    const uint8_t command = desc[16];
++    const uint32_t control = openurma_udma::loadLe32(desc.data() + 20);
++    const uint16_t sequence = static_cast<uint16_t>(control);
++    const bool event_enabled = control & (1U << 16);
++
++    if (command == CreateAeqContext && context_iova) {
++        std::array<uint8_t, 64> context{};
++        if (ummu_dma(context_iova, context.data(), context.size(), false)) {
++            const uint32_t word1 = openurma_udma::loadLe32(context.data() + 4);
++            const uint32_t word2 = openurma_udma::loadLe32(context.data() + 8);
++            const uint32_t word3 = openurma_udma::loadLe32(context.data() + 12);
++            const uint32_t shift = word1 & 0x1f;
++            if (shift < 26) {
++                ubase_aeq_iova_ =
++                    ((uint64_t(word3) << 20) | (word2 >> 12)) << 12;
++                ubase_aeq_depth_ = 1U << (shift + 6);
++                ubase_aeq_producer_ = 0;
++                std::cerr << "[NIC ubase] captured AEQ iova=0x" << std::hex
++                          << ubase_aeq_iova_ << std::dec
++                          << " depth=" << ubase_aeq_depth_ << "\n";
++            }
++        }
++    }
++
++    if (event_enabled)
++        ubase_emit_mailbox_event(sequence);
++}
++
+ bool
+ NICTopologySC::ubios_msgq_access(tlm::tlm_command cmd, uint64_t off,
+                                  uint8_t *data, size_t len)
+@@ -827,8 +928,8 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+     while (head != tail) {
+         std::array<uint8_t, DescriptorBytes> desc{};
+         const uint64_t pa = base + uint64_t(head) * DescriptorBytes;
+-        if (!ou_dma(pa, desc.data(), desc.size(), false)) {
+-            std::cerr << "[NIC ubase] failed to read CSQ descriptor pa=0x"
++        if (!ummu_dma(pa, desc.data(), desc.size(), false)) {
++            std::cerr << "[NIC ubase] failed to read CSQ descriptor iova=0x"
+                       << std::hex << pa << std::dec << "\n";
+             break;
+         }
+@@ -843,8 +944,8 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+             for (uint32_t index = 1; index < descriptor_count; ++index) {
+                 std::array<uint8_t, DescriptorBytes> continuation{};
+                 const uint32_t pos = (head + index) % depth;
+-                if (!ou_dma(base + uint64_t(pos) * DescriptorBytes,
+-                            continuation.data(), continuation.size(), false))
++                if (!ummu_dma(base + uint64_t(pos) * DescriptorBytes,
++                              continuation.data(), continuation.size(), false))
+                     break;
+                 command_data.insert(command_data.end(), continuation.begin(),
+                                     continuation.end());
+@@ -865,14 +966,16 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+             // successfully; bit 1 remains clear because hardware is idle.
+             openurma_udma::storeLe32(desc.data() + 8, 0x00000001);
+         }
+-        if (!ou_dma(pa, desc.data(), desc.size(), true)) {
+-            std::cerr << "[NIC ubase] failed to write CSQ descriptor pa=0x"
++        if (!ummu_dma(pa, desc.data(), desc.size(), true)) {
++            std::cerr << "[NIC ubase] failed to write CSQ descriptor iova=0x"
+                       << std::hex << pa << std::dec << "\n";
+             break;
+         }
+ 
+         if (opcode == 0xf00e && !command_data.empty())
+             ubase_emit_ue2ue_ctrlq_response(command_data);
++        else if (opcode == 0x7000)
++            ubase_handle_mailbox(desc);
+ 
+         head = (head + descriptor_count) % depth;
+         ubase_cmdq_regs_[CsqHead] = head;
+@@ -2563,6 +2666,69 @@ NICTopologySC::ou_dma(uint64_t pa, void *buf, uint32_t len, bool write)
+     return false;
+ }
+ 
++uint64_t
++NICTopologySC::ummu_translate_iova(uint64_t iova)
++{
++    // The advertised generic capability uses linear configuration tables.
++    // Static-server EIDs use the pre-created local OS metadata at TECT tag 0;
++    // that entry points at the TCT containing each DMA domain's ARM64
++    // page-table root.
++    constexpr uint64_t AddressMask = 0x0000fffffffff000ULL;
++    constexpr uint32_t TectTag = 0;
++    constexpr size_t TectEntryBytes = 64;
++    constexpr size_t TctEntryBytes = 64;
++    constexpr size_t TctEntries = 1024;
++
++    const uint64_t tect_base = openurma_udma::loadLe64(
++        ummu_regs_.data() + 0x70) & AddressMask;
++    if (!tect_base)
++        return 0;
++
++    std::array<uint8_t, TectEntryBytes> tect{};
++    if (!ou_dma(tect_base + TectTag * TectEntryBytes,
++                tect.data(), tect.size(), false) ||
++        !(openurma_udma::loadLe64(tect.data()) & 1U))
++        return 0;
++    const uint64_t tct_base = openurma_udma::loadLe64(tect.data() + 8) &
++                              AddressMask;
++    if (!tct_base)
++        return 0;
++
++    std::vector<uint8_t> tct(TctEntries * TctEntryBytes);
++    if (!ou_dma(tct_base, tct.data(), tct.size(), false))
++        return 0;
++    for (size_t tid = 0; tid < TctEntries; ++tid) {
++        const uint8_t *entry = tct.data() + tid * TctEntryBytes;
++        if (!(openurma_udma::loadLe64(entry) & 1U))
++            continue;
++        const uint64_t ttbr = openurma_udma::loadLe64(entry + 16) &
++                              AddressMask;
++        if (!ttbr)
++            continue;
++        const uint64_t pa = ou_walk(ttbr, iova);
++        if (pa)
++            return pa;
++    }
++    return 0;
++}
++
++bool
++NICTopologySC::ummu_dma(uint64_t iova, void *buf, uint32_t len, bool write)
++{
++    auto *bytes = static_cast<uint8_t *>(buf);
++    while (len) {
++        const uint32_t chunk = std::min<uint32_t>(
++            len, 4096U - static_cast<uint32_t>(iova & 0xfff));
++        const uint64_t pa = ummu_translate_iova(iova);
++        if (!pa || !ou_dma(pa, bytes, chunk, write))
++            return false;
++        iova += chunk;
++        bytes += chunk;
++        len -= chunk;
++    }
++    return true;
++}
++
+ // Walk the ARM64 guest page table (4 KB granule, 48-bit VA, 4 levels L0..L3) at
+ // `ttbr0` to translate a guest VA -> guest PA, reading table entries straight from
+ // guest physical memory. Handles 1 GB (L1) / 2 MB (L2) block descriptors. 0 = unmapped.
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 10fc6ed..31f9b10 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -266,6 +266,7 @@ class NICTopologySC : public sc_core::sc_module
+     bool ubase_raise_type1_msi(uint32_t vector);
+     uint32_t ubios_root_cna_ = 0;
+     uint32_t ubios_endpoint_cna_ = 0;
++    std::unordered_map<uint32_t, uint32_t> ubios_root_config_;
+     std::unordered_map<uint32_t, uint32_t> ubios_endpoint_config_;
+     // Architecture-generic UMMU register aperture.  Capability registers are
+     // synthesized by the model while writable state is retained byte-for-byte
+@@ -280,10 +281,15 @@ class NICTopologySC : public sc_core::sc_module
+     bool ubase_cmdq_access(tlm::tlm_command cmd, uint64_t off,
+                            uint8_t *data, size_t len);
+     void ubase_cmdq_kick(uint32_t new_pi);
++    void ubase_handle_mailbox(const std::array<uint8_t, 32> &desc);
++    bool ubase_emit_mailbox_event(uint16_t sequence);
+     bool ubase_misc_access(tlm::tlm_command cmd, uint64_t off,
+                            uint8_t *data, size_t len);
+     bool ubase_emit_ue2ue_ctrlq_response(const std::vector<uint8_t> &request);
+     uint32_t ubase_cmdq_src_ = 0;
++    uint64_t ubase_aeq_iova_ = 0;
++    uint32_t ubase_aeq_depth_ = 0;
++    uint32_t ubase_aeq_producer_ = 0;
+     bool dma_external_bound_ = false;
+     bool dma_native_bound_ = false;
+     bool msi_native_bound_ = false;
+@@ -614,6 +620,8 @@ class NICTopologySC : public sc_core::sc_module
+     std::array<uint8_t, 64> regmr_assembly_{};
+     // cache-coherent functional access to guest physical memory via a CPU data port
+     bool ou_dma(uint64_t pa, void *buf, uint32_t len, bool write);
++    uint64_t ummu_translate_iova(uint64_t iova);
++    bool ummu_dma(uint64_t iova, void *buf, uint32_t len, bool write);
+     // walk the ARM64 (4 KB granule, 48-bit) guest page table at ttbr0: VA -> PA.
+     uint64_t ou_walk(uint64_t ttbr0, uint64_t va);
+     // UDMA's equivalent walker issues every PTE fetch at its already-physical

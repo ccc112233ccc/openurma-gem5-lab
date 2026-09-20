@@ -3,6 +3,7 @@
 /gem5/
 /oe66/
 /deps/
+/sources/
 
 # Downloaded and generated artifacts.
 /artifacts/

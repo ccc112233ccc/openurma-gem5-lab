@@ -1,0 +1,235 @@
+From 7045b78d2481311a65b079e18ca1eb38f808e5e3 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 11:20:10 +0800
+Subject: [PATCH 19/27] Model multiple physical UB ports
+
+---
+ .../configs/single_node_fs_clean.py           |  3 +
+ .../gem5_scaffold/src/NICTopologySC.cc        | 96 +++++++++++++------
+ .../gem5_scaffold/src/NICTopologySC.hh        |  5 +-
+ .../gem5_scaffold/src/NICTopologySC.py        |  3 +
+ 4 files changed, 76 insertions(+), 31 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index 2b7e130..4831b3e 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -434,6 +434,7 @@ def create(args):
+     system.nic = NICTopologySC(
+         iomem_base=IOMEM_BASE,
+         peer_link_rate=f"{args.peer_link_rate_gbps:g}Gbps",
++        ub_port_count=args.ub_port_count,
+         peer_serialization_stages=args.peer_serialization_stages,
+         peer_switch_delay=args.peer_switch_delay,
+         peer_link_overhead_bytes=args.peer_link_overhead_bytes,
+@@ -767,6 +768,8 @@ def main():
+              "positive lookahead used to timestamp cross-process DATA")
+     parser.add_argument("--peer-link-rate-gbps", type=float, default=400.0,
+         help="UB SerDes line rate in decimal Gbit/s")
++    parser.add_argument("--ub-port-count", type=positive_int, default=1,
++        help="physical UB egress ports, each with an independent SerDes queue")
+     parser.add_argument("--peer-serialization-stages", type=int, default=1,
+         help="number of equal-rate serialization stages; 2 models one L1 switch")
+     parser.add_argument("--peer-switch-delay", default="0ns",
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index d53867b..6e2a951 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -632,7 +632,7 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+                 4 + forward_bytes * ((scan & (1U << 20)) ? 2 : 1);
+             const uint32_t response_header_bytes = 16 + 4 + forward_bytes;
+             constexpr uint32_t CommonBytes = 24;
+-            constexpr uint32_t TlvBytes = 4 + 8 + 28 + 8;
++            const uint32_t TlvBytes = 4 + 8 + 28 * ub_port_count_ + 8;
+             const uint32_t extra_bytes = opcode == 0 ? TlvBytes :
+                 (opcode == 2 ? 4 : 0);
+             response.assign(response_header_bytes + CommonBytes + extra_bytes,
+@@ -671,19 +671,32 @@ NICTopologySC::ubios_msgq_kick(uint32_t new_pi)
+             uint8_t *extra = response.data() + response_common + CommonBytes;
+             if (opcode == 0) {
+                 openurma_udma::storeLe32(extra, 0x00040100); // slice 0/1
+-                openurma_udma::storeLe32(extra + 4, 0x01080001); // 1 port
+-                openurma_udma::storeLe32(extra + 8, 0x00010000); // 1 TLV
+-                openurma_udma::storeLe32(extra + 12, 0x021c0100); // link up
+-                // port indices and rates remain zero. Remote GUID is the root
+-                // controller for the endpoint and the UDMA endpoint for root.
+-                openurma_udma::storeLe32(extra + 24, device ? 1 : 2);
+-                openurma_udma::storeLe32(extra + 28, 0);
+-                openurma_udma::storeLe32(extra + 32,
+-                                         device ? 0x12000000 : 0x11000000);
+-                openurma_udma::storeLe32(extra + 36,
+-                                         device ? 0xcc080000 : 0xcc08a001);
+-                openurma_udma::storeLe32(extra + 40, 0x04080000);
+-                openurma_udma::storeLe32(extra + 44,
++                openurma_udma::storeLe32(
++                    extra + 4, 0x01080000 | ub_port_count_);
++                openurma_udma::storeLe32(
++                    extra + 8, ub_port_count_ << 16);
++                for (uint32_t port = 0; port < ub_port_count_; ++port) {
++                    uint8_t *port_tlv = extra + 12 + 28 * port;
++                    openurma_udma::storeLe32(port_tlv, 0x021c0100); // link up
++                    openurma_udma::storeLe32(
++                        port_tlv + 4, port | (port << 16));
++                    // The topology ABI uses compact rate codes, not Mb/s.
++                    // Leave those codes at zero; UDMA_CMD_QUERY_PORT_INFO is
++                    // the authoritative 400-Gbit/s capability query.
++                    // Remote GUID is the root controller for the endpoint and
++                    // the UDMA endpoint for root; only the port index differs.
++                    openurma_udma::storeLe32(port_tlv + 12, device ? 1 : 2);
++                    openurma_udma::storeLe32(port_tlv + 16, 0);
++                    openurma_udma::storeLe32(
++                        port_tlv + 20,
++                        device ? 0x12000000 : 0x11000000);
++                    openurma_udma::storeLe32(
++                        port_tlv + 24,
++                        device ? 0xcc080000 : 0xcc08a001);
++                }
++                uint8_t *cap_tlv = extra + 12 + 28 * ub_port_count_;
++                openurma_udma::storeLe32(cap_tlv, 0x04080000);
++                openurma_udma::storeLe32(cap_tlv + 4,
+                                          device ? 0x0002 : 0x0000);
+             } else if (opcode == 2) {
+                 // NA query response; use stable non-zero CNAs per hop.
+@@ -3712,7 +3725,14 @@ NICTopologySC::~NICTopologySC()
+               << " udma_rx_packets=" << udma_rx_packets_
+               << " udma_cqes=" << udma_cqes_
+               << " udma_queue_errors=" << udma_queue_errors_
+-              << "\n";
++              << " ub_port_count=" << ub_port_count_;
++    for (uint32_t port = 0; port < peer_port_packets_.size(); ++port) {
++        std::cerr << " ub_port" << port << "_packets="
++                  << peer_port_packets_[port]
++                  << " ub_port" << port << "_bytes="
++                  << peer_port_bytes_[port];
++    }
++    std::cerr << "\n";
+     if (ring_)
+         ::munmap(ring_, sizeof(PeerRing));
+ }
+@@ -3743,8 +3763,11 @@ NICTopologySC::peer_ring_map()
+               << " tx_dir=" << tx_dir_ << " rx_dir=" << rx_dir_ << "\n";
+ }
+ 
+-// Drain packets in FIFO order.  A CQ poll returns empty while the head packet is
+-// still in flight; DATA is never applied before arrival_tick.  The
++// Drain packets in publication order.  Different physical ports have independent
++// serialization timelines, so their arrival ticks need not be globally monotonic.
++// The shared-memory transport is deliberately conservative: a later-published
++// packet waits behind an earlier-published packet even if its own port would have
++// delivered it first.  DATA is still never applied before arrival_tick.  The
+ // dist-gem5 barrier (quantum <= peer_link_latency_) guarantees the producer has
+ // physically published the slot before the receiver can pass that safe horizon.
+ void
+@@ -3772,18 +3795,14 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+                      checked_tick_sum(hdr->tx_tick, minimum_path),
+                  "peer ring slot %llu violates configured causal path",
+                  (unsigned long long)tail);
+-        panic_if(peer_last_rx_arrival_ != 0 &&
+-                 hdr->arrival_tick < peer_last_rx_arrival_,
+-                 "peer ring timestamps are not monotonic at slot %llu",
+-                 (unsigned long long)tail);
+-
+         const gem5::Tick effective_now = checked_tick_sum(
+             gem5::curTick(), delay.value());
+         if (hdr->arrival_tick > effective_now)
+             break;
+ 
+         peer_apply(s + sizeof(*hdr), hdr->plen);
+-        peer_last_rx_arrival_ = hdr->arrival_tick;
++        peer_last_rx_arrival_ = std::max(peer_last_rx_arrival_,
++                                         hdr->arrival_tick);
+         if (ou_packet_trace_enabled()) {
+             std::cerr << "[NIC peer-rx ring] seq=" << hdr->seq
+                       << " tx=" << hdr->tx_tick
+@@ -3853,19 +3872,32 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+     const uint64_t wire_bytes = static_cast<uint64_t>(payload_bytes) +
+                                 peer_link_overhead_bytes_;
+     const gem5::Tick serialization = serialization_ticks(wire_bytes);
+-    if (peer_stage_free_ticks_.size() != peer_serialization_stages_) {
+-        peer_stage_free_ticks_.assign(peer_serialization_stages_, 0);
+-    }
++    // Keep every transport flow on one physical port so ordering is preserved,
++    // while independent jetty/token flows can occupy separate SerDes queues.
++    uint64_t flow_hash = uint64_t(dcna) * 0x9e3779b185ebca87ULL;
++    flow_hash ^= uint64_t(rtoken) * 0xc2b2ae3d27d4eb4fULL;
++    flow_hash ^= uint64_t(op) * 0x165667b19e3779f9ULL;
++    const uint32_t port = static_cast<uint32_t>(flow_hash % ub_port_count_);
++    if (peer_port_stage_free_ticks_.size() != ub_port_count_) {
++        peer_port_stage_free_ticks_.assign(
++            ub_port_count_,
++            std::vector<gem5::Tick>(peer_serialization_stages_, 0));
++        peer_port_packets_.assign(ub_port_count_, 0);
++        peer_port_bytes_.assign(ub_port_count_, 0);
++    }
++    auto &stage_free_ticks = peer_port_stage_free_ticks_[port];
+     gem5::Tick arrival_tick = tx_tick;
+     for (uint32_t stage = 0; stage < peer_serialization_stages_;
+          ++stage) {
+         const gem5::Tick start = std::max(
+-            arrival_tick, peer_stage_free_ticks_[stage]);
++            arrival_tick, stage_free_ticks[stage]);
+         arrival_tick = checked_tick_sum(start, serialization);
+-        peer_stage_free_ticks_[stage] = arrival_tick;
++        stage_free_ticks[stage] = arrival_tick;
+     }
+-    peer_tx_free_tick_ = peer_stage_free_ticks_.empty() ?
+-        tx_tick : peer_stage_free_ticks_.front();
++    peer_tx_free_tick_ = stage_free_ticks.empty() ?
++        tx_tick : stage_free_ticks.front();
++    ++peer_port_packets_[port];
++    peer_port_bytes_[port] += wire_bytes;
+     arrival_tick = checked_tick_sum(arrival_tick, peer_switch_delay_);
+     arrival_tick = checked_tick_sum(arrival_tick, peer_link_latency_);
+     link_ticks_ = checked_tick_sum(link_ticks_, arrival_tick - tx_tick);
+@@ -3896,6 +3928,7 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+         __atomic_store_n(&d.head.value, head + 1, __ATOMIC_RELEASE);
+         if (ou_packet_trace_enabled()) {
+             std::cerr << "[NIC peer-tx ring] seq=" << hdr->seq
++                      << " port=" << port
+                       << " op=0x" << std::hex << (int)op << std::dec
+                       << " len=" << len << " tx=" << tx_tick
+                       << " arrival=" << arrival_tick << "\n";
+@@ -4771,6 +4804,9 @@ gem5::NICTopologySCParams::create() const
+     nic->peer_ring_path_ = peer_ring_path;
+     nic->peer_link_latency_ = peer_link_latency;
+     nic->peer_link_ticks_per_byte_ = peer_link_rate;
++    panic_if(ub_port_count == 0 || ub_port_count > 16,
++             "ub_port_count must be between 1 and 16");
++    nic->ub_port_count_ = ub_port_count;
+     nic->peer_serialization_stages_ = peer_serialization_stages;
+     nic->peer_switch_delay_ = peer_switch_delay;
+     nic->peer_link_overhead_bytes_ = peer_link_overhead_bytes;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 4831611..a77d540 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -177,11 +177,14 @@ class NICTopologySC : public sc_core::sc_module
+     gem5::Tick  peer_link_latency_ = 0;
+     // Network/MemoryBandwidth Params arrive as simulation ticks per byte.
+     double      peer_link_ticks_per_byte_ = 0.0;
++    uint32_t    ub_port_count_ = 1;
+     uint32_t    peer_serialization_stages_ = 1;
+     gem5::Tick  peer_switch_delay_ = 0;
+     uint32_t    peer_link_overhead_bytes_ = 0;
+     gem5::Tick  peer_tx_free_tick_ = 0;
+-    std::vector<gem5::Tick> peer_stage_free_ticks_;
++    std::vector<std::vector<gem5::Tick>> peer_port_stage_free_ticks_;
++    std::vector<uint64_t> peer_port_packets_;
++    std::vector<uint64_t> peer_port_bytes_;
+     gem5::Tick  peer_last_rx_arrival_ = 0;
+     uint64_t    peer_tx_seq_ = 0;
+     void peer_ring_map();
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.py b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+index 58c4e0c..022d8a4 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.py
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+@@ -71,6 +71,9 @@ class NICTopologySC(SystemC_ScModule):
+     peer_link_rate = Param.NetworkBandwidth("400Gbps",
+         "SerDes line rate. The generated C++ parameter is expressed as "
+         "simulation ticks per serialized byte.")
++    ub_port_count = Param.Unsigned(1,
++        "Number of physical UB egress ports. Each port owns an independent "
++        "serialization pipeline; flows are assigned deterministically.")
+     peer_serialization_stages = Param.Unsigned(1,
+         "Number of equal-rate serialization stages in the peer path. Use 2 "
+         "for endpoint -> L1 switch -> endpoint; 0 disables serialization.")

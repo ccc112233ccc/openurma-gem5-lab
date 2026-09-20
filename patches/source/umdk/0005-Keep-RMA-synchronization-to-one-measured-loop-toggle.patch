@@ -1,0 +1,35 @@
+From 23e77b724d138ea00114605308f0994853e72f20 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 10:31:51 +0800
+Subject: [PATCH 5/8] Keep RMA synchronization to one measured-loop toggle
+
+---
+ src/urma/tools/urma_perftest/perftest_run_test.c | 15 ---------------
+ 1 file changed, 15 deletions(-)
+
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index bdf14fb..8b5bfab 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -3292,21 +3292,6 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+         }
+     }
+     if (dist_sync_rma_bw(cfg)) {
+-        /*
+-         * A toggle schedules periodic synchronization at the later rank's
+-         * current tick.  Align once before the measured toggle so the earlier
+-         * rank cannot fill a finite peer queue while catching up to that
+-         * future activation tick.  The ON/OFF pair completes at a common
+-         * barrier and carries no benchmark traffic.
+-         */
+-        ret = toggle_dist_sync("enable pre-loop RMA rendezvous");
+-        if (ret != 0) {
+-            goto err_dest_jfs_wr;
+-        }
+-        ret = toggle_dist_sync("disable pre-loop RMA rendezvous");
+-        if (ret != 0) {
+-            goto err_dest_jfs_wr;
+-        }
+         ret = toggle_dist_sync("enable bidirectional RMA bandwidth loop");
+         if (ret != 0) {
+             goto err_dest_jfs_wr;

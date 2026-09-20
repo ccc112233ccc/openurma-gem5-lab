@@ -1,0 +1,326 @@
+From 40bd483280b67070141d767ef91df5b1d53637b3 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 11:47:28 +0800
+Subject: [PATCH 20/27] Split peer transport into per-port queues
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 163 +++++++++++++-----
+ .../gem5_scaffold/src/NICTopologySC.hh        |   5 +
+ 2 files changed, 124 insertions(+), 44 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 6e2a951..8992bb9 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -3629,13 +3629,15 @@ NICTopologySC::find_recv(uint32_t dj, RecvT &out)
+ //     memory; the payload crosses the ring between them.
+ 
+ // Shared-ring layout: 2 directions (dir0 = node1->node0, dir1 = node0->node1),
+-// each a 64-slot SPSC queue of fixed 8 KB slots.  Producer and consumer indices
+-// live on separate cache lines.  Every slot carries the sender's virtual time and
+-// the earliest legal receiver time, rather than inheriting host scheduling time.
++// with one independent 64-slot SPSC queue per physical port. Producer and
++// consumer indices live on separate cache lines. Every slot carries explicit
++// source/destination port identity, the sender's virtual time, and the earliest
++// legal receiver time rather than inheriting host scheduling time.
+ namespace {
+ constexpr uint32_t OU_RING_SLOTS = 64;
+ constexpr uint32_t OU_RING_SLOT = 8192;
+ constexpr uint32_t OU_RING_DATA = 1;
++constexpr uint32_t OU_RING_MAX_PORTS = 16;
+ 
+ struct alignas(64) OuRingIndex {
+     uint64_t value;
+@@ -3648,7 +3650,9 @@ struct alignas(64) OuRingSlotHeader {
+     uint64_t tx_tick;
+     uint64_t arrival_tick;
+     uint64_t seq;
+-    uint8_t pad[32];
++    uint16_t src_port;
++    uint16_t dst_port;
++    uint8_t pad[28];
+ };
+ 
+ static_assert(sizeof(OuRingIndex) == 64, "peer-ring index must occupy one cache line");
+@@ -3676,12 +3680,11 @@ ou_decomp_trace_enabled()
+ }
+ 
+ struct NICTopologySC::PeerRing {
+-    struct Dir { OuRingIndex head, tail; } dir[2];
+-    uint8_t slot[2][OU_RING_SLOTS][OU_RING_SLOT];
++    struct Dir { OuRingIndex head, tail; } dir[2][OU_RING_MAX_PORTS];
+ };
+ 
+-static_assert(sizeof(NICTopologySC::PeerRing) == 1048832,
+-              "run-dual.sh and the peer-ring ABI disagree");
++static_assert(sizeof(NICTopologySC::PeerRing) == 4096,
++              "peer-ring header must occupy 4 KiB");
+ 
+ NICTopologySC::~NICTopologySC()
+ {
+@@ -3730,11 +3733,15 @@ NICTopologySC::~NICTopologySC()
+         std::cerr << " ub_port" << port << "_packets="
+                   << peer_port_packets_[port]
+                   << " ub_port" << port << "_bytes="
+-                  << peer_port_bytes_[port];
++                  << peer_port_bytes_[port]
++                  << " ub_port" << port << "_rx_packets="
++                  << peer_port_rx_packets_[port]
++                  << " ub_port" << port << "_rx_bytes="
++                  << peer_port_rx_bytes_[port];
+     }
+     std::cerr << "\n";
+     if (ring_)
+-        ::munmap(ring_, sizeof(PeerRing));
++        ::munmap(ring_, ring_map_bytes_);
+ }
+ 
+ void
+@@ -3744,30 +3751,49 @@ NICTopologySC::peer_ring_map()
+     int fd = ::open(peer_ring_path_.c_str(), O_RDWR);
+     panic_if(fd < 0, "cannot open required peer ring %s",
+              peer_ring_path_.c_str());
++    const size_t expected_bytes = sizeof(PeerRing) +
++        2ULL * ub_port_count_ * OU_RING_SLOTS * OU_RING_SLOT;
+     struct stat st {};
+-    if (::fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(PeerRing)) {
++    if (::fstat(fd, &st) != 0 || st.st_size != (off_t)expected_bytes) {
+         ::close(fd);
+         panic("peer ring %s has wrong size: %lld, need %zu",
+               peer_ring_path_.c_str(), (long long)st.st_size,
+-              sizeof(PeerRing));
++              expected_bytes);
+     }
+-    void *p = ::mmap(nullptr, sizeof(PeerRing), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    void *p = ::mmap(nullptr, expected_bytes, PROT_READ | PROT_WRITE,
++                     MAP_SHARED, fd, 0);
+     ::close(fd);
+     panic_if(p == MAP_FAILED, "mmap of required peer ring %s failed",
+              peer_ring_path_.c_str());
+     ring_ = reinterpret_cast<PeerRing *>(p);
++    ring_map_bytes_ = expected_bytes;
+     // node 0 sends on dir 1 and receives on dir 0 (node 1 is the mirror).
+     tx_dir_ = (peer_node_id_ == 0) ? 1 : 0;
+     rx_dir_ = (peer_node_id_ == 0) ? 0 : 1;
+     std::cerr << "[NIC peer] ring mapped node=" << peer_node_id_
+-              << " tx_dir=" << tx_dir_ << " rx_dir=" << rx_dir_ << "\n";
++              << " tx_dir=" << tx_dir_ << " rx_dir=" << rx_dir_
++              << " ports=" << ub_port_count_
++              << " bytes=" << expected_bytes << "\n";
+ }
+ 
+-// Drain packets in publication order.  Different physical ports have independent
+-// serialization timelines, so their arrival ticks need not be globally monotonic.
+-// The shared-memory transport is deliberately conservative: a later-published
+-// packet waits behind an earlier-published packet even if its own port would have
+-// delivered it first.  DATA is still never applied before arrival_tick.  The
++uint8_t *
++NICTopologySC::peer_ring_slot(uint32_t direction, uint32_t port,
++                              uint64_t index)
++{
++    panic_if(!ring_ || direction >= 2 || port >= ub_port_count_,
++             "invalid peer-ring slot direction=%u port=%u", direction, port);
++    const size_t queue = static_cast<size_t>(direction) * ub_port_count_ + port;
++    const size_t offset = sizeof(PeerRing) +
++        (queue * OU_RING_SLOTS + index % OU_RING_SLOTS) * OU_RING_SLOT;
++    panic_if(offset + OU_RING_SLOT > ring_map_bytes_,
++             "peer-ring slot offset %zu exceeds mapping %zu",
++             offset, ring_map_bytes_);
++    return reinterpret_cast<uint8_t *>(ring_) + offset;
++}
++
++// Merge the heads of the independent ingress queues in virtual arrival order.
++// A busy or delayed port cannot hold a ready packet on another port, while DATA
++// is still never applied before arrival_tick. The
+ // dist-gem5 barrier (quantum <= peer_link_latency_) guarantees the producer has
+ // physically published the slot before the receiver can pass that safe horizon.
+ void
+@@ -3777,40 +3803,71 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+     panic_if(peer_node_id_ >= 0 && !ring_,
+              "cross-process peer channel has no mapped ring");
+     if (!ring_) return;
+-    PeerRing::Dir &d = ring_->dir[rx_dir_];
+-    uint64_t tail = __atomic_load_n(&d.tail.value, __ATOMIC_RELAXED);
+-    const uint64_t head = __atomic_load_n(&d.head.value, __ATOMIC_ACQUIRE);
+-    while (tail != head) {
+-        uint8_t *s = ring_->slot[rx_dir_][tail % OU_RING_SLOTS];
++    const gem5::Tick effective_now = checked_tick_sum(
++        gem5::curTick(), delay.value());
++    while (true) {
++        uint32_t selected_port = ub_port_count_;
++        uint64_t selected_tail = 0;
++        const OuRingSlotHeader *selected_hdr = nullptr;
++        for (uint32_t port = 0; port < ub_port_count_; ++port) {
++            PeerRing::Dir &d = ring_->dir[rx_dir_][port];
++            const uint64_t tail = __atomic_load_n(
++                &d.tail.value, __ATOMIC_RELAXED);
++            const uint64_t head = __atomic_load_n(
++                &d.head.value, __ATOMIC_ACQUIRE);
++            if (tail == head)
++                continue;
++            const auto *hdr = reinterpret_cast<const OuRingSlotHeader *>(
++                peer_ring_slot(rx_dir_, port, tail));
++            if (hdr->arrival_tick > effective_now)
++                continue;
++            if (!selected_hdr || hdr->arrival_tick < selected_hdr->arrival_tick ||
++                (hdr->arrival_tick == selected_hdr->arrival_tick &&
++                 port < selected_port)) {
++                selected_port = port;
++                selected_tail = tail;
++                selected_hdr = hdr;
++            }
++        }
++        if (!selected_hdr)
++            break;
++
++        PeerRing::Dir &d = ring_->dir[rx_dir_][selected_port];
++        uint8_t *s = peer_ring_slot(rx_dir_, selected_port, selected_tail);
+         const auto *hdr = reinterpret_cast<const OuRingSlotHeader *>(s);
+         panic_if(hdr->type != OU_RING_DATA,
+-                 "peer ring slot %llu has unknown type %u",
+-                 (unsigned long long)tail, hdr->type);
++                 "peer ring port %u slot %llu has unknown type %u",
++                 selected_port, (unsigned long long)selected_tail, hdr->type);
+         panic_if(hdr->plen < 40 || hdr->plen > OU_RING_SLOT - sizeof(*hdr),
+-                 "peer ring slot %llu has invalid length %u",
+-                 (unsigned long long)tail, hdr->plen);
++                 "peer ring port %u slot %llu has invalid length %u",
++                 selected_port, (unsigned long long)selected_tail, hdr->plen);
++        panic_if(hdr->src_port >= ub_port_count_ ||
++                 hdr->dst_port != selected_port,
++                 "peer ring port identity invalid: queue=%u src=%u dst=%u",
++                 selected_port, hdr->src_port, hdr->dst_port);
+         const uint32_t payload_bytes = hdr->plen - 40;
+         const gem5::Tick minimum_path = peer_path_ticks(payload_bytes);
+         panic_if(hdr->arrival_tick <
+                      checked_tick_sum(hdr->tx_tick, minimum_path),
+-                 "peer ring slot %llu violates configured causal path",
+-                 (unsigned long long)tail);
+-        const gem5::Tick effective_now = checked_tick_sum(
+-            gem5::curTick(), delay.value());
+-        if (hdr->arrival_tick > effective_now)
+-            break;
++                 "peer ring port %u slot %llu violates configured causal path",
++                 selected_port, (unsigned long long)selected_tail);
+ 
+         peer_apply(s + sizeof(*hdr), hdr->plen);
++        ++peer_port_rx_packets_[selected_port];
++        peer_port_rx_bytes_[selected_port] +=
++            static_cast<uint64_t>(payload_bytes) + peer_link_overhead_bytes_;
+         peer_last_rx_arrival_ = std::max(peer_last_rx_arrival_,
+                                          hdr->arrival_tick);
+         if (ou_packet_trace_enabled()) {
+             std::cerr << "[NIC peer-rx ring] seq=" << hdr->seq
++                      << " src_port=" << hdr->src_port
++                      << " dst_port=" << hdr->dst_port
+                       << " tx=" << hdr->tx_tick
+                       << " arrival=" << hdr->arrival_tick
+                       << " consume=" << effective_now << "\n";
+         }
+-        ++tail;
+-        __atomic_store_n(&d.tail.value, tail, __ATOMIC_RELEASE);
++        __atomic_store_n(&d.tail.value, selected_tail + 1,
++                         __ATOMIC_RELEASE);
+     }
+ }
+ 
+@@ -3826,12 +3883,19 @@ NICTopologySC::peer_ring_tx_available()
+     peer_ring_map();
+     if (!ring_)
+         return OU_RING_SLOTS;
+-    PeerRing::Dir &d = ring_->dir[tx_dir_];
+-    const uint64_t head = __atomic_load_n(&d.head.value, __ATOMIC_RELAXED);
+-    const uint64_t tail = __atomic_load_n(&d.tail.value, __ATOMIC_ACQUIRE);
+-    const uint64_t used = head - tail;
+-    return used >= OU_RING_SLOTS ? 0 :
+-        static_cast<uint32_t>(OU_RING_SLOTS - used);
++    uint32_t available = OU_RING_SLOTS;
++    for (uint32_t port = 0; port < ub_port_count_; ++port) {
++        PeerRing::Dir &d = ring_->dir[tx_dir_][port];
++        const uint64_t head = __atomic_load_n(
++            &d.head.value, __ATOMIC_RELAXED);
++        const uint64_t tail = __atomic_load_n(
++            &d.tail.value, __ATOMIC_ACQUIRE);
++        const uint64_t used = head - tail;
++        available = std::min<uint32_t>(
++            available, used >= OU_RING_SLOTS ? 0 :
++                static_cast<uint32_t>(OU_RING_SLOTS - used));
++    }
++    return available;
+ }
+ 
+ // Wire-packet build shared by both transports.
+@@ -3884,6 +3948,8 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+             std::vector<gem5::Tick>(peer_serialization_stages_, 0));
+         peer_port_packets_.assign(ub_port_count_, 0);
+         peer_port_bytes_.assign(ub_port_count_, 0);
++        peer_port_rx_packets_.assign(ub_port_count_, 0);
++        peer_port_rx_bytes_.assign(ub_port_count_, 0);
+     }
+     auto &stage_free_ticks = peer_port_stage_free_ticks_[port];
+     gem5::Tick arrival_tick = tx_tick;
+@@ -3909,13 +3975,13 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+                  plen, OU_RING_SLOT - sizeof(OuRingSlotHeader));
+         panic_if(peer_link_latency_ == 0,
+                  "cross-process peer channel requires positive lookahead");
+-        PeerRing::Dir &d = ring_->dir[tx_dir_];
++        PeerRing::Dir &d = ring_->dir[tx_dir_][port];
+         const uint64_t head = __atomic_load_n(&d.head.value, __ATOMIC_RELAXED);
+         const uint64_t tail = __atomic_load_n(&d.tail.value, __ATOMIC_ACQUIRE);
+         panic_if(head - tail >= OU_RING_SLOTS,
+                  "peer ring full (head=%llu tail=%llu); refusing silent overwrite",
+                  (unsigned long long)head, (unsigned long long)tail);
+-        uint8_t *s = ring_->slot[tx_dir_][head % OU_RING_SLOTS];
++        uint8_t *s = peer_ring_slot(tx_dir_, port, head);
+         auto *hdr = reinterpret_cast<OuRingSlotHeader *>(s);
+         std::memset(hdr, 0, sizeof(*hdr));
+         hdr->plen = plen;
+@@ -3923,6 +3989,8 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+         hdr->tx_tick = tx_tick;
+         hdr->arrival_tick = arrival_tick;
+         hdr->seq = peer_tx_seq_++;
++        hdr->src_port = port;
++        hdr->dst_port = port;
+         ou_build_pkt(s + sizeof(*hdr), op, dcna, rtoken, rva,
+                      len, imm, order, payload);
+         __atomic_store_n(&d.head.value, head + 1, __ATOMIC_RELEASE);
+@@ -4807,6 +4875,13 @@ gem5::NICTopologySCParams::create() const
+     panic_if(ub_port_count == 0 || ub_port_count > 16,
+              "ub_port_count must be between 1 and 16");
+     nic->ub_port_count_ = ub_port_count;
++    nic->peer_port_stage_free_ticks_.assign(
++        ub_port_count,
++        std::vector<gem5::Tick>(peer_serialization_stages, 0));
++    nic->peer_port_packets_.assign(ub_port_count, 0);
++    nic->peer_port_bytes_.assign(ub_port_count, 0);
++    nic->peer_port_rx_packets_.assign(ub_port_count, 0);
++    nic->peer_port_rx_bytes_.assign(ub_port_count, 0);
+     nic->peer_serialization_stages_ = peer_serialization_stages;
+     nic->peer_switch_delay_ = peer_switch_delay;
+     nic->peer_link_overhead_bytes_ = peer_link_overhead_bytes;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index a77d540..f472774 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -170,6 +170,7 @@ class NICTopologySC : public sc_core::sc_module
+     // mmap SPSC ring. peer_node_id_ 0/1 selects tx/rx direction; -1 = no ring.
+     struct PeerRing;
+     PeerRing   *ring_ = nullptr;
++    size_t      ring_map_bytes_ = 0;
+     int         peer_node_id_ = -1;
+     uint32_t    udma_endpoint_eid_ = 0;
+     std::string peer_ring_path_;
+@@ -185,9 +186,13 @@ class NICTopologySC : public sc_core::sc_module
+     std::vector<std::vector<gem5::Tick>> peer_port_stage_free_ticks_;
+     std::vector<uint64_t> peer_port_packets_;
+     std::vector<uint64_t> peer_port_bytes_;
++    std::vector<uint64_t> peer_port_rx_packets_;
++    std::vector<uint64_t> peer_port_rx_bytes_;
+     gem5::Tick  peer_last_rx_arrival_ = 0;
+     uint64_t    peer_tx_seq_ = 0;
+     void peer_ring_map();
++    uint8_t *peer_ring_slot(uint32_t direction, uint32_t port,
++                            uint64_t index);
+     bool peer_ring_tx_full();
+     void peer_ring_drain(sc_core::sc_time &delay);
+     void peer_apply(const uint8_t *pkt, size_t pktlen);

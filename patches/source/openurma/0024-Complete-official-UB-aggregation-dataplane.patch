@@ -1,0 +1,526 @@
+From 024fe4a656f9345403a3dbee87074a28406c68e1 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 17:22:23 +0800
+Subject: [PATCH 24/27] Complete official UB aggregation dataplane
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 190 +++++++++++++++---
+ .../gem5_scaffold/src/NICTopologySC.hh        |  23 ++-
+ eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh  |  11 +-
+ 3 files changed, 195 insertions(+), 29 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 09df10e..7fd8ad1 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -457,9 +457,25 @@ NICTopologySC::ubase_raise_type1_msi(uint32_t vector)
+     // address through UMMU just like its queue traffic; doing a raw system
+     // write here would incorrectly target the IOVA itself (typically near
+     // the top of the 48-bit aperture) rather than the GICv2m frame.
+-    const uint64_t physical = ummu_translate_iova(address);
+-    if (!physical)
+-        return false;
++    // The MSI doorbell mapping is installed for the lifetime of the device.
++    // Cache the translation after the first successful interrupt just as
++    // physical hardware retains its programmed MSI tuple.  User resource
++    // teardown may invalidate unrelated UMMU entries; that must not make the
++    // device forget how to signal its administrative queues.
++    uint64_t physical = 0;
++    if (ubase_msi_iova_ == address) {
++        physical = ubase_msi_physical_;
++    } else {
++        physical = ummu_translate_iova(address);
++        if (!physical) {
++            std::cerr << "[NIC ubase] failed to translate Type-1 MSI vector="
++                      << vector << " iova=0x" << std::hex << address
++                      << std::dec << "\n";
++            return false;
++        }
++        ubase_msi_iova_ = address;
++        ubase_msi_physical_ = physical;
++    }
+ 
+     // The GICv2m SETSPI register has a write side effect, so this must be a
+     // real atomic MMIO transaction rather than a functional debugger access.
+@@ -956,7 +972,8 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+ }
+ 
+ bool
+-NICTopologySC::ubase_emit_mailbox_event(uint16_t sequence)
++NICTopologySC::ubase_emit_mailbox_event(uint16_t sequence,
++                                        bool raise_interrupt)
+ {
+     constexpr uint32_t EntryBytes = 64;
+     constexpr uint8_t MailboxEvent = 0x13;
+@@ -975,19 +992,48 @@ NICTopologySC::ubase_emit_mailbox_event(uint16_t sequence)
+     event[14] = 0; // successful mailbox status
+ 
+     const uint32_t slot = ubase_aeq_producer_ & (ubase_aeq_depth_ - 1);
+-    if (!ummu_dma(ubase_aeq_iova_ + uint64_t(slot) * EntryBytes,
+-                  event.data(), event.size(), true))
++    if (!ubase_cmdq_dma(ubase_aeq_iova_ + uint64_t(slot) * EntryBytes,
++                        event.data(), event.size(), true))
+         return false;
+     ++ubase_aeq_producer_;
+     std::cerr << "[NIC ubase] emitted mailbox AEQ event seq=" << sequence
+               << " slot=" << slot << "\n";
+-    return ubase_raise_type1_msi(1);
++    return !raise_interrupt || ubase_raise_type1_msi(1);
++}
++
++bool
++NICTopologySC::ubase_emit_completion_event(uint32_t jfc_id)
++{
++    constexpr uint32_t EntryBytes = 64;
++    if (!ubase_ceq_iova_ || !ubase_ceq_depth_)
++        return false;
++
++    std::array<uint8_t, EntryBytes> event{};
++    uint32_t completion = jfc_id & 0x000fffffU;
++    // ubase_next_ceqe() accepts an entry when its owner bit differs from the
++    // wrap bit of the monotonically increasing consumer index.
++    if (!(ubase_ceq_producer_ & ubase_ceq_depth_))
++        completion |= 1U << 31;
++    openurma_udma::storeLe32(event.data(), completion);
++
++    const uint32_t slot = ubase_ceq_producer_ & (ubase_ceq_depth_ - 1);
++    if (!ubase_cmdq_dma(ubase_ceq_iova_ + uint64_t(slot) * EntryBytes,
++                        event.data(), event.size(), true))
++        return false;
++    ++ubase_ceq_producer_;
++    if (ou_packet_trace_enabled()) {
++        std::cerr << "[NIC ubase] emitted CEQ event jfc=" << jfc_id
++                  << " slot=" << slot << "\n";
++    }
++    // The stock UBASE vector layout is misc=0, AEQ=1, CEQ0=2.
++    return ubase_raise_type1_msi(2);
+ }
+ 
+ void
+ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+ {
+     constexpr uint8_t CreateAeqContext = 0x34;
++    constexpr uint8_t CreateCeqContext = 0x44;
+     constexpr uint8_t CreateJfsContext = 0x04;
+     constexpr uint8_t QueryJfsContext = 0x06;
+     constexpr uint8_t DestroyJfsContext = 0x07;
+@@ -1037,6 +1083,25 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+         }
+     }
+ 
++    if (command == CreateCeqContext && context_iova) {
++        std::array<uint8_t, 64> context{};
++        if (ummu_dma(context_iova, context.data(), context.size(), false)) {
++            const uint32_t word1 = openurma_udma::loadLe32(context.data() + 4);
++            const uint32_t word2 = openurma_udma::loadLe32(context.data() + 8);
++            const uint32_t word3 = openurma_udma::loadLe32(context.data() + 12);
++            const uint32_t shift = word1 & 0x1f;
++            if (shift < 26) {
++                ubase_ceq_iova_ =
++                    ((uint64_t(word3) << 20) | (word2 >> 12)) << 12;
++                ubase_ceq_depth_ = 1U << (shift + 6);
++                ubase_ceq_producer_ = 0;
++                std::cerr << "[NIC ubase] captured CEQ iova=0x" << std::hex
++                          << ubase_ceq_iova_ << std::dec
++                          << " depth=" << ubase_ceq_depth_ << "\n";
++            }
++        }
++    }
++
+     // The official UDMA driver programs queue state through this architected
+     // mailbox. Capture the exact context hardware receives; no provider or
+     // kernel instrumentation is needed.
+@@ -1131,11 +1196,14 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+                     jetty.dsqe_page_offset = OuUdmaMemOffset + 0x1000 +
+                         uint64_t(tag) * openurma_udma::HardwarePageBytes;
+                     jetty.official = true;
+-                    jetty.is_jetty = ((dw(0) >> 19) & 1U) == 0;
++                    // udma_jetty_ctx::jfs_mode is the hardware discriminator:
++                    // enum jfsc_mode defines JFS=0 and JETTY=1.
++                    jetty.is_jetty = ((dw(0) >> 19) & 1U) != 0;
+                     jetty.token_id = ((dw(1) & 0xffU) << 12) |
+                                      ((dw(0) >> 20) & 0xfffU);
+                     jetty.payload_token_id =
+                         (dw(9) >> 2) & 0x000fffffU;
++                    jetty.eid_index = dw(6) & 0x3ffU;
+                     udma_jettys_[tag] = jetty;
+                     std::cerr << "[NIC udma official] "
+                               << (jetty.is_jetty ? "Jetty" : "JFS")
+@@ -1150,7 +1218,8 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+                               << jetty.max_wqebbs
+                               << " tid=" << jetty.token_id
+                               << " payload_tid="
+-                              << jetty.payload_token_id << "\n";
++                              << jetty.payload_token_id
++                              << " seid_idx=" << jetty.eid_index << "\n";
+                 }
+             }
+             timing_dma_kick_.notify(sc_core::SC_ZERO_TIME);
+@@ -1164,7 +1233,12 @@ NICTopologySC::ubase_handle_mailbox(const std::array<uint8_t, 32> &desc)
+     }
+ 
+     if (event_enabled)
+-        ubase_emit_mailbox_event(sequence);
++        // Publish the AEQE now, but defer its MSI until ubase_cmdq_kick() has
++        // written the completed descriptor and advanced CSQ_HEAD.  Real
++        // hardware exposes those writes before interrupt delivery; raising
++        // the interrupt here lets the guest re-enter and observe a stale
++        // head, producing "cleaned 0BD" during JFR teardown.
++        ubase_emit_mailbox_event(sequence, false);
+ }
+ 
+ bool
+@@ -1196,6 +1270,35 @@ NICTopologySC::ubios_msgq_access(tlm::tlm_command cmd, uint64_t off,
+     return true;
+ }
+ 
++bool
++NICTopologySC::ubase_cmdq_dma(uint64_t iova, void *buf, uint32_t len,
++                              bool write)
++{
++    auto *bytes = static_cast<uint8_t *>(buf);
++    while (len) {
++        const uint64_t page = iova & ~uint64_t{0xfff};
++        const uint32_t offset = static_cast<uint32_t>(iova & 0xfff);
++        const uint32_t chunk = std::min<uint32_t>(len, 4096U - offset);
++        auto cached = ubase_cmdq_dma_pages_.find(page);
++        uint64_t physical_page = 0;
++        if (cached != ubase_cmdq_dma_pages_.end()) {
++            physical_page = cached->second;
++        } else {
++            const uint64_t physical = ummu_translate_iova(iova);
++            if (!physical)
++                return false;
++            physical_page = physical - offset;
++            ubase_cmdq_dma_pages_.emplace(page, physical_page);
++        }
++        if (!ou_dma(physical_page + offset, bytes, chunk, write))
++            return false;
++        iova += chunk;
++        bytes += chunk;
++        len -= chunk;
++    }
++    return true;
++}
++
+ void
+ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+ {
+@@ -1219,7 +1322,7 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+     while (head != tail) {
+         std::array<uint8_t, DescriptorBytes> desc{};
+         const uint64_t pa = base + uint64_t(head) * DescriptorBytes;
+-        if (!ummu_dma(pa, desc.data(), desc.size(), false)) {
++        if (!ubase_cmdq_dma(pa, desc.data(), desc.size(), false)) {
+             std::cerr << "[NIC ubase] failed to read CSQ descriptor iova=0x"
+                       << std::hex << pa << std::dec << "\n";
+             break;
+@@ -1235,8 +1338,9 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+             for (uint32_t index = 1; index < descriptor_count; ++index) {
+                 std::array<uint8_t, DescriptorBytes> continuation{};
+                 const uint32_t pos = (head + index) % depth;
+-                if (!ummu_dma(base + uint64_t(pos) * DescriptorBytes,
+-                              continuation.data(), continuation.size(), false))
++                if (!ubase_cmdq_dma(base + uint64_t(pos) * DescriptorBytes,
++                                    continuation.data(),
++                                    continuation.size(), false))
+                     break;
+                 command_data.insert(command_data.end(), continuation.begin(),
+                                     continuation.end());
+@@ -1324,8 +1428,9 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+                 std::memcpy(continuation.data(), response.data() + offset,
+                             chunk);
+                 const uint32_t pos = (head + index) % depth;
+-                if (!ummu_dma(base + uint64_t(pos) * DescriptorBytes,
+-                              continuation.data(), continuation.size(), true))
++                if (!ubase_cmdq_dma(base + uint64_t(pos) * DescriptorBytes,
++                                    continuation.data(),
++                                    continuation.size(), true))
+                     break;
+                 offset += chunk;
+             }
+@@ -1345,12 +1450,14 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+             // successfully; bit 1 remains clear because hardware is idle.
+             openurma_udma::storeLe32(desc.data() + 8, 0x00000001);
+         }
+-        if (!ummu_dma(pa, desc.data(), desc.size(), true)) {
++        if (!ubase_cmdq_dma(pa, desc.data(), desc.size(), true)) {
+             std::cerr << "[NIC ubase] failed to write CSQ descriptor iova=0x"
+                       << std::hex << pa << std::dec << "\n";
+             break;
+         }
+ 
++        const bool mailbox_event = opcode == 0x7000 &&
++            (openurma_udma::loadLe32(desc.data() + 20) & (1U << 16));
+         if (opcode == 0xf00e && !command_data.empty())
+             ubase_emit_ue2ue_ctrlq_response(command_data);
+         else if (opcode == 0x7000)
+@@ -1358,6 +1465,8 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+ 
+         head = (head + descriptor_count) % depth;
+         ubase_cmdq_regs_[CsqHead] = head;
++        if (mailbox_event)
++            ubase_raise_type1_msi(1);
+         std::cerr << "[NIC ubase] completed CSQ opcode=0x" << std::hex
+                   << opcode << std::dec << " head=" << head << "\n";
+     }
+@@ -1397,6 +1506,8 @@ NICTopologySC::ubase_cmdq_access(tlm::tlm_command cmd, uint64_t off,
+         const uint32_t value = openurma_udma::loadLe32(data);
+         ubase_cmdq_regs_[index] = value;
+         // A new CSQ base denotes a fresh ring, including after probe retry.
++        if (index == 0x00 / 4 || index == 0x04 / 4)
++            ubase_cmdq_dma_pages_.clear();
+         if (index == 0x00 / 4)
+             ubase_cmdq_regs_[0x14 / 4] = 0;
+         if (index == 0x10 / 4)
+@@ -2576,7 +2687,9 @@ bool
+ NICTopologySC::udma_write_cqe(uint32_t jfc_id, bool receive, bool jetty,
+                                uint8_t opcode, uint16_t entry_idx,
+                                uint32_t local_id, uint32_t byte_count,
+-                               uint64_t user_data, uint64_t immediate)
++                               uint64_t user_data, uint64_t immediate,
++                               uint32_t remote_id, uint32_t remote_eid,
++                               uint32_t tpn)
+ {
+     auto found = udma_jfcs_.find(jfc_id);
+     if (found == udma_jfcs_.end())
+@@ -2600,7 +2713,7 @@ NICTopologySC::udma_write_cqe(uint32_t jfc_id, bool receive, bool jetty,
+     const bool owner = ((jfc.producer / jfc.depth) & 1U) == 0;
+     auto cqe = openurma_udma::makeCqe(
+         receive, jetty, owner, opcode, entry_idx, local_id, byte_count,
+-        user_data, immediate);
++        user_data, immediate, remote_id, remote_eid, tpn);
+     const uint64_t offset = (jfc.producer & (jfc.depth - 1U)) *
+                             openurma_udma::CqeBytes;
+     if (!udma_dma_resource_ring(jfc.official, jfc.context_id, jfc.token_id,
+@@ -2618,10 +2731,14 @@ NICTopologySC::udma_write_cqe(uint32_t jfc_id, bool receive, bool jetty,
+                   << " entry=" << entry_idx
+                   << " local_id=" << local_id
+                   << " bytes=" << byte_count
++                  << " remote_id=" << remote_id
++                  << " remote_eid=0x" << std::hex << remote_eid << std::dec
++                  << " tpn=" << tpn
+                   << " cq_consumer=" << consumer << "\n";
+     }
+     ++jfc.producer;
+     ++udma_cqes_;
++    ubase_emit_completion_event(jfc.id);
+     return true;
+ }
+ 
+@@ -2728,7 +2845,8 @@ NICTopologySC::udma_process_rx(UdmaRxWork &work)
+                               jetty.recv_jfc_id : jfr.recv_jfc_id;
+     if (!udma_write_cqe(recv_jfc, true, true, work.opcode,
+                         static_cast<uint16_t>(rqe_index), jetty.id,
+-                        work.payload.size(), 0, work.immediate)) {
++                        work.payload.size(), 0, work.immediate,
++                        work.source_jetty, work.source_eid, work.tpn)) {
+         return fail(10, "recv-cqe");
+     }
+     if (ou_packet_trace_enabled()) {
+@@ -2928,6 +3046,10 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+ 
+         UdmaRxWork rx{wqe.remoteJetty(), wqe.opcode(),
+                       wqe.immediate(), payload};
++        rx.source_jetty = jetty.id;
++        rx.source_eid = udma_endpoint_eid_ +
++                        jetty.eid_index * 0x10000U;
++        rx.tpn = wqe.tpn();
+         if (has_peer_ && wqe.opcode() == 3) {
+             // A non-inline RMA WQE names memory; its size does not grow with
+             // the referenced payload.  Queue the operation once and stream
+@@ -2956,7 +3078,8 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+             peer_send(wqe.opcode() == 0 ? OU_UDMA_PEER_SEND :
+                           OU_UDMA_PEER_SEND_IMM,
+                       rx.target_jetty, 0, 0, payload.size(), rx.immediate, 0,
+-                      payload.data(), gem5::curTick(), wqe.tpn());
++                      payload.data(), gem5::curTick(), wqe.tpn(), UINT32_MAX,
++                      rx.source_jetty, rx.source_eid);
+         } else if (wqe.opcode() == 3) {
+             if (!payload.empty() &&
+                 !ummu_dma_tid(wqe.remoteSegment(), wqe.remoteAddress(),
+@@ -3968,18 +4091,26 @@ NICTopologySC::peer_ring_tx_available()
+ // Wire-packet build shared by both transports.
+ static inline void
+ ou_build_pkt(uint8_t *pkt, uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rva,
+-             uint32_t len, uint64_t imm, uint8_t order, const uint8_t *payload)
++             uint32_t len, uint64_t imm, uint8_t order, const uint8_t *payload,
++             uint32_t tpn, uint32_t source_jetty, uint32_t source_eid)
+ {
+     std::memset(pkt, 0, 40);
+     pkt[0] = op;
++    pkt[1] = static_cast<uint8_t>(source_eid);
++    pkt[2] = static_cast<uint8_t>(source_eid >> 8);
++    pkt[3] = static_cast<uint8_t>(source_eid >> 16);
+     std::memcpy(pkt + 4,  &dcna,   4);
+     std::memcpy(pkt + 8,  &rtoken, 4);
++    std::memcpy(pkt + 12, &source_jetty, 4);
+     std::memcpy(pkt + 16, &rva,    8);
+     std::memcpy(pkt + 24, &len,    4);
+     const uint32_t imm_lo = static_cast<uint32_t>(imm);
+     const uint32_t imm_hi = static_cast<uint32_t>(imm >> 32);
+     std::memcpy(pkt + 28, &imm_lo, 4);
+     pkt[32] = order;
++    pkt[33] = static_cast<uint8_t>(tpn);
++    pkt[34] = static_cast<uint8_t>(tpn >> 8);
++    pkt[35] = static_cast<uint8_t>(tpn >> 16);
+     std::memcpy(pkt + 36, &imm_hi, 4);
+     if (len && payload) std::memcpy(pkt + 40, payload, len);
+ }
+@@ -4020,7 +4151,8 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
+                          uint64_t rva, uint32_t len, uint64_t imm,
+                          uint8_t order, const uint8_t *payload,
+                          gem5::Tick tx_tick, uint32_t tpn,
+-                         uint32_t forced_port)
++                         uint32_t forced_port, uint32_t source_jetty,
++                         uint32_t source_eid)
+ {
+     peer_ring_map();
+     panic_if(peer_node_id_ >= 0 && !ring_,
+@@ -4106,7 +4238,7 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
+         hdr->src_port = src_port;
+         hdr->dst_port = dst_port;
+         ou_build_pkt(s + sizeof(*hdr), op, dcna, rtoken, rva,
+-                     len, imm, order, payload);
++                     len, imm, order, payload, tpn, source_jetty, source_eid);
+         __atomic_store_n(&d.head.value, head + 1, __ATOMIC_RELEASE);
+         if (ou_packet_trace_enabled()) {
+             std::cerr << "[NIC peer-tx ring] seq=" << hdr->seq
+@@ -4120,7 +4252,8 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
+         return;
+     }
+     std::vector<uint8_t> pkt(40 + (size_t)payload_bytes, 0); // in-process TLM
+-    ou_build_pkt(pkt.data(), op, dcna, rtoken, rva, len, imm, order, payload);
++    ou_build_pkt(pkt.data(), op, dcna, rtoken, rva, len, imm, order, payload,
++                 tpn, source_jetty, source_eid);
+     tlm::tlm_generic_payload trans;
+     trans.set_command(tlm::TLM_WRITE_COMMAND);
+     trans.set_address(0);
+@@ -4158,6 +4291,12 @@ NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen,
+     }
+     const uint8_t *payload = pkt + 40;
+     const uint8_t order = pkt[32];
++    const uint32_t source_eid = uint32_t(pkt[1]) |
++        (uint32_t(pkt[2]) << 8) | (uint32_t(pkt[3]) << 16);
++    const uint32_t source_jetty =
++        openurma_udma::loadLe32(pkt + 12) & 0xfffffU;
++    const uint32_t source_tpn = uint32_t(pkt[33]) |
++        (uint32_t(pkt[34]) << 8) | (uint32_t(pkt[35]) << 16);
+ 
+     if (udma_mode_ &&
+         (op == OU_UDMA_PEER_SEND || op == OU_UDMA_PEER_SEND_IMM)) {
+@@ -4170,6 +4309,9 @@ NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen,
+         work.opcode = op == OU_UDMA_PEER_SEND ? 0 : 1;
+         work.immediate = immediate;
+         work.payload.assign(payload, payload + len);
++        work.source_jetty = source_jetty;
++        work.source_eid = source_eid;
++        work.tpn = source_tpn;
+         udma_rx_pending_.push_back(std::move(work));
+         timing_dma_kick_.notify(sc_core::SC_ZERO_TIME);
+         return;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 88dec44..67124df 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -295,19 +295,28 @@ class NICTopologySC : public sc_core::sc_module
+     std::array<uint32_t, 0x2c / sizeof(uint32_t)> ubase_cmdq_regs_{};
+     bool ubase_cmdq_access(tlm::tlm_command cmd, uint64_t off,
+                            uint8_t *data, size_t len);
++    bool ubase_cmdq_dma(uint64_t iova, void *buf, uint32_t len, bool write);
+     void ubase_cmdq_kick(uint32_t new_pi);
+     void ubase_handle_mailbox(const std::array<uint8_t, 32> &desc);
+-    bool ubase_emit_mailbox_event(uint16_t sequence);
++    bool ubase_emit_mailbox_event(uint16_t sequence,
++                                  bool raise_interrupt = true);
++    bool ubase_emit_completion_event(uint32_t jfc_id);
+     bool ubase_misc_access(tlm::tlm_command cmd, uint64_t off,
+                            uint8_t *data, size_t len);
+     bool ubase_emit_ue2ue_ctrlq_response(const std::vector<uint8_t> &request);
+     uint32_t ubase_cmdq_src_ = 0;
++    std::unordered_map<uint64_t, uint64_t> ubase_cmdq_dma_pages_;
+     uint64_t ubase_aeq_iova_ = 0;
+     uint32_t ubase_aeq_depth_ = 0;
+     uint32_t ubase_aeq_producer_ = 0;
++    uint64_t ubase_ceq_iova_ = 0;
++    uint32_t ubase_ceq_depth_ = 0;
++    uint32_t ubase_ceq_producer_ = 0;
+     bool dma_external_bound_ = false;
+     bool dma_native_bound_ = false;
+     bool msi_native_bound_ = false;
++    uint64_t ubase_msi_iova_ = 0;
++    uint64_t ubase_msi_physical_ = 0;
+     uint32_t dma_max_outstanding_ = 16;
+     gem5::RequestorID dma_requestor_id_ = gem5::Request::invldRequestorId;
+     TimingDmaRequest *dma_active_request_ = nullptr;
+@@ -422,6 +431,7 @@ class NICTopologySC : public sc_core::sc_module
+         uint64_t direct_wqe_valid = 0;
+         uint32_t token_id = 0;
+         uint32_t payload_token_id = 0;
++        uint32_t eid_index = 0;
+     };
+     struct UdmaSqWork {
+         uint32_t jetty_id = 0;
+@@ -434,6 +444,9 @@ class NICTopologySC : public sc_core::sc_module
+         uint8_t opcode = 0;
+         uint64_t immediate = 0;
+         std::vector<uint8_t> payload;
++        uint32_t source_jetty = 0;
++        uint32_t source_eid = 0;
++        uint32_t tpn = 0;
+         uint8_t last_failure_stage = 0;
+         uint64_t retry_count = 0;
+     };
+@@ -548,7 +561,9 @@ class NICTopologySC : public sc_core::sc_module
+     bool udma_write_cqe(uint32_t jfc_id, bool receive, bool jetty,
+                         uint8_t opcode, uint16_t entry_idx,
+                         uint32_t local_id, uint32_t byte_count,
+-                        uint64_t user_data, uint64_t immediate);
++                        uint64_t user_data, uint64_t immediate,
++                        uint32_t remote_id = 0, uint32_t remote_eid = 0,
++                        uint32_t tpn = 0);
+     bool udma_dma_va(uint32_t context_id, uint64_t va, void *buf,
+                      uint32_t len, bool write);
+     bool udma_dma_payload(uint32_t context_id, uint64_t va, void *buf,
+@@ -592,7 +607,9 @@ class NICTopologySC : public sc_core::sc_module
+                    uint32_t len, uint64_t imm, uint8_t order,
+                    const uint8_t *payload, gem5::Tick tx_tick,
+                    uint32_t tpn = UINT32_MAX,
+-                   uint32_t forced_port = UINT32_MAX);
++                   uint32_t forced_port = UINT32_MAX,
++                   uint32_t source_jetty = 0,
++                   uint32_t source_eid = 0);
+     uint32_t peer_port_for_transport(uint32_t tpn, uint8_t op,
+                                      uint32_t dcna, uint32_t rtoken) const;
+     // pop the oldest posted receive on dest jetty `dj` (used by both the local
+diff --git a/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh b/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh
+index f242557..e4b8017 100644
+--- a/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh
++++ b/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh
+@@ -175,7 +175,8 @@ constexpr uint8_t CqeSendWithImm = 0x01;
+ inline std::array<uint8_t, CqeBytes>
+ makeCqe(bool receive, bool jetty, bool owner, uint8_t opcode,
+         uint16_t entryIndex, uint32_t localId, uint32_t byteCount,
+-        uint64_t userData, uint64_t immediate)
++        uint64_t userData, uint64_t immediate, uint32_t remoteId = 0,
++        uint32_t remoteEid = 0, uint32_t tpn = 0)
+ {
+     std::array<uint8_t, CqeBytes> cqe{};
+     uint32_t dw0 = (receive ? 1U : 0U) |
+@@ -185,9 +186,15 @@ makeCqe(bool receive, bool jetty, bool owner, uint8_t opcode,
+     storeLe32(cqe.data(), dw0); // status/substatus stay SUCCESS/0
+     storeLe32(cqe.data() + 4,
+               static_cast<uint32_t>(entryIndex) | ((localId & 0xffffU) << 16));
+-    storeLe32(cqe.data() + 8, (localId >> 16) & 0xfU);
++    storeLe32(cqe.data() + 8, ((localId >> 16) & 0xfU) |
++              ((remoteId & 0xfffffU) << 4));
++    storeLe32(cqe.data() + 12, tpn & 0xffffffU);
+     storeLe32(cqe.data() + 16, byteCount);
+     storeLe64(cqe.data() + 20, userData);
++    // The stock provider converts this little-endian hardware field back to
++    // the public 128-bit EID with udma_u_swap_endian128().  Compact modeled
++    // EIDs therefore occupy the low 20 bits of CQE DW7.
++    storeLe32(cqe.data() + 28, remoteEid & 0xfffffU);
+     storeLe64(cqe.data() + 44, immediate);
+     return cqe;
+ }

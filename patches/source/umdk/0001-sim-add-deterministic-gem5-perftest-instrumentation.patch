@@ -1,0 +1,1005 @@
+From 6878bcb26c10c415e662615730b2c946e533689f Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 09:34:46 +0800
+Subject: [PATCH 1/8] sim: add deterministic gem5 perftest instrumentation
+
+---
+ src/urma/common/ub_get_clock.c                |  14 +
+ src/urma/tools/urma_perftest/CMakeLists.txt   |  27 +
+ .../tools/urma_perftest/perftest_parameters.c |   2 +-
+ .../tools/urma_perftest/perftest_parameters.h |   2 +
+ .../tools/urma_perftest/perftest_run_test.c   | 508 ++++++++++++++++--
+ .../tools/urma_perftest/perftest_run_test.h   |   3 +-
+ src/urma/tools/urma_perftest/urma_perftest.c  |  17 +-
+ 7 files changed, 516 insertions(+), 57 deletions(-)
+
+diff --git a/src/urma/common/ub_get_clock.c b/src/urma/common/ub_get_clock.c
+index d5a30e0..5b64716 100644
+--- a/src/urma/common/ub_get_clock.c
++++ b/src/urma/common/ub_get_clock.c
+@@ -131,6 +131,20 @@ static double proc_get_cpu_mhz(bool cpu_freq_warn)
+ 
+ double get_cpu_mhz(bool cpu_freq_warn)
+ {
++#if defined(__aarch64__)
++    /*
++     * get_cycles() reads CNTVCT_EL0 on AArch64, whose exact rate is exposed
++     * by CNTFRQ_EL0.  Reading it directly avoids the >200 ms wall-clock
++     * regression below.  That regression is particularly harmful inside a
++     * conservatively synchronized simulator because it creates millions of
++     * otherwise irrelevant synchronization barriers after the measurement.
++     */
++    uint64_t counter_hz;
++    asm volatile("mrs %0, cntfrq_el0" : "=r" (counter_hz));
++    if (counter_hz != 0) {
++        return (double)counter_hz / CLOCK_SEC_TO_USEC;
++    }
++#endif
+     double sample, proc, delta;
+     sample = gettime_get_cpu_mhz();
+     proc = proc_get_cpu_mhz(cpu_freq_warn);
+diff --git a/src/urma/tools/urma_perftest/CMakeLists.txt b/src/urma/tools/urma_perftest/CMakeLists.txt
+index 60369ad..ae60707 100644
+--- a/src/urma/tools/urma_perftest/CMakeLists.txt
++++ b/src/urma/tools/urma_perftest/CMakeLists.txt
+@@ -19,6 +19,33 @@ target_link_libraries(urma_perftest
+         urma pthread m
+ )
+ 
++# OpenURMA's gem5-only build adds a runtime-selectable m5 pseudo-op transport.
++# Keeping the paths as cache variables leaves the upstream/physical build
++# unchanged when they are not supplied.
++set(OPENURMA_GEM5_M5_LIBRARY "" CACHE FILEPATH
++    "Optional gem5 libm5.a used by the OpenURMA simulation instrumentation")
++set(OPENURMA_GEM5_M5_INCLUDE_DIR "" CACHE PATH
++    "Optional directory containing gem5/m5ops.h")
++set(OPENURMA_GEM5_M5_MMAP_INCLUDE_DIR "" CACHE PATH
++    "Optional directory containing m5_mmap.h")
++set(OPENURMA_GEM5_M5_DISPATCH_INCLUDE_DIR "" CACHE PATH
++    "Optional directory containing ou-m5ops.h")
++
++if(OPENURMA_GEM5_M5_LIBRARY)
++    if(NOT OPENURMA_GEM5_M5_INCLUDE_DIR OR
++       NOT OPENURMA_GEM5_M5_MMAP_INCLUDE_DIR OR
++       NOT OPENURMA_GEM5_M5_DISPATCH_INCLUDE_DIR)
++        message(FATAL_ERROR
++            "All OpenURMA gem5 m5 include directories are required with libm5")
++    endif()
++    target_compile_definitions(urma_perftest PRIVATE OPENURMA_GEM5_M5OPS=1)
++    target_include_directories(urma_perftest PRIVATE
++        "${OPENURMA_GEM5_M5_INCLUDE_DIR}"
++        "${OPENURMA_GEM5_M5_MMAP_INCLUDE_DIR}"
++        "${OPENURMA_GEM5_M5_DISPATCH_INCLUDE_DIR}")
++    target_link_libraries(urma_perftest PRIVATE "${OPENURMA_GEM5_M5_LIBRARY}")
++endif()
++
+ install(TARGETS urma_perftest
+     DESTINATION /usr/bin
+ )
+diff --git a/src/urma/tools/urma_perftest/perftest_parameters.c b/src/urma/tools/urma_perftest/perftest_parameters.c
+index 2e1c748..e6e5e1a 100644
+--- a/src/urma/tools/urma_perftest/perftest_parameters.c
++++ b/src/urma/tools/urma_perftest/perftest_parameters.c
+@@ -902,7 +902,7 @@ static int calc_rate_limit_gap(perftest_config_t *cfg)
+             return -1;
+     }
+ 
+-    cpu_mhz = get_cpu_mhz(cfg->cpu_freq_f);
++    cpu_mhz = perftest_time_units_per_usec(cfg->cpu_freq_f);
+     if (cpu_mhz <= 0.0) {
+         (void)fprintf(stderr, "Failed: couldn't acquire cpu frequency for rate limiter.\n");
+         return -1;
+diff --git a/src/urma/tools/urma_perftest/perftest_parameters.h b/src/urma/tools/urma_perftest/perftest_parameters.h
+index 69ec0cc..85a6ca4 100644
+--- a/src/urma/tools/urma_perftest/perftest_parameters.h
++++ b/src/urma/tools/urma_perftest/perftest_parameters.h
+@@ -319,6 +319,8 @@ static inline bool perftest_check_rs_mode(const perftest_config_t *cfg)
+ 
+ void print_cfg(const perftest_config_t *cfg);
+ int perftest_parse_args(int argc, char *argv[], perftest_config_t *cfg);
++int perftest_clock_init(void);
++double perftest_time_units_per_usec(bool cpu_freq_warn);
+ void destroy_cfg(perftest_config_t *cfg);
+ int check_local_cfg(perftest_config_t *cfg);
+ int check_remote_cfg(perftest_config_t *cfg);
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index 7338e88..e437509 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -21,6 +21,10 @@
+ #include "perftest_parameters.h"
+ #include "perftest_resources.h"
+ 
++#if defined(OPENURMA_GEM5_M5OPS)
++#include "ou-m5ops.h"
++#endif
++
+ #define PERFTEST_HALF (2)
+ #define PERFTEST_ITERS_99 (0.99)
+ #define PERFTEST_ITERS_99_9 (0.999)
+@@ -28,8 +32,219 @@
+ #define PERFTEST_ITERS_99_99_9 (0.99999)
+ #define PERFTEST_SGE_NUM_PRE_WR (2)
+ #define PERFTEST_POLL_BATCH (16)
++#define OPENURMA_DIST_WARMUP_DELTAS (5)
++
++/*
++ * A distributed gem5 run must not let either event queue cross the peer
++ * channel's lookahead while latency traffic is in flight.  Keep process
++ * TCP control-plane setup and resource creation outside that very fine-grained
++ * barrier, then enter/leave it collectively around only the ping-pong loop.
++ * A short ON/OFF rendezvous before connecting first aligns both event queues,
++ * so launching the server earlier cannot turn host waiting time into a large
++ * virtual-time skew. The AArch64 build invokes gem5 in-process, avoiding a
++ * fork/exec while synchronization is active. Native gem5 CPUs use the magic
++ * instruction; KVM uses the runtime-selected m5ops MMIO address transport.
++ */
++static bool dist_sync_requested(void)
++{
++    const char *value = getenv("OPENURMA_DIST_SYNC");
++    return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
++}
++
++static bool roi_stats_requested(void)
++{
++    const char *value = getenv("OPENURMA_ROI_STATS");
++    return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
++}
++
++static bool cpu_switch_requested(void)
++{
++    const char *value = getenv("OPENURMA_CPU_SWITCH");
++    return value != NULL && strcmp(value, "server_o3") == 0;
++}
++
++static uint64_t latency_warmup_deltas(void)
++{
++    return dist_sync_requested() ? OPENURMA_DIST_WARMUP_DELTAS : 0;
++}
++
++static int toggle_dist_sync(const char *phase)
++{
++#if defined(__aarch64__)
++#if defined(OPENURMA_GEM5_M5OPS)
++    if (ou_m5ops_dist_toggle_sync() != 0) {
++        (void)fprintf(stderr,
++            "Failed to %s distributed virtual-time synchronization.\n", phase);
++        return -1;
++    }
++#else
++    /* gem5 arm64 m5_dist_toggle_sync pseudo instruction (op 0x62). */
++    __asm__ __volatile__(".inst 0xff620110" ::: "x0", "memory");
++#endif
++    (void)phase;
++    return 0;
++#else
++    int ret = system("/usr/bin/ou-dist-sync");
++    if (ret != 0) {
++        (void)fprintf(stderr, "Failed to %s distributed virtual-time synchronization, status:%d.\n",
++            phase, ret);
++        return -1;
++    }
++    return 0;
++#endif
++}
++
++int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
++{
++    if (!dist_sync_requested()) {
++        return 0;
++    }
++    if (cfg->cmd != PERFTEST_SEND_LAT || cfg->time_type.bs.iterations != 1 ||
++        cfg->pair_num != 1 || cfg->jettys != 1) {
++        (void)fprintf(stderr,
++            "Distributed virtual-time synchronization currently supports only "
++            "iteration-mode send_lat with one pair and one jetty.\n");
++        return -1;
++    }
++
++    /*
++     * DistIface's first toggle performs an immediate collective control
++     * barrier and schedules both event queues at the same tick.  The second
++     * collective toggle is executed only after that common barrier releases,
++     * then disables periodic synchronization for the control-plane setup.
++     */
++    if (toggle_dist_sync("enable pre-test rendezvous") != 0) {
++        return -1;
++    }
++    if (toggle_dist_sync("disable pre-test rendezvous") != 0) {
++        return -1;
++    }
++    return 0;
++}
++
++/*
++ * Delimit the traffic loop in gem5's statistics stream.  The pseudo-op
++ * arguments are delay and period in x0/x1; both are zero so the operation is
++ * applied once at the current simulated time.  Keeping this outside the hot
++ * path means it cannot perturb any reported latency sample.
++ */
++static int gem5_roi_stats(bool reset)
++{
++#if defined(__aarch64__)
++#if defined(OPENURMA_GEM5_M5OPS)
++    return reset ? ou_m5ops_reset_stats() : ou_m5ops_dump_stats();
++#else
++    if (reset) {
++        __asm__ __volatile__(
++            "mov x0, xzr\n\t"
++            "mov x1, xzr\n\t"
++            ".inst 0xff400110"
++            ::: "x0", "x1", "memory");
++    } else {
++        __asm__ __volatile__(
++            "mov x0, xzr\n\t"
++            "mov x1, xzr\n\t"
++            ".inst 0xff410110"
++            ::: "x0", "x1", "memory");
++    }
++    return 0;
++#endif
++#else
++    (void)reset;
++    (void)fprintf(stderr, "OPENURMA_ROI_STATS requires the AArch64 gem5 guest build.\n");
++    return -1;
++#endif
++}
++
++/*
++ * Switch between the fast boot CPU and the server-style O3 ROI CPU.  The
++ * simulator handles the switchcpu exit event and resumes at the instruction
++ * following this pseudo-op.  Calling it a second time switches back.
++ */
++static int gem5_switch_roi_cpu(const char *phase)
++{
++#if defined(__aarch64__)
++#if defined(OPENURMA_GEM5_M5OPS)
++    if (ou_m5ops_switch_cpu() != 0) {
++        (void)fprintf(stderr, "Failed to switch gem5 CPU while trying to %s.\n", phase);
++        return -1;
++    }
++#else
++    /* gem5 arm64 m5_switch_cpu pseudo instruction (op 0x52). */
++    __asm__ __volatile__(".inst 0xff520110" ::: "memory");
++#endif
++    (void)phase;
++    return 0;
++#else
++    (void)fprintf(stderr,
++        "OPENURMA_CPU_SWITCH=server_o3 requires the AArch64 gem5 guest build (%s).\n", phase);
++    return -1;
++#endif
++}
++
++#define PERFTEST_NSEC_PER_USEC (1000.0)
++
++#if defined(OPENURMA_GEM5_M5OPS)
++typedef enum perftest_clock_mode {
++    PERFTEST_CLOCK_NATIVE = 0,
++    PERFTEST_CLOCK_GEM5_ADDR,
++} perftest_clock_mode_t;
++
++static perftest_clock_mode_t g_perftest_clock_mode = PERFTEST_CLOCK_NATIVE;
++#endif
++static bool g_perftest_clock_initialized;
++
++/*
++ * Address-mode m5ops are required by KVM, where userspace access to CNTVCT
++ * is not guaranteed and the architectural counter rate can differ after an
++ * O3 takeover.  Resolve the mode and map /dev/mem once before any timestamp
++ * is taken; the hot path then contains no environment lookup or mmap.
++ */
++int perftest_clock_init(void)
++{
++    if (g_perftest_clock_initialized) {
++        return 0;
++    }
++
++#if defined(OPENURMA_GEM5_M5OPS)
++    int address_mode = ou_m5ops_address_mode();
++    if (address_mode < 0) {
++        return -1;
++    }
++    if (address_mode != 0) {
++        if (ou_m5ops_prepare_address() != 0) {
++            return -1;
++        }
++        g_perftest_clock_mode = PERFTEST_CLOCK_GEM5_ADDR;
++        (void)fprintf(stderr,
++            "OpenURMA gem5 timing source: m5_rpns_addr (integer ns, 1000 ticks/us).\n");
++    }
++#endif
++
++    g_perftest_clock_initialized = true;
++    return 0;
++}
++
++static inline uint64_t perftest_get_time(void)
++{
++#if defined(OPENURMA_GEM5_M5OPS)
++    if (g_perftest_clock_mode == PERFTEST_CLOCK_GEM5_ADDR) {
++        return m5_rpns_addr();
++    }
++#endif
++    return get_cycles();
++}
++
++double perftest_time_units_per_usec(bool cpu_freq_warn)
++{
++#if defined(OPENURMA_GEM5_M5OPS)
++    if (g_perftest_clock_mode == PERFTEST_CLOCK_GEM5_ADDR) {
++        return PERFTEST_NSEC_PER_USEC;
++    }
++#endif
++    return get_cpu_mhz(cpu_freq_warn);
++}
+ 
+-#define LAT_MEASURE_TAIL (2)  // Remove the two max value
+ #define RESULT_LAT_FMT " bytes   iterations  t_min[us]  t_max[us]  t_median[us]  t_avg[us]  t_stdev[us]  " \
+                         "99""%""[us]  99.9""%""[us]  99.99""%""[us]  99.999""%""[us]"
+ #define RESULT_LAT_DUR_FMT " bytes   iterations  t_avg[us]  pps"
+@@ -68,12 +283,12 @@ void catch_alarm(int sig)
+     switch (g_duration_ctx->state) {
+         case WARMUP_STATE:
+             g_duration_ctx->state = START_STATE;
+-            g_duration_ctx->tposted[0] = get_cycles();
++            g_duration_ctx->tposted[0] = perftest_get_time();
+             (void)alarm(g_duration_ctx->duration / PERFTEST_DEF_TEST_TIME);
+             break;
+         case START_STATE:
+             g_duration_ctx->state = STOP_STATE;
+-            g_duration_ctx->tcompleted[0] = get_cycles();
++            g_duration_ctx->tcompleted[0] = perftest_get_time();
+             (void)alarm(g_duration_ctx->duration / PERFTEST_DEF_WARMUP_TIME);
+             break;
+         case STOP_STATE:
+@@ -171,7 +386,7 @@ static void *run_read_lat_simplex(void *arg)
+ 
+     while (scnt < cfg->iters || (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
+         if (cfg->time_type.bs.iterations == 1) {
+-            run_ctx->tposted[id * cfg->iters + scnt] = get_cycles();
++            run_ctx->tposted[id * cfg->iters + scnt] = perftest_get_time();
+         }
+ 
+         urma_status_t status;
+@@ -256,7 +471,7 @@ static void *run_write_lat_simplex(void *arg)
+ 
+         if (scnt < cfg->iters || cfg->time_type.bs.duration == 1) {
+             if (cfg->time_type.bs.iterations == 1) {
+-                run_ctx->tposted[id * cfg->iters + scnt] = get_cycles();
++                run_ctx->tposted[id * cfg->iters + scnt] = perftest_get_time();
+             }
+ 
+             scnt += cfg->jfs_post_list;
+@@ -340,7 +555,7 @@ static inline void set_on_first_rx(perftest_context_t *ctx, perftest_config_t *c
+     if (cfg->time_type.bs.duration == 1) {
+         update_duration_state(ctx, cfg);
+     } else if (cfg->type == PERFTEST_BW) {
+-        run_ctx->tposted[0] = get_cycles();
++        run_ctx->tposted[0] = perftest_get_time();
+     }
+ }
+ 
+@@ -357,11 +572,16 @@ static void *run_send_lat_simplex(void *arg)
+     int first_rx = 1;
+     run_test_ctx_t *run_ctx = &ctx->run_ctx;
+     uint64_t rid = run_ctx->rid;
++    bool dist_sync_active = false;
++    bool roi_stats_active = false;
++    bool roi_cpu_active = false;
++    const bool collect_roi_stats = roi_stats_requested();
++    const uint64_t roi_warmup_ops = latency_warmup_deltas() * cfg->jfs_post_list;
+ 
+     urma_cr_t *cr = calloc(cfg->jfc_depth, sizeof(urma_cr_t));
+     if (cr == NULL) {
+         (void)fprintf(stderr, "Failed alloc cr, id:%u\n", id);
+-        return NULL;
++        return arg;
+     }
+ 
+     bool is_server = cfg->comm.server_ip == NULL;
+@@ -376,6 +596,36 @@ static void *run_send_lat_simplex(void *arg)
+     if (sync_time(cfg->comm.sock_fd[id], "send_lat_post_recv") != 0) {
+         goto free_cr;
+     }
++    if (dist_sync_requested()) {
++        if (toggle_dist_sync("enable") != 0) {
++            goto free_cr;
++        }
++        dist_sync_active = true;
++        /*
++         * toggle_dist_sync schedules the first conservative barrier at a
++         * common future tick; it does not block the calling CPU until that
++         * tick.  Exchange one token over the already-connected OOB socket so
++         * the leading guest waits and the lagging guest reaches that first
++         * barrier while both still use the fast boot CPU.  Once this returns,
++         * periodic synchronization bounds the subsequent switchcpu skew by
++         * one configured quantum.
++         */
++        if (sync_time(cfg->comm.sock_fd[id], "send_lat_dist_active") != 0) {
++            goto free_cr;
++        }
++    }
++    if (cpu_switch_requested()) {
++        if (gem5_switch_roi_cpu("enter ROI") != 0) {
++            goto free_cr;
++        }
++        roi_cpu_active = true;
++    }
++    if (collect_roi_stats && cfg->time_type.bs.duration == 1) {
++        if (gem5_roi_stats(true) != 0) {
++            goto free_cr;
++        }
++        roi_stats_active = true;
++    }
+ 
+     while (scnt < cfg->iters || rcnt < cfg->iters ||
+         (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
+@@ -439,8 +689,27 @@ static void *run_send_lat_simplex(void *arg)
+         }
+ 
+         if (scnt < cfg->iters || (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
++            /*
++             * Match the iteration-mode stats boundary to print_lat_report():
++             * reset immediately before the first retained timestamp, then
++             * dump immediately after the timestamp that closes the final
++             * retained delta. The pseudo-ops therefore sit outside every
++             * reported latency interval.
++             */
++            if (cfg->time_type.bs.iterations == 1 && collect_roi_stats &&
++                scnt == roi_warmup_ops) {
++                if (gem5_roi_stats(true) != 0) {
++                    goto free_cr;
++                }
++                roi_stats_active = true;
++            }
+             if (cfg->time_type.bs.iterations == 1) {
+-                run_ctx->tposted[id * cfg->iters + scnt] = get_cycles();
++                run_ctx->tposted[id * cfg->iters + scnt] = perftest_get_time();
++            }
++            if (cfg->time_type.bs.iterations == 1 && roi_stats_active &&
++                scnt == cfg->iters - cfg->jfs_post_list) {
++                (void)gem5_roi_stats(false);
++                roi_stats_active = false;
+             }
+ 
+             scnt += cfg->jfs_post_list;
+@@ -487,12 +756,33 @@ static void *run_send_lat_simplex(void *arg)
+         }
+     }
+ 
++    if (roi_stats_active) {
++        (void)gem5_roi_stats(false);
++        roi_stats_active = false;
++    }
++    if (roi_cpu_active) {
++        (void)gem5_switch_roi_cpu("leave ROI");
++        roi_cpu_active = false;
++    }
++    if (dist_sync_active) {
++        (void)toggle_dist_sync("disable");
++        dist_sync_active = false;
++    }
+     free(cr);
+     return NULL;
+ 
+ free_cr:
++    if (roi_stats_active) {
++        (void)gem5_roi_stats(false);
++    }
++    if (roi_cpu_active) {
++        (void)gem5_switch_roi_cpu("leave ROI after error");
++    }
++    if (dist_sync_active) {
++        (void)toggle_dist_sync("disable");
++    }
+     free(cr);
+-    return NULL;
++    return arg;
+ }
+ 
+ static inline uint64_t get_median_delta(uint64_t num, uint64_t *delta_arr)
+@@ -518,16 +808,31 @@ static int cycles_compare(const void *src, const void *dst)
+     return 0;
+ }
+ 
++/* Nearest-rank percentile, returned as a zero-based array index. */
++static uint64_t percentile_index(uint64_t count, double percentile)
++{
++    uint64_t rank = (uint64_t)ceil((double)count * percentile);
++    if (rank == 0) {
++        return 0;
++    }
++    return rank > count ? count - 1 : rank - 1;
++}
++
+ static void print_lat_report(perftest_context_t *ctx, const perftest_config_t *cfg, uint64_t id)
+ {
+     uint64_t i;
+     run_test_ctx_t *run_ctx = &ctx->run_ctx;
+ 
+     int rtt_factor = (cfg->cmd == PERFTEST_READ_LAT || cfg->cmd == PERFTEST_ATOMIC_LAT) ? 1 : 2;
+-    double cycles_to_units = get_cpu_mhz(cfg->cpu_freq_f);
++    double cycles_to_units = perftest_time_units_per_usec(cfg->cpu_freq_f);
+     double cycles_rtt_quotient = cycles_to_units * rtt_factor;
+ 
+-    uint64_t measure_cnt = cfg->iters / cfg->jfs_post_list - 1;
++    uint64_t total_delta_cnt = cfg->iters / cfg->jfs_post_list - 1;
++    uint64_t warmup_cnt = latency_warmup_deltas();
++    if (total_delta_cnt <= warmup_cnt) {
++        return;
++    }
++    uint64_t measure_cnt = total_delta_cnt - warmup_cnt;
+     uint64_t *delta = calloc(1, sizeof(uint64_t) * (uint32_t)measure_cnt);
+     if (delta == NULL) {
+         return;
+@@ -535,12 +840,12 @@ static void print_lat_report(perftest_context_t *ctx, const perftest_config_t *c
+ 
+     // Get the cycle of a test
+     for (i = 0; i < measure_cnt; i++) {
+-        uint64_t k = cfg->iters * id + i * cfg->jfs_post_list;
++        /* Five leading exchanges are an explicit steady-state warm-up. */
++        uint64_t k = cfg->iters * id + (i + warmup_cnt) * cfg->jfs_post_list;
+         delta[i] = run_ctx->tposted[k + cfg->jfs_post_list] - run_ctx->tposted[k];
+     }
+ 
+     qsort(delta, (size_t)measure_cnt, sizeof(uint64_t), cycles_compare);
+-    measure_cnt = measure_cnt - LAT_MEASURE_TAIL;  // Remove the two largest values
+ 
+     /* median lat */
+     double median = get_median_delta(measure_cnt, delta) / cycles_rtt_quotient;
+@@ -564,14 +869,18 @@ static void print_lat_report(perftest_context_t *ctx, const perftest_config_t *c
+ 
+     /* tail lat */
+     uint64_t iters_99, iters_99_9, iters_99_99, iters_99_99_9;
+-    iters_99 = (uint64_t)ceil((measure_cnt) * PERFTEST_ITERS_99);
+-    iters_99_9 = (uint64_t)ceil((measure_cnt) * PERFTEST_ITERS_99_9);
+-    iters_99_99 = (uint64_t)ceil((measure_cnt) * PERFTEST_ITERS_99_99);
+-    iters_99_99_9 = (uint64_t)ceil((measure_cnt) * PERFTEST_ITERS_99_99_9);
++    iters_99 = percentile_index(measure_cnt, PERFTEST_ITERS_99);
++    iters_99_9 = percentile_index(measure_cnt, PERFTEST_ITERS_99_9);
++    iters_99_99 = percentile_index(measure_cnt, PERFTEST_ITERS_99_99);
++    iters_99_99_9 = percentile_index(measure_cnt, PERFTEST_ITERS_99_99_9);
+ 
+     // " %-7u   %-7u          %-7.3lf        %-7.3lf      %-7.3lf          %-7.3lf          %-7.3lf          %-7.3lf"
+-    (void)printf(REPORT_LAT_FMT, cfg->size, cfg->iters,
+-        delta[0] / cycles_rtt_quotient, delta[measure_cnt] / cycles_rtt_quotient,
++    if (warmup_cnt != 0) {
++        (void)printf(" # synchronized warm-up deltas excluded: %lu; measured samples: %lu\n",
++            warmup_cnt, measure_cnt);
++    }
++    (void)printf(REPORT_LAT_FMT, cfg->size, dist_sync_requested() ? measure_cnt : cfg->iters,
++        delta[0] / cycles_rtt_quotient, delta[measure_cnt - 1] / cycles_rtt_quotient,
+         median, average, stdev, delta[iters_99] / cycles_rtt_quotient, delta[iters_99_9] / cycles_rtt_quotient,
+         delta[iters_99_99] / cycles_rtt_quotient, delta[iters_99_99_9] / cycles_rtt_quotient);
+     (void)printf("\n");
+@@ -583,7 +892,7 @@ static void print_lat_duration_report(perftest_context_t *ctx, const perftest_co
+     run_test_ctx_t *run_ctx = &ctx->run_ctx;
+ 
+     int rtt_factor = (cfg->cmd == PERFTEST_READ_LAT || cfg->cmd == PERFTEST_ATOMIC_LAT) ? 1 : 2;
+-    double cycles_to_units = get_cpu_mhz(cfg->cpu_freq_f);
++    double cycles_to_units = perftest_time_units_per_usec(cfg->cpu_freq_f);
+     double cycles_rtt_quotient = cycles_to_units * rtt_factor;
+ 
+     uint64_t test_time = run_ctx->tcompleted[0] - run_ctx->tposted[0];
+@@ -1136,6 +1445,25 @@ free_jfr:
+ 
+ static int run_lat_test(perftest_context_t *ctx, perftest_config_t *cfg, void *(*fn) (void *))
+ {
++    if ((dist_sync_requested() || roi_stats_requested() || cpu_switch_requested()) &&
++        (cfg->jettys != 1 || cfg->pair_num != 1)) {
++        (void)fprintf(stderr,
++            "Distributed synchronization, ROI statistics, and server_o3 CPU switching "
++            "require exactly one jetty and one pair.\n");
++        return -1;
++    }
++    if ((dist_sync_requested() || roi_stats_requested()) &&
++        cfg->time_type.bs.iterations == 1) {
++        const uint64_t batches = cfg->iters / cfg->jfs_post_list;
++        const uint64_t warmup = latency_warmup_deltas();
++        if (batches <= warmup + 1) {
++            (void)fprintf(stderr,
++                "Latency run needs at least %lu post-list batches to retain one sample after warm-up.\n",
++                warmup + 2);
++            return -1;
++        }
++    }
++
+     perftest_thread_arg_t *args = calloc(cfg->jettys, sizeof(perftest_thread_arg_t));
+     if (args == NULL) {
+         return ENOMEM;
+@@ -1146,16 +1474,29 @@ static int run_lat_test(perftest_context_t *ctx, perftest_config_t *cfg, void *(
+         args[i].id = i;
+     }
+ 
+-    for (uint32_t i = 0; i < cfg->jettys; i++) {
+-        (void)pthread_create(&args[i].thread_id, NULL, fn, (void *)&args[i]);
++    uint32_t created = 0;
++    for (; created < cfg->jettys; created++) {
++        int status = pthread_create(&args[created].thread_id, NULL, fn, (void *)&args[created]);
++        if (status != 0) {
++            (void)fprintf(stderr, "Failed to create latency worker %u, status:%d.\n", created, status);
++            break;
++        }
+     }
+ 
+-    void *thread_ret;
+-    for (uint32_t i = 0; i < cfg->pair_num; i++) {
+-        (void)pthread_join(args[i].thread_id, &thread_ret);
++    bool worker_failed = created != cfg->jettys;
++    for (uint32_t i = 0; i < created; i++) {
++        void *thread_ret = NULL;
++        int status = pthread_join(args[i].thread_id, &thread_ret);
++        if (status != 0 || thread_ret != NULL) {
++            worker_failed = true;
++        }
+     }
+ 
+     free(args);
++    if (worker_failed) {
++        (void)fprintf(stderr, "Latency worker failed; suppressing invalid report.\n");
++        return -1;
++    }
+ 
+     for (uint64_t id = 0; id < cfg->jettys; id++) {
+         if (cfg->time_type.bs.iterations == 1) {
+@@ -1190,7 +1531,7 @@ static void *run_read_lat_duplex(void *arg)
+ 
+     while (scnt < cfg->iters || (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
+         if (cfg->time_type.bs.iterations == 1) {
+-            run_ctx->tposted[id * cfg->iters + scnt] = get_cycles();
++            run_ctx->tposted[id * cfg->iters + scnt] = perftest_get_time();
+         }
+         urma_jfs_wr_t *wr = &run_ctx->jfs_wr[id * cfg->jfs_post_list];
+         urma_jfs_wr_t *bad_wr = NULL;
+@@ -1309,7 +1650,7 @@ static void *run_write_lat_duplex(void *arg)
+ 
+         if (scnt < cfg->iters || cfg->time_type.bs.duration == 1) {
+             if (cfg->time_type.bs.iterations == 1) {
+-                run_ctx->tposted[id * cfg->iters + scnt] = get_cycles();
++                run_ctx->tposted[id * cfg->iters + scnt] = perftest_get_time();
+             }
+ 
+             scnt += cfg->jfs_post_list;
+@@ -1433,11 +1774,16 @@ static void *run_send_lat_duplex(void *arg)
+     int first_rx = 1;
+     run_test_ctx_t *run_ctx = &ctx->run_ctx;
+     uint64_t rid = run_ctx->rid;
++    bool dist_sync_active = false;
++    bool roi_stats_active = false;
++    bool roi_cpu_active = false;
++    const bool collect_roi_stats = roi_stats_requested();
++    const uint64_t roi_warmup_ops = latency_warmup_deltas() * cfg->jfs_post_list;
+ 
+     urma_cr_t *cr = calloc(1, sizeof(urma_cr_t) * cfg->jfc_depth);
+     if (cr == NULL) {
+         (void)fprintf(stderr, "[%u] Failed alloc cr.\n", id);
+-        return NULL;
++        return arg;
+     }
+ 
+     bool is_server = cfg->comm.server_ip == NULL;
+@@ -1452,6 +1798,27 @@ static void *run_send_lat_duplex(void *arg)
+     if (sync_time(cfg->comm.sock_fd[id], "send_lat_post_recv") != 0) {
+         goto free_cr;
+     }
++    if (dist_sync_requested()) {
++        if (toggle_dist_sync("enable") != 0) {
++            goto free_cr;
++        }
++        dist_sync_active = true;
++        if (sync_time(cfg->comm.sock_fd[id], "send_lat_dist_active") != 0) {
++            goto free_cr;
++        }
++    }
++    if (cpu_switch_requested()) {
++        if (gem5_switch_roi_cpu("enter ROI") != 0) {
++            goto free_cr;
++        }
++        roi_cpu_active = true;
++    }
++    if (collect_roi_stats && cfg->time_type.bs.duration == 1) {
++        if (gem5_roi_stats(true) != 0) {
++            goto free_cr;
++        }
++        roi_stats_active = true;
++    }
+ 
+     while (scnt < cfg->iters || rcnt < cfg->iters ||
+         (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
+@@ -1515,8 +1882,20 @@ static void *run_send_lat_duplex(void *arg)
+         }
+ 
+         if (scnt < cfg->iters || (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
++            if (cfg->time_type.bs.iterations == 1 && collect_roi_stats &&
++                scnt == roi_warmup_ops) {
++                if (gem5_roi_stats(true) != 0) {
++                    goto free_cr;
++                }
++                roi_stats_active = true;
++            }
+             if (cfg->time_type.bs.iterations == 1) {
+-                run_ctx->tposted[id * cfg->iters + scnt] = get_cycles();
++                run_ctx->tposted[id * cfg->iters + scnt] = perftest_get_time();
++            }
++            if (cfg->time_type.bs.iterations == 1 && roi_stats_active &&
++                scnt == cfg->iters - cfg->jfs_post_list) {
++                (void)gem5_roi_stats(false);
++                roi_stats_active = false;
+             }
+ 
+             scnt += cfg->jfs_post_list;
+@@ -1552,12 +1931,33 @@ static void *run_send_lat_duplex(void *arg)
+         }
+     }
+ 
++    if (roi_stats_active) {
++        (void)gem5_roi_stats(false);
++        roi_stats_active = false;
++    }
++    if (roi_cpu_active) {
++        (void)gem5_switch_roi_cpu("leave ROI");
++        roi_cpu_active = false;
++    }
++    if (dist_sync_active) {
++        (void)toggle_dist_sync("disable");
++        dist_sync_active = false;
++    }
+     free(cr);
+     return NULL;
+ 
+ free_cr:
++    if (roi_stats_active) {
++        (void)gem5_roi_stats(false);
++    }
++    if (roi_cpu_active) {
++        (void)gem5_switch_roi_cpu("leave ROI after error");
++    }
++    if (dist_sync_active) {
++        (void)toggle_dist_sync("disable");
++    }
+     free(cr);
+-    return NULL;
++    return arg;
+ }
+ 
+ int run_send_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
+@@ -1639,7 +2039,7 @@ static int run_once_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+     uint64_t tot_iters = cfg->iters * cfg->jettys;
+ 
+     if (cfg->time_type.bs.iterations == 1 && cfg->no_peak == true) {
+-        run_ctx->tposted[0] = get_cycles();
++        run_ctx->tposted[0] = perftest_get_time();
+     }
+ 
+     while (tot_scnt < tot_iters || tot_ccnt < tot_iters ||
+@@ -1647,10 +2047,10 @@ static int run_once_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+         /* main loop to run over all the jetty and post each time n messages */
+         for (index = 0; index < cfg->jettys; index++) {
+             if (cfg->is_rate_limit == true && is_send_burst == false) {
+-                if (gap_deadline > get_cycles()) {
++                if (gap_deadline > perftest_get_time()) {
+                     continue;
+                 }
+-                gap_deadline = get_cycles() + cfg->gap_cycles;
++                gap_deadline = perftest_get_time() + cfg->gap_cycles;
+                 is_send_burst = true;
+                 burst_iter = 0;
+             }
+@@ -1670,7 +2070,7 @@ static int run_once_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+                 }
+ 
+                 if (cfg->no_peak == false) {
+-                    run_ctx->tposted[tot_scnt] = get_cycles();
++                    run_ctx->tposted[tot_scnt] = perftest_get_time();
+                 }
+ 
+                 if (cfg->time_type.bs.duration == 1 && run_ctx->state == END_STATE) {
+@@ -1752,9 +2152,9 @@ static int run_once_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+ 
+                     if (cfg->no_peak == false) {
+                         if (tot_ccnt > tot_iters) {
+-                            run_ctx->tcompleted[cfg->iters * cfg->jettys - 1] = get_cycles();
++                            run_ctx->tcompleted[cfg->iters * cfg->jettys - 1] = perftest_get_time();
+                         } else {
+-                            run_ctx->tcompleted[tot_ccnt - 1] = get_cycles();
++                            run_ctx->tcompleted[tot_ccnt - 1] = perftest_get_time();
+                         }
+                     }
+ 
+@@ -1770,7 +2170,7 @@ static int run_once_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+     }
+ 
+     if (cfg->no_peak == true && cfg->time_type.bs.iterations == 1) {
+-        run_ctx->tcompleted[0] = get_cycles();
++        run_ctx->tcompleted[0] = perftest_get_time();
+     }
+     free(cr);
+     return 0;
+@@ -2005,7 +2405,7 @@ static int run_once_bw_recv(perftest_context_t *ctx, perftest_config_t *cfg)
+         }
+     }
+     if (cfg->time_type.bs.iterations == 1) {
+-        run_ctx->tcompleted[0] = get_cycles();
++        run_ctx->tcompleted[0] = perftest_get_time();
+     }
+     ret = 0;
+ cleaning:
+@@ -2080,7 +2480,7 @@ static int run_once_bi_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+     }
+ 
+     if (cfg->no_peak) {
+-        run_ctx->tposted[0] = get_cycles();
++        run_ctx->tposted[0] = perftest_get_time();
+     }
+ 
+     if (cfg->comm.server_ip != NULL) {
+@@ -2111,7 +2511,7 @@ static int run_once_bi_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+                     run_ctx->jfs_wr[index].flag.bs.complete_enable = 0;
+                 }
+                 if (!cfg->no_peak) {
+-                    run_ctx->tposted[tot_scnt] = get_cycles();
++                    run_ctx->tposted[tot_scnt] = perftest_get_time();
+                 }
+                 if (cfg->time_type.bs.duration == 1 && run_ctx->state == END_STATE) {
+                     break;
+@@ -2263,9 +2663,9 @@ static int run_once_bi_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+                                     run_ctx->ccnt[credit_id] += cfg->cq_mod;
+                                     if (cfg->no_peak == false) {
+                                         if ((cfg->time_type.bs.iterations == 1 && (tot_ccnt > tot_iters))) {
+-                                            run_ctx->tcompleted[tot_iters - 1] = get_cycles();
++                                            run_ctx->tcompleted[tot_iters - 1] = perftest_get_time();
+                                         } else {
+-                                            run_ctx->tcompleted[tot_ccnt - 1] = get_cycles();
++                                            run_ctx->tcompleted[tot_ccnt - 1] = perftest_get_time();
+                                         }
+                                     }
+                                     if (cfg->time_type.bs.duration == 1 && g_duration_ctx->state == START_STATE) {
+@@ -2343,9 +2743,9 @@ static int run_once_bi_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+                     }
+                     if (!cfg->no_peak) {
+                         if (cfg->time_type.bs.iterations == 1 && (tot_ccnt > tot_iters)) {
+-                            run_ctx->tcompleted[tot_iters - 1] = get_cycles();
++                            run_ctx->tcompleted[tot_iters - 1] = perftest_get_time();
+                         } else {
+-                            run_ctx->tcompleted[tot_ccnt - 1] = get_cycles();
++                            run_ctx->tcompleted[tot_ccnt - 1] = perftest_get_time();
+                         }
+                     }
+ 
+@@ -2361,7 +2761,7 @@ static int run_once_bi_bw(perftest_context_t *ctx, perftest_config_t *cfg)
+         }
+     }
+     if (cfg->no_peak && cfg->time_type.bs.iterations == 1) {
+-        run_ctx->tcompleted[0] = get_cycles();
++        run_ctx->tcompleted[0] = perftest_get_time();
+     }
+ 
+ cleaning:
+@@ -2422,7 +2822,7 @@ static void print_bw_report(perftest_context_t *ctx, perftest_config_t *cfg,
+     uint64_t size;
+ 
+     if (cfg->time_type.bs.infinite == 1) {
+-        run_ctx->tcompleted[0] = get_cycles();
++        run_ctx->tcompleted[0] = perftest_get_time();
+         num_of_cal_iters = cfg->iters - cfg->last_iters;
+     }
+ 
+@@ -2486,7 +2886,7 @@ static void *infinite_print_thread(void *duration)
+     uint64_t tposted_0 = g_perftest_ctx->run_ctx.tposted[0];
+ 
+     /* Function takes more than 200 ms to run, so it needs to be moved outside */
+-    double cpu_mhz = get_cpu_mhz(g_perftest_cfg->cpu_freq_f);
++    double cpu_mhz = perftest_time_units_per_usec(g_perftest_cfg->cpu_freq_f);
+     if (cpu_mhz <= 0.0) {
+         (void)fprintf(stderr, "Failed: couldn't acquire cpu frequency for rate limiter.\n");
+     }
+@@ -2495,7 +2895,7 @@ static void *infinite_print_thread(void *duration)
+         (void)usleep((*inf_duration) * PERFTEST_MSEC_TO_USEC);
+         print_bw_report(g_perftest_ctx, g_perftest_cfg, NULL, tposted_0, cpu_mhz);
+         g_perftest_cfg->last_iters = g_perftest_cfg->iters;
+-        tposted_0 = get_cycles();
++        tposted_0 = perftest_get_time();
+     }
+     return NULL;
+ }
+@@ -2543,7 +2943,7 @@ static int run_once_bw_infinite(perftest_context_t *ctx, perftest_config_t *cfg)
+     if (cfg->time_type.bs.duration == 1) {
+         update_duration_state(ctx, cfg);
+     }
+-    run_ctx->tposted[0] = get_cycles();
++    run_ctx->tposted[0] = perftest_get_time();
+ 
+     while (1) {
+         if (cfg->time_type.bs.duration == 1 && run_ctx->state == END_STATE) {
+@@ -2554,10 +2954,10 @@ static int run_once_bw_infinite(perftest_context_t *ctx, perftest_config_t *cfg)
+         }
+         for (index = 0; index < jettys; index++) {
+             if (cfg->is_rate_limit == true && is_send_burst == false) {
+-                if (gap_deadline > get_cycles()) {
++                if (gap_deadline > perftest_get_time()) {
+                     continue;
+                 }
+-                gap_deadline = get_cycles() + cfg->gap_cycles;
++                gap_deadline = perftest_get_time() + cfg->gap_cycles;
+                 is_send_burst = true;
+                 burst_iter = 0;
+             }
+@@ -2704,7 +3104,7 @@ static int run_once_bw_recv_infinite(perftest_context_t *ctx, perftest_config_t
+ 
+     cfg->iters = 0;
+     cfg->last_iters = 0;
+-    run_ctx->tposted[0] = get_cycles();
++    run_ctx->tposted[0] = perftest_get_time();
+ 
+     while (1) {
+         if (cfg->time_type.bs.duration == 1 && run_ctx->state == END_STATE) {
+@@ -2892,7 +3292,7 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+             }
+         }
+     }
+-    double cpu_mhz = get_cpu_mhz(false);
++    double cpu_mhz = perftest_time_units_per_usec(false);
+     if (cpu_mhz <= 0.0) {
+         (void)fprintf(stderr, "Failed: couldn't acquire cpu frequency for rate limiter.\n");
+     }
+@@ -3053,7 +3453,7 @@ static int run_send_bw_once(perftest_context_t *ctx, perftest_config_t *cfg)
+     }
+     bw_report_data_t local_bw_report = {0};
+     bw_report_data_t remote_bw_report = {0};
+-    double cpu_mhz = get_cpu_mhz(false);
++    double cpu_mhz = perftest_time_units_per_usec(false);
+     if (cpu_mhz <= 0.0) {
+         (void)fprintf(stderr, "Failed: couldn't acquire cpu frequency for rate limiter.\n");
+     }
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.h b/src/urma/tools/urma_perftest/perftest_run_test.h
+index bef70c4..f339107 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.h
++++ b/src/urma/tools/urma_perftest/perftest_run_test.h
+@@ -22,5 +22,6 @@ int run_read_bw(perftest_context_t *ctx, perftest_config_t *cfg);
+ int run_write_bw(perftest_context_t *ctx, perftest_config_t *cfg);
+ int run_send_bw(perftest_context_t *ctx, perftest_config_t *cfg);
+ int run_atomic_bw(perftest_context_t *ctx, perftest_config_t *cfg);
++int perftest_dist_time_rendezvous(const perftest_config_t *cfg);
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/urma/tools/urma_perftest/urma_perftest.c b/src/urma/tools/urma_perftest/urma_perftest.c
+index aa0cc35..3750b6e 100644
+--- a/src/urma/tools/urma_perftest/urma_perftest.c
++++ b/src/urma/tools/urma_perftest/urma_perftest.c
+@@ -170,11 +170,26 @@ int main(int argc, char *argv[])
+         goto clean_cfg;
+     }
+ 
++    ret = perftest_clock_init();
++    if (ret != 0) {
++        goto clean_cfg;
++    }
++
+     ret = check_local_cfg(&cfg);
+     if (ret != 0) {
+         goto clean_cfg;
+     }
+ 
++    /*
++     * In distributed gem5 mode, meet at a collective virtual-time barrier
++     * before either role opens its TCP control connection. This makes a manual
++     * "server first, client later" launch independent of host wall time.
++     */
++    ret = perftest_dist_time_rendezvous(&cfg);
++    if (ret != 0) {
++        goto clean_cfg;
++    }
++
+     // Establish connection between client and server
+     ret = establish_connection(&cfg);
+     if (ret != 0) {
+@@ -214,4 +229,4 @@ close_connect:
+ clean_cfg:
+     destroy_cfg(&cfg);
+     return ret;
+-}
+\ No newline at end of file
++}

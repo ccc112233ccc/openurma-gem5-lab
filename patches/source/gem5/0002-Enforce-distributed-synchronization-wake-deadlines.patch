@@ -1,0 +1,160 @@
+From c8affd15e10f596e6eb7b2dbc64163affc3876c0 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Sat, 19 Sep 2026 00:29:32 +0800
+Subject: [PATCH 2/2] Enforce distributed synchronization wake deadlines
+
+---
+ src/cpu/o3/thread_context.cc |  2 ++
+ src/cpu/simple_thread.cc     |  2 ++
+ src/dev/net/dist_iface.cc    | 18 +++++++++++++++++-
+ src/dev/net/dist_iface.hh    |  7 +++++++
+ src/sim/system.cc            | 21 ++++++++++++++++++++-
+ src/sim/system.hh            |  2 ++
+ 6 files changed, 50 insertions(+), 2 deletions(-)
+
+diff --git a/src/cpu/o3/thread_context.cc b/src/cpu/o3/thread_context.cc
+index 06210de07..1ec826c2c 100644
+--- a/src/cpu/o3/thread_context.cc
++++ b/src/cpu/o3/thread_context.cc
+@@ -70,6 +70,8 @@ ThreadContext::activate()
+     DPRINTF(O3CPU, "Calling activate on Thread Context %d\n",
+             threadId());
+ 
++    if (getSystemPtr()->threads.activationDeferred(contextId()))
++        return;
+     if (thread->status() == gem5::ThreadContext::Active)
+         return;
+ 
+diff --git a/src/cpu/simple_thread.cc b/src/cpu/simple_thread.cc
+index c28359a4e..9fc6bb523 100644
+--- a/src/cpu/simple_thread.cc
++++ b/src/cpu/simple_thread.cc
+@@ -132,6 +132,8 @@ SimpleThread::unserialize(CheckpointIn &cp)
+ void
+ SimpleThread::activate()
+ {
++    if (system->threads.activationDeferred(contextId()))
++        return;
+     if (status() == ThreadContext::Active)
+         return;
+ 
+diff --git a/src/dev/net/dist_iface.cc b/src/dev/net/dist_iface.cc
+index 824139bc3..7de458c0b 100644
+--- a/src/dev/net/dist_iface.cc
++++ b/src/dev/net/dist_iface.cc
+@@ -881,12 +881,28 @@ DistIface::toggleSync(ThreadContext *tc)
+         // activation here, since we know exactly when the next sync will
+         // occur.
+         for (auto *tc: primary->sys->threads) {
+-            if (tc->status() == ThreadContext::Active)
++            // A thread executing the pseudo instruction may already appear
++            // Suspended because of a nearby syscall/WFI transition.  It can
++            // still have an earlier resume event, so always replace that
++            // event with the collective synchronization tick.  Otherwise a
++            // later invocation can issue traffic before all peers arrive.
++            if (tc->status() != ThreadContext::Halted &&
++                tc->status() != ThreadContext::Halting)
+                 tc->quiesceTick(primary->syncEvent->when() + 1);
+         }
+     }
+ }
+ 
++Tick
++DistIface::startupSyncTick()
++{
++    if (!syncEvent || !sync || !syncEvent->scheduled())
++        return 0;
++    const Tick next = syncEvent->when();
++    const Tick repeat = sync->repeatTick();
++    return next > curTick() && next - curTick() > repeat ? next : 0;
++}
++
+ bool
+ DistIface::readyToExit(Tick delay)
+ {
+diff --git a/src/dev/net/dist_iface.hh b/src/dev/net/dist_iface.hh
+index 3d6243e65..5e59fec30 100644
+--- a/src/dev/net/dist_iface.hh
++++ b/src/dev/net/dist_iface.hh
+@@ -161,6 +161,8 @@ class DistIface : public Drainable, public Serializable
+         friend class SyncEvent;
+ 
+       public:
++        Tick repeatTick() const { return nextRepeat; }
++
+         /**
+          * Initialize periodic sync params.
+          *
+@@ -636,6 +638,11 @@ class DistIface : public Drainable, public Serializable
+      * Getter for the dist size param.
+      */
+     static uint64_t sizeParam();
++    /**
++     * Return the first synchronization tick while CPUs are being aligned.
++     * Once periodic synchronization is active, return zero.
++     */
++    static Tick startupSyncTick();
+     /**
+      * Trigger the primary to start/stop synchronization.
+      */
+diff --git a/src/sim/system.cc b/src/sim/system.cc
+index 806eca3dd..f23db1725 100644
+--- a/src/sim/system.cc
++++ b/src/sim/system.cc
+@@ -70,6 +70,11 @@ std::vector<System *> System::systemList;
+ void
+ System::Threads::Thread::resume()
+ {
++    if (quiesceUntil > curTick()) {
++        context->getCpuPtr()->reschedule(resumeEvent, quiesceUntil, true);
++        return;
++    }
++    quiesceUntil = 0;
+     DPRINTFS(Quiesce, context->getCpuPtr(), "activating\n");
+     context->activate();
+ }
+@@ -157,9 +162,23 @@ System::Threads::quiesceTick(ContextID id, Tick when)
+     BaseCPU *cpu = t.context->getCpuPtr();
+ 
+     DPRINTFS(Quiesce, cpu, "quiesceTick until %u\n", when);
++    t.quiesceUntil = std::max(t.quiesceUntil, when);
+     t.quiesce();
+ 
+-    cpu->reschedule(t.resumeEvent, when, true);
++    cpu->reschedule(t.resumeEvent, t.quiesceUntil, true);
++}
++
++bool
++System::Threads::activationDeferred(ContextID id)
++{
++    auto &t = thread(id);
++    if (t.quiesceUntil <= curTick()) {
++        t.quiesceUntil = 0;
++        return false;
++    }
++    t.context->getCpuPtr()->reschedule(
++        t.resumeEvent, t.quiesceUntil, true);
++    return true;
+ }
+ 
+ int System::numSystemsRunning = 0;
+diff --git a/src/sim/system.hh b/src/sim/system.hh
+index bb64f639b..c16d726da 100644
+--- a/src/sim/system.hh
++++ b/src/sim/system.hh
+@@ -121,6 +121,7 @@ class System : public SimObject, public PCEventScope
+             ThreadContext *context = nullptr;
+             bool active = false;
+             Event *resumeEvent = nullptr;
++            Tick quiesceUntil = 0;
+ 
+             void resume();
+             std::string name() const;
+@@ -223,6 +224,7 @@ class System : public SimObject, public PCEventScope
+ 
+         void quiesce(ContextID id);
+         void quiesceTick(ContextID id, Tick when);
++        bool activationDeferred(ContextID id);
+ 
+         const_iterator begin() const { return const_iterator(*this, 0); }
+         const_iterator end() const { return const_iterator(*this, size()); }

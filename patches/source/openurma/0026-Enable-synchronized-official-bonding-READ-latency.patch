@@ -1,0 +1,16 @@
+From 19dd751af5c2f52679812ca2946748d5397630e6 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 19:58:54 +0800
+Subject: [PATCH 26/27] Enable synchronized official bonding READ latency
+
+---
+ integration/umdk/vendor/umdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/integration/umdk/vendor/umdk b/integration/umdk/vendor/umdk
+index af72746..9861720 160000
+--- a/integration/umdk/vendor/umdk
++++ b/integration/umdk/vendor/umdk
+@@ -1 +1 @@
+-Subproject commit af727461f26b4b0317348c871534569b959ee7b3
++Subproject commit 9861720ed04bcbd76690759edd6334b2532d2282

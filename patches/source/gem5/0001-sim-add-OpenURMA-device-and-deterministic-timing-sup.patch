@@ -1,0 +1,147 @@
+From 36b6c5b99c8bbbd7445173f1655240ad4b1bffd9 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 09:34:58 +0800
+Subject: [PATCH 1/2] sim: add OpenURMA device and deterministic timing support
+
+---
+ configs/common/MemConfig.py   | 22 ++++++++++++--
+ src/dev/openurma              |  1 +
+ src/systemc/core/scheduler.hh | 55 +++++++++++++++++++++++++++++------
+ 3 files changed, 67 insertions(+), 11 deletions(-)
+ create mode 120000 src/dev/openurma
+
+diff --git a/configs/common/MemConfig.py b/configs/common/MemConfig.py
+index 717ffa5fa..d7cb8a885 100644
+--- a/configs/common/MemConfig.py
++++ b/configs/common/MemConfig.py
+@@ -41,7 +41,15 @@ from common import (
+ import m5.objects
+ 
+ 
+-def create_mem_intf(intf, r, i, intlv_bits, intlv_size, xor_low_bit):
++def create_mem_intf(
++    intf,
++    r,
++    i,
++    intlv_bits,
++    intlv_size,
++    xor_low_bit,
++    addr_mapping=None,
++):
+     """
+     Helper function for creating a single memory controller from the given
+     options.  This function is invoked multiple times in config_mem function
+@@ -66,6 +74,14 @@ def create_mem_intf(intf, r, i, intlv_bits, intlv_size, xor_low_bit):
+     # mapping and row-buffer size
+     interface = intf()
+ 
++    # A full-system experiment must be able to freeze the controller's
++    # address decoder rather than silently inheriting the selected media
++    # class's default.  Apply this before computing the channel-interleave
++    # bits below; changing it after the range is constructed can make the
++    # range selector and DRAM decoder disagree.
++    if addr_mapping and issubclass(intf, m5.objects.DRAMInterface):
++        interface.addr_mapping = addr_mapping
++
+     # Only do this for DRAMs
+     if issubclass(intf, m5.objects.DRAMInterface):
+         # If the channel bits are appearing after the column
+@@ -144,6 +160,7 @@ def config_mem(options, system):
+     opt_dram_powerdown = getattr(options, "enable_dram_powerdown", None)
+     opt_mem_channels_intlv = getattr(options, "mem_channels_intlv", 128)
+     opt_xor_low_bit = getattr(options, "xor_low_bit", 0)
++    opt_mem_addr_mapping = getattr(options, "mem_addr_mapping", None)
+ 
+     if opt_mem_type == "HMC_2500_1x32":
+         HMChost = HMC.config_hmc_host_ctrl(options, system)
+@@ -217,7 +234,8 @@ def config_mem(options, system):
+             if opt_mem_type and (not opt_nvm_type or range_iter % 2 != 0):
+                 # Create the DRAM interface
+                 dram_intf = create_mem_intf(
+-                    intf, r, i, intlv_bits, intlv_size, opt_xor_low_bit
++                    intf, r, i, intlv_bits, intlv_size, opt_xor_low_bit,
++                    opt_mem_addr_mapping,
+                 )
+ 
+                 # Set the number of ranks based on the command-line
+diff --git a/src/dev/openurma b/src/dev/openurma
+new file mode 120000
+index 000000000..c9973bdd8
+--- /dev/null
++++ b/src/dev/openurma
+@@ -0,0 +1 @@
++/home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/src
+\ No newline at end of file
+diff --git a/src/systemc/core/scheduler.hh b/src/systemc/core/scheduler.hh
+index 49ad6c6f0..0f376398a 100644
+--- a/src/systemc/core/scheduler.hh
++++ b/src/systemc/core/scheduler.hh
+@@ -276,6 +276,25 @@ class Scheduler
+     }
+ 
+     // For descheduling delayed/timed notifications/timeouts.
++    //
++    // OpenURMA patch (2026-05): the upstream implementation looks up the
++    // owning time slot by matching event->when() against
++    // (*tsit)->targeted_when. That cached when() value can drift from the
++    // slot the event is actually parked on whenever a notify(t) races a
++    // recycled TimeSlot (acquireTimeSlot reuses an entry from
++    // freeTimeSlots, resets targeted_when and clears events, but any
++    // event still pointing at &slot.events via _events is now adrift of
++    // its old when()). The authoritative source of truth is
++    // event->scheduledOn() — that pointer matches the live time slot's
++    // events list exactly. Walk by pointer identity first; fall back to
++    // the legacy when()-based lookup for the common path; and if both
++    // fail, gracefully deschedule by event-local state instead of
++    // panicking. This restores end-to-end SC pipeline operation in
++    // gem5 FS for cascades like the OpenRoCE doorbell→qptx→bthb→
++    // dcqcn→retrans→txmux→ethenc chain that synchronously notify()
++    // through seven _tick events in a single b_transport call. See
++    // OpenURMA eval/twonode/gem5_scaffold/patches/gem5_sc_deschedule.patch
++    // for the rationale and a smaller reproducer.
+     void
+     deschedule(ScEvent *event)
+     {
+@@ -288,15 +307,33 @@ class Scheduler
+             return;
+         }
+ 
+-        // Timed notification/timeout.
+-        auto tsit = timeSlots.begin();
+-        while (tsit != timeSlots.end() &&
+-               (*tsit)->targeted_when < event->when())
+-            tsit++;
+-
+-        panic_if(tsit == timeSlots.end() ||
+-                 (*tsit)->targeted_when != event->when(),
+-                "Descheduling event at time with no events.");
++        // Timed notification/timeout — first try to find the owning slot
++        // by pointer identity (authoritative), then by when() (legacy).
++        auto tsit = timeSlots.end();
++        for (auto it = timeSlots.begin(); it != timeSlots.end(); ++it) {
++            if (&(*it)->events == on) { tsit = it; break; }
++        }
++        if (tsit == timeSlots.end()) {
++            auto it = timeSlots.begin();
++            while (it != timeSlots.end() &&
++                   (*it)->targeted_when < event->when())
++                it++;
++            if (it != timeSlots.end() &&
++                (*it)->targeted_when == event->when() &&
++                &(*it)->events == on)
++                tsit = it;
++        }
++
++        if (tsit == timeSlots.end()) {
++            // The owning time slot is no longer in the active map (most
++            // commonly because it was just recycled via
++            // releaseTimeSlot/acquireTimeSlot). The event itself still
++            // holds a valid iterator into the slot's events list, so a
++            // direct deschedule is safe and leaves no dangling state.
++            event->deschedule();
++            return;
++        }
++
+         TimeSlot *ts = *tsit;
+         ScEvents &events = ts->events;
+         assert(on == &events);

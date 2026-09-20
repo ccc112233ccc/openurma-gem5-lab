@@ -1,0 +1,142 @@
+From a0b781bb4c04b8aec479bff55486d58051cd5337 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 15:08:21 +0800
+Subject: [PATCH 23/27] Model UDMA aggregation identities and TP allocation
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 76 +++++++++++--------
+ .../gem5_scaffold/src/NICTopologySC.hh        |  2 +
+ 2 files changed, 47 insertions(+), 31 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 64352ab..09df10e 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -817,20 +817,26 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+     } else if (service == QosService) {
+         response[0] = 0x01; // vl_bitmap = BIT(0)
+     } else if (tp_list_query && response_bytes >= 44) {
+-        // The fabric manager allocates one process-scoped TP for this
+-        // local/remote EID tuple.  Derive the compact identifiers from the
+-        // request payload so repeated queries are stable without embedding
+-        // a node- or test-specific TP number in the device model.
+-        uint32_t hash = 2166136261U;
+-        for (size_t index = Ue2ueHeaderBytes + CtrlqHeaderBytes;
+-             index < request.size(); ++index) {
+-            hash ^= request[index];
+-            hash *= 16777619U;
+-        }
++        // The fabric manager allocates one process-scoped TP.  Allocate a
++        // distinct compact TP id for each request and distribute newly
++        // created physical TPs over the modeled ports.  Packet routing below
++        // remains pinned to this control-plane decision; it is not a
++        // per-packet hash or a test-specific port override.
+         constexpr uint32_t ModeledTpCount = 1024;
+-        const uint32_t tpid = 1 + hash % (ModeledTpCount - 1);
++        uint32_t tpid = udma_next_tp_id_;
++        for (uint32_t attempts = 0; attempts < ModeledTpCount - 1;
++             ++attempts) {
++            if (++udma_next_tp_id_ >= ModeledTpCount)
++                udma_next_tp_id_ = 1;
++            if (udma_tp_routes_.find(tpid) == udma_tp_routes_.end())
++                break;
++            tpid = udma_next_tp_id_;
++        }
++        panic_if(udma_tp_routes_.find(tpid) != udma_tp_routes_.end(),
++                 "modeled UDMA TP table is full");
+         const uint32_t tpn_start = tpid;
+-        const uint32_t base_port = ub_port_count_ ? hash % ub_port_count_ : 0;
++        const uint32_t base_port = ub_port_count_ ?
++            udma_next_tp_port_++ % ub_port_count_ : 0;
+         openurma_udma::storeLe32(response, 1); // tp_list_cnt
+         openurma_udma::storeLe32(response + 4,
+                                  tpid | (1U << 24)); // one TPN
+@@ -881,23 +887,28 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+                       << local_tpid << " port=" << route->second.base_port
+                       << "\n";
+         }
+-    } else if (seid_query && response_bytes >= 28) {
+-        // UDMA_CTRLQ_GET_SEID_INFO returns a management-plane identity.  It
+-        // is deliberately separate from the compact UBUS entity EID: the
+-        // official driver installs both in UMMU and rejects duplicates.
+-        // The platform configuration owns this value so multi-node runs can
+-        // allocate stable, distinct endpoint identities without baking them
+-        // into the command-response implementation.
++    } else if (seid_query && response_bytes >= 100) {
++        // UDMA_CTRLQ_GET_SEID_INFO returns the primary endpoint plus the
++        // identities exposed by the two modeled physical ports.  Keep every
++        // identity derived from the platform-supplied node EID so a topology
++        // manager can describe aggregation without test-specific values in
++        // the device implementation.
+         constexpr uint32_t EndpointUpi = 0x7fff;
+         const uint32_t endpoint_eid = udma_endpoint_eid_;
+-        response[0] = 1; // seid_num
+-        openurma_udma::storeLe32(response + 4, 0); // eid_idx
+-        // The control-CPU ABI carries this field in device byte order; the
+-        // official UDMA driver reverses it before publishing the ubcore EID.
+-        response[8] = static_cast<uint8_t>(endpoint_eid);
+-        response[9] = static_cast<uint8_t>(endpoint_eid >> 8);
+-        response[10] = static_cast<uint8_t>(endpoint_eid >> 16);
+-        openurma_udma::storeLe32(response + 24, EndpointUpi);
++        constexpr std::array<uint32_t, 4> EidOffsets{
++            0x00000, 0x10000, 0x20000, 0x30000};
++        response[0] = EidOffsets.size(); // seid_num
++        for (uint32_t index = 0; index < EidOffsets.size(); ++index) {
++            const uint32_t eid = endpoint_eid + EidOffsets[index];
++            uint8_t *entry = response + 4 + index * 24;
++            openurma_udma::storeLe32(entry, index);
++            // The control-CPU ABI carries this field in device byte order;
++            // the official driver reverses it before publishing the EID.
++            entry[4] = static_cast<uint8_t>(eid);
++            entry[5] = static_cast<uint8_t>(eid >> 8);
++            entry[6] = static_cast<uint8_t>(eid >> 16);
++            openurma_udma::storeLe32(entry + 20, EndpointUpi);
++        }
+     }
+ 
+     constexpr size_t CrqAddrL = 0x18 / 4;
+@@ -1277,8 +1288,8 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+             ouStoreLe<uint16_t>(response, 26, 1);
+             ouStoreLe<uint16_t>(response, 28, 64);     // destination table
+             ouStoreLe<uint16_t>(response, 30, 1);
+-            ouStoreLe<uint16_t>(response, 32, 64);     // SEID/UPI table
+-            ouStoreLe<uint16_t>(response, 34, 1);
++            ouStoreLe<uint16_t>(response, 32, 64);     // SEID/UPI entry bytes
++            ouStoreLe<uint16_t>(response, 34, 4);      // exposed EID slots
+             response[44] = static_cast<uint8_t>(
+                 std::min<uint32_t>(ub_port_count_, UINT8_MAX));
+             ouStoreLe<uint16_t>(response, 48, 128);    // RC queues
+@@ -2230,6 +2241,8 @@ NICTopologySC::udma_reset_resources()
+     udma_read_requests_.clear();
+     udma_write_acks_.clear();
+     udma_tp_routes_.clear();
++    udma_next_tp_id_ = 1;
++    udma_next_tp_port_ = 0;
+     udma_next_rma_id_ = 1;
+ }
+ 
+@@ -4971,8 +4984,9 @@ gem5::NICTopologySCParams::create() const
+              "dma_max_outstanding must be positive");
+     nic->dma_max_outstanding_ = dma_max_outstanding;
+     nic->peer_node_id_ = peer_node_id;
+-    panic_if(udma_endpoint_eid == 0 || udma_endpoint_eid > 0xfffff,
+-             "udma_endpoint_eid must be a non-zero 20-bit compact EID");
++    panic_if(udma_endpoint_eid == 0 || udma_endpoint_eid > 0xcffff,
++             "udma_endpoint_eid must be non-zero and leave room for "
++             "the modeled primary/port EIDs");
+     nic->udma_endpoint_eid_ = udma_endpoint_eid;
+     nic->peer_ring_path_ = peer_ring_path;
+     nic->peer_link_latency_ = peer_link_latency;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index dbf81f6..88dec44 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -521,6 +521,8 @@ class NICTopologySC : public sc_core::sc_module
+     std::deque<UdmaReadRequest> udma_read_requests_;
+     std::deque<UdmaWriteAck> udma_write_acks_;
+     std::unordered_map<uint32_t, UdmaTpRoute> udma_tp_routes_;
++    uint32_t udma_next_tp_id_ = 1;
++    uint32_t udma_next_tp_port_ = 0;
+     uint64_t udma_next_rma_id_ = 1;
+     std::list<UdmaIotlbKey> udma_iotlb_lru_;
+     std::unordered_map<UdmaIotlbKey, UdmaIotlbEntry, UdmaIotlbKeyHash>

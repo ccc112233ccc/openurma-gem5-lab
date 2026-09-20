@@ -29,7 +29,7 @@ OPENURMA_LAT_STAGGER.
 EOF
 }
 
-container="${OPENURMA_CONTAINER:-openurma-repro-20260909}"
+container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
 lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"

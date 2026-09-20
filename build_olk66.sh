@@ -7,7 +7,7 @@
 set -euo pipefail
 
 KSRC="${KSRC:-/opt/openurma-gem5-lab/oe66}"
-OPENURMA_ROOT="${OPENURMA_ROOT:-/workspace/OpenURMA}"
+OPENURMA_ROOT="${OPENURMA_ROOT:-/workspace/openurma-gem5-lab/sources/OpenURMA}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-/workspace/openurma-gem5-lab/artifacts/kernel}"
 JOBS="${JOBS:-$(nproc)}"
 ARCH="${ARCH:-arm64}"

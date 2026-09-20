@@ -1,0 +1,121 @@
+From 8373442db5a294ce3ea7e58a778c5fd36bd83f63 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 14:35:17 +0800
+Subject: [PATCH 07/27] Expose official UDMA active port
+
+---
+ .../configs/single_node_fs_clean.py           |  5 +++
+ .../gem5_scaffold/src/NICTopologySC.cc        | 32 ++++++++++++-------
+ .../gem5_scaffold/src/NICTopologySC.hh        |  1 +
+ .../gem5_scaffold/src/NICTopologySC.py        |  3 ++
+ 4 files changed, 30 insertions(+), 11 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index 2c7285b..333ba8d 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -446,6 +446,7 @@ def create(args):
+         dma_max_outstanding=args.dma_max_outstanding,
+         udma_poll_interval=args.udma_poll_interval,
+         udma_iotlb_entries=args.udma_iotlb_entries,
++        udma_endpoint_eid=args.udma_endpoint_eid,
+     )
+     if getattr(args, "peer_node", -1) >= 0:
+         # Cross-process two-node: this NIC bridges to a peer gem5 via a shared ring.
+@@ -792,6 +793,10 @@ def main():
+     parser.add_argument("--udma-iotlb-entries", type=int, default=64,
+         help="number of per-process 4 KiB DMA translations cached by the "
+              "modeled NIC; zero disables the IOTLB")
++    parser.add_argument("--udma-endpoint-eid", type=lambda value: int(value, 0),
++        default=0x100,
++        help="non-zero 20-bit management-plane EID reported by the official "
++             "UDMA device; assign a distinct value to every simulated node")
+     parser.add_argument("--dma-max-outstanding", type=positive_int, default=16,
+         help="maximum native timing-DMA cache-line requests in flight")
+     parser.add_argument("--dist-rank", type=int, default=0,
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 1ddb6e3..5f45b6e 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -772,20 +772,21 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+     } else if (service == QosService) {
+         response[0] = 0x01; // vl_bitmap = BIT(0)
+     } else if (seid_query && response_bytes >= 28) {
+-        // UDMA_CTRLQ_GET_SEID_INFO returns the control-plane view of the
+-        // endpoint enumerated by UBIOS.  Keep this identity tied to the
+-        // modeled firmware/configuration image instead of inventing a second
+-        // device identity in the UDMA path.
+-        constexpr uint32_t EndpointEidRegister = 0x40050;
++        // UDMA_CTRLQ_GET_SEID_INFO returns a management-plane identity.  It
++        // is deliberately separate from the compact UBUS entity EID: the
++        // official driver installs both in UMMU and rejects duplicates.
++        // The platform configuration owns this value so multi-node runs can
++        // allocate stable, distinct endpoint identities without baking them
++        // into the command-response implementation.
+         constexpr uint32_t EndpointUpi = 0x7fff;
+-        const uint32_t endpoint_eid =
+-            (ubios_config_read(EndpointEidRegister, true) >> 20) & 0xfffff;
++        const uint32_t endpoint_eid = udma_endpoint_eid_;
+         response[0] = 1; // seid_num
+         openurma_udma::storeLe32(response + 4, 0); // eid_idx
+-        // union ubcore_eid::raw is an IPv6/network-order byte string.
+-        response[8 + 13] = static_cast<uint8_t>(endpoint_eid >> 16);
+-        response[8 + 14] = static_cast<uint8_t>(endpoint_eid >> 8);
+-        response[8 + 15] = static_cast<uint8_t>(endpoint_eid);
++        // The control-CPU ABI carries this field in device byte order; the
++        // official UDMA driver reverses it before publishing the ubcore EID.
++        response[8] = static_cast<uint8_t>(endpoint_eid);
++        response[9] = static_cast<uint8_t>(endpoint_eid >> 8);
++        response[10] = static_cast<uint8_t>(endpoint_eid >> 16);
+         openurma_udma::storeLe32(response + 24, EndpointUpi);
+     }
+ 
+@@ -1031,6 +1032,12 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+             ouStoreLe<uint32_t>(response, 84, 65536);  // max read
+             ouStoreLe<uint32_t>(response, 88, 8);      // max CAS
+             ouStoreLe<uint32_t>(response, 92, 8);      // max FAA
++        } else if (opcode == 0x6200) {
++            // UDMA_CMD_QUERY_PORT_INFO.  The modeled endpoint is the 400-Gb/s
++            // single-port UB link advertised by the lab topology.
++            response.resize(24, 0);
++            ouStoreLe<uint32_t>(response, 0, 400000);  // Mb/s
++            response[14] = 1;                          // UBCORE_LINK_X1
+         }
+         if (!response.empty()) {
+             const size_t first = std::min<size_t>(response.size(), 24);
+@@ -4046,6 +4053,9 @@ gem5::NICTopologySCParams::create() const
+              "dma_max_outstanding must be positive");
+     nic->dma_max_outstanding_ = dma_max_outstanding;
+     nic->peer_node_id_ = peer_node_id;
++    panic_if(udma_endpoint_eid == 0 || udma_endpoint_eid > 0xfffff,
++             "udma_endpoint_eid must be a non-zero 20-bit compact EID");
++    nic->udma_endpoint_eid_ = udma_endpoint_eid;
+     nic->peer_ring_path_ = peer_ring_path;
+     nic->peer_link_latency_ = peer_link_latency;
+     nic->peer_link_ticks_per_byte_ = peer_link_rate;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 31f9b10..6357792 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -171,6 +171,7 @@ class NICTopologySC : public sc_core::sc_module
+     struct PeerRing;
+     PeerRing   *ring_ = nullptr;
+     int         peer_node_id_ = -1;
++    uint32_t    udma_endpoint_eid_ = 0;
+     std::string peer_ring_path_;
+     int         tx_dir_ = 0, rx_dir_ = 0;
+     gem5::Tick  peer_link_latency_ = 0;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.py b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+index c08d99f..58c4e0c 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.py
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+@@ -62,6 +62,9 @@ class NICTopologySC(SystemC_ScModule):
+         "instances = real two-node). Empty = no cross-process ring.")
+     peer_node_id  = Param.Int(-1,
+         "This node's id (0 or 1) for the cross-process ring; -1 = disabled")
++    udma_endpoint_eid = Param.Unsigned(0x100,
++        "Management-plane compact EID returned by the official UDMA SEID "
++        "query. It must be unique from UBUS entity EIDs and between nodes")
+     peer_link_latency = Param.Latency("100ns",
+         "Positive minimum one-way propagation delay for the cross-process "
+         "peer channel. DATA arrival timestamps use this as lookahead.")

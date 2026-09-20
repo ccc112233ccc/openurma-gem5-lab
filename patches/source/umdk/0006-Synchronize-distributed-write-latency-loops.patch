@@ -1,0 +1,129 @@
+From af727461f26b4b0317348c871534569b959ee7b3 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 17:38:57 +0800
+Subject: [PATCH 6/8] Synchronize distributed write latency loops
+
+---
+ .../tools/urma_perftest/perftest_run_test.c   | 45 ++++++++++++++++++-
+ 1 file changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index 8b5bfab..3a40e56 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -102,6 +102,7 @@ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+         return 0;
+     }
+     supported = cfg->cmd == PERFTEST_SEND_LAT ||
++        cfg->cmd == PERFTEST_WRITE_LAT ||
+         (cfg->cmd == PERFTEST_SEND_BW && !cfg->bidirection) ||
+         ((cfg->cmd == PERFTEST_READ_BW ||
+           cfg->cmd == PERFTEST_WRITE_BW) && cfg->bidirection);
+@@ -109,7 +110,7 @@ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+         cfg->pair_num != 1 || cfg->jettys != 1) {
+         (void)fprintf(stderr,
+             "Distributed virtual-time synchronization currently supports only "
+-            "iteration-mode send_lat, unidirectional send_bw, or bidirectional "
++            "iteration-mode send_lat/write_lat, unidirectional send_bw, or bidirectional "
+             "read/write_bw with one pair and one jetty.\n");
+         return -1;
+     }
+@@ -376,6 +377,36 @@ static int poll_jfc_until_expected_cqe(perftest_context_t *ctx, perftest_config_
+     return 0;
+ }
+ 
++static int rma_lat_dist_sync_begin(perftest_config_t *cfg, uint32_t id, bool *active)
++{
++    if (!dist_sync_requested()) {
++        return 0;
++    }
++
++    if (toggle_dist_sync("enable RMA latency loop") != 0) {
++        return -1;
++    }
++    *active = true;
++    /*
++     * The toggle schedules the first conservative barrier.  Exchange one
++     * token on the already-connected control socket so the leading guest
++     * cannot issue its first one-sided request before its peer reaches that
++     * barrier.
++     */
++    if (sync_time(cfg->comm.sock_fd[id], "rma_lat_dist_active") != 0) {
++        return -1;
++    }
++    return 0;
++}
++
++static void rma_lat_dist_sync_end(bool *active)
++{
++    if (*active) {
++        (void)toggle_dist_sync("disable RMA latency loop");
++        *active = false;
++    }
++}
++
+ static void *run_read_lat_simplex(void *arg)
+ {
+     perftest_thread_arg_t *arg_typed = arg;
+@@ -459,6 +490,7 @@ static void *run_write_lat_simplex(void *arg)
+     uint64_t rcnt = 0;
+     run_test_ctx_t *run_ctx = &ctx->run_ctx;
+     uint64_t rid = run_ctx->rid;
++    bool dist_sync_active = false;
+ 
+     urma_cr_t *cr = calloc(cfg->jfc_depth, sizeof(urma_cr_t));
+     if (cr == NULL) {
+@@ -474,6 +506,9 @@ static void *run_write_lat_simplex(void *arg)
+     if (cfg->time_type.bs.duration == 1) {
+         update_duration_state(ctx, cfg);
+     }
++    if (rma_lat_dist_sync_begin(cfg, id, &dist_sync_active) != 0) {
++        goto free_cr;
++    }
+ 
+     while (scnt < cfg->iters || ccnt < cfg->iters || rcnt < cfg->iters ||
+         (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
+@@ -531,10 +566,12 @@ static void *run_write_lat_simplex(void *arg)
+         }
+     }
+ 
++    rma_lat_dist_sync_end(&dist_sync_active);
+     free(cr);
+     return NULL;
+ 
+ free_cr:
++    rma_lat_dist_sync_end(&dist_sync_active);
+     free(cr);
+     return NULL;
+ }
+@@ -1638,6 +1675,7 @@ static void *run_write_lat_duplex(void *arg)
+     uint64_t rcnt = 0;
+     run_test_ctx_t *run_ctx = &ctx->run_ctx;
+     uint64_t rid = run_ctx->rid;
++    bool dist_sync_active = false;
+ 
+     urma_cr_t *cr = calloc(1, sizeof(urma_cr_t) * cfg->jfc_depth);
+     if (cr == NULL) {
+@@ -1653,6 +1691,9 @@ static void *run_write_lat_duplex(void *arg)
+     if (cfg->time_type.bs.duration == 1) {
+         update_duration_state(ctx, cfg);
+     }
++    if (rma_lat_dist_sync_begin(cfg, id, &dist_sync_active) != 0) {
++        goto free_cr;
++    }
+ 
+     while (scnt < cfg->iters || ccnt < cfg->iters || rcnt < cfg->iters ||
+         (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
+@@ -1698,10 +1739,12 @@ static void *run_write_lat_duplex(void *arg)
+         }
+     }
+ 
++    rma_lat_dist_sync_end(&dist_sync_active);
+     free(cr);
+     return NULL;
+ 
+ free_cr:
++    rma_lat_dist_sync_end(&dist_sync_active);
+     free(cr);
+     return NULL;
+ }

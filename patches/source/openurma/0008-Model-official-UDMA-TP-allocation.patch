@@ -1,0 +1,67 @@
+From fdf5f2315a92addfcc44f7d6d5f61e4d598dff53 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 15:00:45 +0800
+Subject: [PATCH 08/27] Model official UDMA TP allocation
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 33 ++++++++++++++++++-
+ 1 file changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 5f45b6e..0c4585a 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -721,6 +721,9 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+     constexpr uint8_t QueryVl = 1;
+     constexpr uint8_t QuerySl = 2;
+     constexpr uint8_t DeviceRegisterService = 2;
++    constexpr uint8_t TpAclService = 1;
++    constexpr uint8_t GetTpList = 0x21;
++    constexpr uint8_t ActiveTp = 0x22;
+     constexpr uint8_t QuerySeid = 0x01;
+     constexpr uint8_t NotifyControlPlaneInit = 0x15;
+ 
+@@ -738,7 +741,11 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+         opcode == NotifyControlPlaneInit;
+     const bool seid_query = service == DeviceRegisterService &&
+         opcode == QuerySeid;
+-    if (!qos_query && !control_plane_init && !seid_query)
++    const bool tp_list_query = service == TpAclService &&
++        opcode == GetTpList;
++    const bool active_tp = service == TpAclService && opcode == ActiveTp;
++    if (!qos_query && !control_plane_init && !seid_query && !tp_list_query &&
++        !active_tp)
+         return false;
+ 
+     const uint16_t requested_output = uint16_t(request[12]) |
+@@ -771,6 +778,30 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+         response[6] = 0x01; // udma_ctp_sl_bitmap = BIT(0)
+     } else if (service == QosService) {
+         response[0] = 0x01; // vl_bitmap = BIT(0)
++    } else if (tp_list_query && response_bytes >= 44) {
++        // The fabric manager allocates one process-scoped TP for this
++        // local/remote EID tuple.  Derive the compact identifiers from the
++        // request payload so repeated queries are stable without embedding
++        // a node- or test-specific TP number in the device model.
++        uint32_t hash = 2166136261U;
++        for (size_t index = Ue2ueHeaderBytes + CtrlqHeaderBytes;
++             index < request.size(); ++index) {
++            hash ^= request[index];
++            hash *= 16777619U;
++        }
++        constexpr uint32_t ModeledTpCount = 1024;
++        const uint32_t tpid = 1 + hash % (ModeledTpCount - 1);
++        openurma_udma::storeLe32(response, 1); // tp_list_cnt
++        openurma_udma::storeLe32(response + 4,
++                                 tpid | (1U << 24)); // one TPN
++        openurma_udma::storeLe32(response + 8, tpid); // start_tpn
++    } else if (active_tp && response_bytes >= 8 &&
++               request.size() >= Ue2ueHeaderBytes + CtrlqHeaderBytes + 8) {
++        // Activation succeeds with the local TP allocation requested by the
++        // official driver.  The response ABI is the first two words of the
++        // request: local TP id/count and local starting TPN.
++        std::memcpy(response,
++                    request.data() + Ue2ueHeaderBytes + CtrlqHeaderBytes, 8);
+     } else if (seid_query && response_bytes >= 28) {
+         // UDMA_CTRLQ_GET_SEID_INFO returns a management-plane identity.  It
+         // is deliberately separate from the compact UBUS entity EID: the

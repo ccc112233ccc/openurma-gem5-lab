@@ -1,0 +1,25 @@
+From f499672154b54d563bee8bbee504933cd2829d2b Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 18:21:46 +0800
+Subject: [PATCH 13/27] Avoid PCI IRQ conflict in official dual-node mode
+
+---
+ eval/twonode/gem5_scaffold/src/NICTopologySC.cc | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 58f0a2d..0df70fc 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -243,7 +243,10 @@ ouBuildUbiosUbc(uint64_t base)
+     ouStoreLe<uint64_t>(table, node + 32, base + OuUbiosMsgqOffset);
+     ouStoreLe<uint64_t>(table, node + 40, 0x1000);
+     ouStoreLe<uint16_t>(table, node + 48, 64);
+-    ouStoreLe<uint16_t>(table, node + 50, 101);
++    // VExpress PCI routes INTx through SPIs 100..103.  Keep the modeled UBC
++    // message interrupt outside that range so the optional e1000 OOB device
++    // can coexist with official-driver discovery in a two-node run.
++    ouStoreLe<uint16_t>(table, node + 50, 104);
+     ouStoreLe<uint64_t>(table, node + 112, 1);
+     // UBUS selects the vendor management module from bits 63:48.
+     ouStoreLe<uint64_t>(table, node + 120, 0xcc08000000000001ULL);

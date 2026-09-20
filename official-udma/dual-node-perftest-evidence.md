@@ -18,19 +18,19 @@ Validation date: 2026-09-17
 The official image and nodes are created with:
 
 ```sh
-docker exec openurma-repro-20260909 \
+docker exec openurma-gem5-lab \
   bash /workspace/openurma-gem5-lab/official-udma/build_initramfs.sh
 
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
+./run-dual.sh \
   --profile fast --provider official
-bash /Users/caobo/workspace/openurma-gem5-lab/sync-dual.sh
+./sync-dual.sh
 ```
 
 The recorded benchmark command is equivalent to a server on node 0 and a
 client on node 1:
 
 ```sh
-bash /Users/caobo/workspace/openurma-gem5-lab/run-latency.sh \
+./run-latency.sh \
   --samples 5 --size 128 --port 21116
 ```
 

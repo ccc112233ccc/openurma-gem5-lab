@@ -1,0 +1,567 @@
+From 7fc28cf75f332f47b4b587a1e9c32eedb5992e6a Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 22:30:01 +0800
+Subject: [PATCH 16/27] Model official UDMA READ and WRITE data paths
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 322 +++++++++++++++++-
+ .../gem5_scaffold/src/NICTopologySC.hh        |  34 ++
+ eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh  |   3 +
+ integration/umdk/vendor/umdk                  |   2 +-
+ 4 files changed, 347 insertions(+), 14 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 7aa6c3e..3f8c292 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -148,8 +148,21 @@ constexpr uint8_t OU_FE_VERSION_MASK = 0x0f;
+ constexpr uint8_t OU_FE_INLINE = 0x10;
+ constexpr uint8_t OU_UDMA_PEER_SEND = 0x80;
+ constexpr uint8_t OU_UDMA_PEER_SEND_IMM = 0x81;
++constexpr uint8_t OU_UDMA_PEER_WRITE = 0x82;
++constexpr uint8_t OU_UDMA_PEER_WRITE_ACK = 0x83;
++constexpr uint8_t OU_UDMA_PEER_READ_REQ = 0x84;
++constexpr uint8_t OU_UDMA_PEER_READ_RESP = 0x85;
+ constexpr uint32_t OU_PEER_MAX_PAYLOAD = 8088;
+ 
++bool
++ou_peer_has_payload(uint8_t opcode)
++{
++    return opcode == OU_UDMA_PEER_SEND ||
++           opcode == OU_UDMA_PEER_SEND_IMM ||
++           opcode == OU_UDMA_PEER_WRITE ||
++           opcode == OU_UDMA_PEER_READ_RESP;
++}
++
+ bool
+ is_power_of_two(uint32_t value)
+ {
+@@ -2153,6 +2166,11 @@ NICTopologySC::udma_reset_resources()
+     udma_jettys_.clear();
+     udma_sq_work_.clear();
+     udma_rx_pending_.clear();
++    udma_write_pending_.clear();
++    udma_read_pending_.clear();
++    udma_read_requests_.clear();
++    udma_write_acks_.clear();
++    udma_next_rma_id_ = 1;
+ }
+ 
+ void
+@@ -2714,13 +2732,73 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+                       << " jetty=" << jetty.id << "\n";
+             return false;
+         }
+-        if (wqe.opcode() != 0 && wqe.opcode() != 1) {
+-            std::cerr << "[NIC udma] unsupported phase-1 SQ opcode=0x"
++        if (wqe.opcode() != 0 && wqe.opcode() != 1 &&
++            wqe.opcode() != 3 && wqe.opcode() != 6) {
++            std::cerr << "[NIC udma] unsupported SQ opcode=0x"
+                       << std::hex << static_cast<unsigned>(wqe.opcode())
+                       << std::dec << "\n";
+             return false;
+         }
+ 
++        const uint16_t completed_index = static_cast<uint16_t>(
++            (jetty.consumer + wqebbs - 1U) & (block_count - 1U));
++        const UdmaRmaCompletion rma_completion{
++            wqe.completionEnabled(), jetty.send_jfc_id, completed_index,
++            jetty.id, jetty.is_jetty, 0, jetty.user_queue, wqe.opcode()};
++
++        // READ carries the local destination SGE in the SQE and the remote
++        // source segment/address in the control block.  The peer request has
++        // no data payload; a transaction id associates one or more response
++        // fragments with the original local SGE and CQE.
++        if (wqe.opcode() == 6) {
++            if (wqe.isInline() || wqe.sgeCount() != 1)
++                return false;
++            const openurma_udma::Sge local = wqe.firstSge();
++            if (!local.length || !local.va || !wqe.remoteAddress())
++                return false;
++            UdmaRmaCompletion completion = rma_completion;
++            completion.byte_count = local.length;
++            if (!has_peer_) {
++                std::vector<uint8_t> bytes(local.length);
++                const bool ok = ummu_dma_tid(
++                    wqe.remoteSegment(), wqe.remoteAddress(), bytes.data(),
++                    local.length, false) &&
++                    udma_dma_resource_payload(
++                        jetty.official, jetty.context_id,
++                        jetty.payload_token_id, local.va, bytes.data(),
++                        local.length, true);
++                if (!ok)
++                    return false;
++                if (completion.enabled &&
++                    !udma_write_cqe(completion.jfc_id, false,
++                                    jetty.is_jetty, completion.opcode,
++                                    completion.entry_index,
++                                    completion.jetty_id,
++                                    completion.byte_count,
++                                    completion.user_queue, 0)) {
++                    return false;
++                }
++            } else {
++                if (peer_ring_tx_available() == 0) {
++                    udma_sq_backpressured_ = true;
++                    return false;
++                }
++                const uint64_t request_id = udma_next_rma_id_++;
++                udma_read_pending_.emplace(
++                    request_id,
++                    UdmaReadPending{completion, jetty.official,
++                                    jetty.context_id,
++                                    jetty.payload_token_id, local.va, 0});
++                peer_send(OU_UDMA_PEER_READ_REQ, 0,
++                          wqe.remoteSegment(), wqe.remoteAddress(),
++                          local.length, request_id, 0, nullptr,
++                          gem5::curTick());
++            }
++            jetty.consumer += wqebbs;
++            ++udma_sq_wqes_;
++            continue;
++        }
++
+         std::vector<uint8_t> payload;
+         if (wqe.isInline()) {
+             payload.resize(wqe.inlineLength());
+@@ -2753,7 +2831,7 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+                     openurma_udma::loadLe32(raw_sge.data() + 4),
+                     openurma_udma::loadLe64(raw_sge.data() + 8)};
+                 total += sge.length;
+-                if (total > OU_PEER_MAX_PAYLOAD)
++                if (total > std::numeric_limits<uint32_t>::max())
+                     return false;
+                 sges.push_back(sge);
+             }
+@@ -2771,22 +2849,59 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+             }
+         }
+ 
++        if ((wqe.opcode() == 0 || wqe.opcode() == 1) &&
++            payload.size() > OU_PEER_MAX_PAYLOAD)
++            return false;
++
+         UdmaRxWork rx{wqe.remoteJetty(), wqe.opcode(),
+                       wqe.immediate(), payload};
+-        if (has_peer_) {
++        if (has_peer_ && wqe.opcode() == 3) {
++            const uint32_t fragments = payload.empty() ? 0 :
++                (static_cast<uint32_t>(payload.size()) +
++                 OU_PEER_MAX_PAYLOAD - 1U) / OU_PEER_MAX_PAYLOAD;
++            if (peer_ring_tx_available() < fragments) {
++                udma_sq_backpressured_ = true;
++                return false;
++            }
++            const uint64_t request_id = wqe.completionEnabled() ?
++                udma_next_rma_id_++ : 0;
++            if (request_id) {
++                UdmaRmaCompletion completion = rma_completion;
++                completion.byte_count = payload.size();
++                udma_write_pending_.emplace(request_id, completion);
++            }
++            uint32_t offset = 0;
++            while (offset < payload.size()) {
++                const uint32_t chunk = std::min<uint32_t>(
++                    payload.size() - offset, OU_PEER_MAX_PAYLOAD);
++                const bool last = offset + chunk == payload.size();
++                peer_send(OU_UDMA_PEER_WRITE, 0, wqe.remoteSegment(),
++                          wqe.remoteAddress() + offset, chunk, request_id,
++                          last ? 1 : 0, payload.data() + offset,
++                          gem5::curTick());
++                offset += chunk;
++            }
++        } else if (has_peer_) {
+             peer_send(wqe.opcode() == 0 ? OU_UDMA_PEER_SEND :
+                           OU_UDMA_PEER_SEND_IMM,
+                       rx.target_jetty, 0, 0, payload.size(), rx.immediate, 0,
+                       payload.data(), gem5::curTick());
++        } else if (wqe.opcode() == 3) {
++            if (!payload.empty() &&
++                !ummu_dma_tid(wqe.remoteSegment(), wqe.remoteAddress(),
++                              payload.data(), payload.size(), true))
++                return false;
+         } else {
+             if (udma_rx_pending_.size() >= OU_MAX_MODELED_QUEUE_ENTRIES)
+                 return false;
+             udma_rx_pending_.push_back(std::move(rx));
+         }
+ 
+-        if (wqe.completionEnabled()) {
+-            const uint16_t completed_index = static_cast<uint16_t>(
+-                (jetty.consumer + wqebbs - 1U) & (block_count - 1U));
++        // A cross-node WRITE completes only after the responder has applied
++        // the final fragment and returned an ACK. SEND and local WRITE retain
++        // the ordinary immediate local completion behavior.
++        if (wqe.completionEnabled() &&
++            !(has_peer_ && wqe.opcode() == 3)) {
+             if (!udma_write_cqe(jetty.send_jfc_id, false, jetty.is_jetty,
+                                 wqe.opcode(), completed_index, jetty.id,
+                                 payload.size(), jetty.user_queue,
+@@ -2811,6 +2926,39 @@ NICTopologySC::udma_poll_peer_ring()
+         sc_core::wait(delay);
+ }
+ 
++void
++NICTopologySC::udma_process_rma_peer_work()
++{
++    while (!udma_write_acks_.empty() && peer_ring_tx_available() != 0) {
++        const uint64_t request_id = udma_write_acks_.front();
++        udma_write_acks_.pop_front();
++        peer_send(OU_UDMA_PEER_WRITE_ACK, 0, 0, 0, 0, request_id, 0,
++                  nullptr, gem5::curTick());
++    }
++
++    while (!udma_read_requests_.empty() &&
++           peer_ring_tx_available() != 0) {
++        UdmaReadRequest &request = udma_read_requests_.front();
++        const uint32_t chunk = std::min<uint32_t>(
++            request.length - request.offset, OU_PEER_MAX_PAYLOAD);
++        std::vector<uint8_t> payload(chunk);
++        if (!ummu_dma_remote_segment(request.remote_token_id,
++                                     request.remote_va + request.offset,
++                                     payload.data(), chunk, false)) {
++            ++udma_queue_errors_;
++            udma_read_requests_.pop_front();
++            continue;
++        }
++        const bool last = request.offset + chunk == request.length;
++        peer_send(OU_UDMA_PEER_READ_RESP, 0, 0, request.offset, chunk,
++                  request.request_id, last ? 1 : 0, payload.data(),
++                  gem5::curTick());
++        request.offset += chunk;
++        if (last)
++            udma_read_requests_.pop_front();
++    }
++}
++
+ void
+ NICTopologySC::timing_dma_worker()
+ {
+@@ -2841,6 +2989,7 @@ NICTopologySC::timing_dma_worker()
+         }
+ 
+         udma_poll_peer_ring();
++        udma_process_rma_peer_work();
+ 
+         bool sq_backpressured = false;
+         while (!udma_sq_work_.empty()) {
+@@ -2868,6 +3017,10 @@ NICTopologySC::timing_dma_worker()
+                 udma_rx_pending_.push_back(std::move(work));
+         }
+ 
++        // RX processing can enqueue WRITE acknowledgements and READ response
++        // work. Give them the remaining peer-ring capacity in this activation.
++        udma_process_rma_peer_work();
++
+         if (sq_backpressured) {
+             const gem5::Tick ticks = std::max<gem5::Tick>(
+                 1, udma_poll_interval_);
+@@ -3183,6 +3336,41 @@ NICTopologySC::ummu_dma_tid(uint32_t token_id, uint64_t iova, void *buf,
+     return true;
+ }
+ 
++bool
++NICTopologySC::ummu_dma_remote_segment(uint32_t segment_id, uint64_t iova,
++                                       void *buf, uint32_t len, bool write)
++{
++    if (!buf || !len)
++        return false;
++
++    // The imported segment ID in an official RMA WQE is the remote access
++    // handle.  Address translation itself belongs to the receiving process's
++    // active local DMA context, and the two identifiers need not be equal.
++    // Prefer the direct TCT entry when they do match, then dynamically resolve
++    // the VA through the active local TCT instead of hard-coding a process TID.
++    auto *bytes = static_cast<uint8_t *>(buf);
++    bool used_context_lookup = false;
++    while (len) {
++        const uint32_t chunk = std::min<uint32_t>(
++            len, 4096U - static_cast<uint32_t>(iova & 0xfff));
++        uint64_t pa = ummu_translate_iova_tid(segment_id, iova);
++        if (!pa) {
++            pa = ummu_translate_iova(iova);
++            used_context_lookup = true;
++        }
++        if (!pa || !ou_dma(pa, bytes, chunk, write))
++            return false;
++        iova += chunk;
++        bytes += chunk;
++        len -= chunk;
++    }
++    if (used_context_lookup && ou_packet_trace_enabled()) {
++        std::cerr << "[NIC udma] remote segment " << segment_id
++                  << " resolved through active local DMA context\n";
++    }
++    return true;
++}
++
+ // Walk the ARM64 guest page table (4 KB granule, 48-bit VA, 4 levels L0..L3) at
+ // `ttbr0` to translate a guest VA -> guest PA, reading table entries straight from
+ // guest physical memory. Handles 1 GB (L1) / 2 MB (L2) block descriptors. 0 = unmapped.
+@@ -3597,14 +3785,22 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+ 
+ bool
+ NICTopologySC::peer_ring_tx_full()
++{
++    return peer_ring_tx_available() == 0;
++}
++
++uint32_t
++NICTopologySC::peer_ring_tx_available()
+ {
+     peer_ring_map();
+     if (!ring_)
+-        return false;
++        return OU_RING_SLOTS;
+     PeerRing::Dir &d = ring_->dir[tx_dir_];
+     const uint64_t head = __atomic_load_n(&d.head.value, __ATOMIC_RELAXED);
+     const uint64_t tail = __atomic_load_n(&d.tail.value, __ATOMIC_ACQUIRE);
+-    return head - tail >= OU_RING_SLOTS;
++    const uint64_t used = head - tail;
++    return used >= OU_RING_SLOTS ? 0 :
++        static_cast<uint32_t>(OU_RING_SLOTS - used);
+ }
+ 
+ // Wire-packet build shared by both transports.
+@@ -3640,7 +3836,9 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+     // stage's busy time) and prevents differently-sized FIFO packets from
+     // overtaking between stages. Propagation remains the positive
+     // conservative lookahead; fixed switch delay is separate and explicit.
+-    const uint64_t wire_bytes = static_cast<uint64_t>(len) +
++    const uint32_t payload_bytes =
++        ou_peer_has_payload(op) && payload ? len : 0;
++    const uint64_t wire_bytes = static_cast<uint64_t>(payload_bytes) +
+                                 peer_link_overhead_bytes_;
+     const gem5::Tick serialization = serialization_ticks(wire_bytes);
+     if (peer_stage_free_ticks_.size() != peer_serialization_stages_) {
+@@ -3661,7 +3859,7 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+     link_ticks_ = checked_tick_sum(link_ticks_, arrival_tick - tx_tick);
+ 
+     if (ring_) {                                  // cross-process ring
+-        uint32_t plen = 40 + len;
++        uint32_t plen = 40 + payload_bytes;
+         panic_if(plen > OU_RING_SLOT - sizeof(OuRingSlotHeader),
+                  "peer ring packet length %u exceeds slot payload %zu",
+                  plen, OU_RING_SLOT - sizeof(OuRingSlotHeader));
+@@ -3692,7 +3890,7 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+         }
+         return;
+     }
+-    std::vector<uint8_t> pkt(40 + (size_t)len, 0);      // in-process TLM
++    std::vector<uint8_t> pkt(40 + (size_t)payload_bytes, 0); // in-process TLM
+     ou_build_pkt(pkt.data(), op, dcna, rtoken, rva, len, imm, order, payload);
+     tlm::tlm_generic_payload trans;
+     trans.set_command(tlm::TLM_WRITE_COMMAND);
+@@ -3723,11 +3921,13 @@ NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen)
+     std::memcpy(&imm_hi, pkt + 36, 4);
+     const uint64_t immediate = static_cast<uint64_t>(imm_lo) |
+                                (static_cast<uint64_t>(imm_hi) << 32);
+-    if (pktlen < 40U + static_cast<size_t>(len)) {
++    const uint32_t payload_len = ou_peer_has_payload(op) ? len : 0;
++    if (pktlen < 40U + static_cast<size_t>(payload_len)) {
+         ++udma_queue_errors_;
+         return;
+     }
+     const uint8_t *payload = pkt + 40;
++    const uint8_t order = pkt[32];
+ 
+     if (udma_mode_ &&
+         (op == OU_UDMA_PEER_SEND || op == OU_UDMA_PEER_SEND_IMM)) {
+@@ -3745,6 +3945,102 @@ NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen)
+         return;
+     }
+ 
++    if (udma_mode_ && op == OU_UDMA_PEER_WRITE) {
++        const bool ok = len &&
++            ummu_dma_remote_segment(rtoken, rva,
++                                    const_cast<uint8_t *>(payload), len,
++                                    true);
++        if (!ok) {
++            ++udma_queue_errors_;
++            if (ou_packet_trace_enabled()) {
++                const uint64_t fallback_pa = ummu_translate_iova(rva);
++                std::cerr << "[NIC udma] remote WRITE DMA failed tid="
++                          << rtoken << " va=0x" << std::hex << rva
++                          << " any_tid_pa=0x" << fallback_pa << std::dec
++                          << " len=" << len << " request=" << immediate
++                          << " last=" << static_cast<unsigned>(order)
++                          << "\n";
++            }
++            return;
++        }
++        if (order && immediate) {
++            udma_write_acks_.push_back(immediate);
++            timing_dma_kick_.notify(sc_core::SC_ZERO_TIME);
++        }
++        return;
++    }
++
++    if (udma_mode_ && op == OU_UDMA_PEER_WRITE_ACK) {
++        auto pending = udma_write_pending_.find(immediate);
++        if (pending == udma_write_pending_.end()) {
++            ++udma_queue_errors_;
++            return;
++        }
++        const UdmaRmaCompletion completion = pending->second;
++        if (completion.enabled &&
++            !udma_write_cqe(completion.jfc_id, false,
++                            completion.is_jetty, completion.opcode,
++                            completion.entry_index, completion.jetty_id,
++                            completion.byte_count, completion.user_queue, 0)) {
++            ++udma_queue_errors_;
++            return;
++        }
++        udma_write_pending_.erase(pending);
++        return;
++    }
++
++    if (udma_mode_ && op == OU_UDMA_PEER_READ_REQ) {
++        if (!len || !rva || !immediate) {
++            ++udma_queue_errors_;
++            return;
++        }
++        udma_read_requests_.push_back(
++            UdmaReadRequest{rtoken, rva, len, 0, immediate});
++        timing_dma_kick_.notify(sc_core::SC_ZERO_TIME);
++        return;
++    }
++
++    if (udma_mode_ && op == OU_UDMA_PEER_READ_RESP) {
++        auto pending = udma_read_pending_.find(immediate);
++        if (pending == udma_read_pending_.end() ||
++            pending->second.received >
++                pending->second.completion.byte_count ||
++            rva != pending->second.received ||
++            len > pending->second.completion.byte_count -
++                      pending->second.received) {
++            ++udma_queue_errors_;
++            return;
++        }
++        UdmaReadPending &read = pending->second;
++        if (!udma_dma_resource_payload(
++                read.official, read.context_id, read.local_token_id,
++                read.local_va + read.received,
++                const_cast<uint8_t *>(payload), len, true)) {
++            ++udma_queue_errors_;
++            return;
++        }
++        read.received += len;
++        if (order) {
++            if (read.received != read.completion.byte_count) {
++                ++udma_queue_errors_;
++                return;
++            }
++            const UdmaRmaCompletion completion = read.completion;
++            if (completion.enabled &&
++                !udma_write_cqe(completion.jfc_id, false,
++                                completion.is_jetty, completion.opcode,
++                                completion.entry_index,
++                                completion.jetty_id,
++                                completion.byte_count,
++                                completion.user_queue, 0)) {
++                ++udma_queue_errors_;
++                return;
++            }
++            udma_read_pending_.erase(pending);
++        }
++        return;
++    }
++
+     const uint32_t imm = imm_lo;
+     bool ok = false;
+     // Cross-node receiver: land the payload into the target MR. With
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 8476c56..36286eb 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -424,6 +424,31 @@ class NICTopologySC : public sc_core::sc_module
+         uint8_t last_failure_stage = 0;
+         uint64_t retry_count = 0;
+     };
++    struct UdmaRmaCompletion {
++        bool enabled = false;
++        uint32_t jfc_id = 0;
++        uint16_t entry_index = 0;
++        uint32_t jetty_id = 0;
++        bool is_jetty = true;
++        uint32_t byte_count = 0;
++        uint64_t user_queue = 0;
++        uint8_t opcode = 0;
++    };
++    struct UdmaReadPending {
++        UdmaRmaCompletion completion;
++        bool official = false;
++        uint32_t context_id = 0;
++        uint32_t local_token_id = 0;
++        uint64_t local_va = 0;
++        uint32_t received = 0;
++    };
++    struct UdmaReadRequest {
++        uint32_t remote_token_id = 0;
++        uint64_t remote_va = 0;
++        uint32_t length = 0;
++        uint32_t offset = 0;
++        uint64_t request_id = 0;
++    };
+     struct UdmaIotlbKey {
+         uint32_t context_id = 0;
+         uint64_t va_page = 0;
+@@ -456,6 +481,11 @@ class NICTopologySC : public sc_core::sc_module
+     std::unordered_map<uint32_t, UdmaJetty> udma_jettys_;
+     std::deque<UdmaSqWork> udma_sq_work_;
+     std::deque<UdmaRxWork> udma_rx_pending_;
++    std::unordered_map<uint64_t, UdmaRmaCompletion> udma_write_pending_;
++    std::unordered_map<uint64_t, UdmaReadPending> udma_read_pending_;
++    std::deque<UdmaReadRequest> udma_read_requests_;
++    std::deque<uint64_t> udma_write_acks_;
++    uint64_t udma_next_rma_id_ = 1;
+     std::list<UdmaIotlbKey> udma_iotlb_lru_;
+     std::unordered_map<UdmaIotlbKey, UdmaIotlbEntry, UdmaIotlbKeyHash>
+         udma_iotlb_;
+@@ -476,6 +506,7 @@ class NICTopologySC : public sc_core::sc_module
+     bool udma_enqueue_sq(uint32_t jetty_id, uint32_t producer);
+     bool udma_process_sq(UdmaSqWork work);
+     bool udma_process_rx(UdmaRxWork &work);
++    void udma_process_rma_peer_work();
+     bool udma_write_cqe(uint32_t jfc_id, bool receive, bool jetty,
+                         uint8_t opcode, uint16_t entry_idx,
+                         uint32_t local_id, uint32_t byte_count,
+@@ -510,6 +541,7 @@ class NICTopologySC : public sc_core::sc_module
+                                    bool write);
+     bool udma_dma_pa(uint64_t pa, void *buf, uint32_t len, bool write);
+     void udma_poll_peer_ring();
++    uint32_t peer_ring_tx_available();
+ 
+     // Decoded MMIO callback bound to mmio_socket.
+     void mmio_b   (tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
+@@ -654,6 +686,8 @@ class NICTopologySC : public sc_core::sc_module
+     bool ummu_dma(uint64_t iova, void *buf, uint32_t len, bool write);
+     bool ummu_dma_tid(uint32_t token_id, uint64_t iova, void *buf,
+                       uint32_t len, bool write);
++    bool ummu_dma_remote_segment(uint32_t segment_id, uint64_t iova,
++                                 void *buf, uint32_t len, bool write);
+     // walk the ARM64 (4 KB granule, 48-bit) guest page table at ttbr0: VA -> PA.
+     uint64_t ou_walk(uint64_t ttbr0, uint64_t va);
+     // UDMA's equivalent walker issues every PTE fetch at its already-physical
+diff --git a/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh b/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh
+index c7e0230..163cf41 100644
+--- a/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh
++++ b/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh
+@@ -139,7 +139,10 @@ class SqWqe
+     uint16_t inlineLength() const { return loadLe32(bytes.data() + 4) >> 22; }
+     uint8_t sgeCount() const { return loadLe32(bytes.data() + 8) >> 24; }
+     uint32_t remoteJetty() const { return loadLe32(bytes.data() + 12) & 0xfffffU; }
++    uint32_t remoteSegment() const { return remoteJetty(); }
+     const uint8_t *remoteEid() const { return bytes.data() + 16; }
++    uint32_t remoteTokenValue() const { return loadLe32(bytes.data() + 32); }
++    uint64_t remoteAddress() const { return loadLe64(bytes.data() + 40); }
+     uint64_t immediate() const { return loadLe64(bytes.data() + 40); }
+ 
+     Sge firstSge() const
+diff --git a/integration/umdk/vendor/umdk b/integration/umdk/vendor/umdk
+index 097c3a5..b3816ae 160000
+--- a/integration/umdk/vendor/umdk
++++ b/integration/umdk/vendor/umdk
+@@ -1 +1 @@
+-Subproject commit 097c3a5d6b2234d6a070e3bfb26f6f49f0ce26f8
++Subproject commit b3816ae5a5fd8660425b21bfd3578120b4df23ac

@@ -1,0 +1,118 @@
+From 536f6b1c9672f383bb6f7dbf7a897d07f2f55d00 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 10:21:32 +0800
+Subject: [PATCH 17/27] Stream large UDMA WRITE payloads over peer ring
+
+---
+ .../gem5_scaffold/src/NICTopologySC.cc        | 42 ++++++++++++-------
+ .../gem5_scaffold/src/NICTopologySC.hh        |  8 ++++
+ integration/umdk/vendor/umdk                  |  2 +-
+ 3 files changed, 36 insertions(+), 16 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 3f8c292..d53867b 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -2168,6 +2168,7 @@ NICTopologySC::udma_reset_resources()
+     udma_rx_pending_.clear();
+     udma_write_pending_.clear();
+     udma_read_pending_.clear();
++    udma_write_requests_.clear();
+     udma_read_requests_.clear();
+     udma_write_acks_.clear();
+     udma_next_rma_id_ = 1;
+@@ -2856,10 +2857,12 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+         UdmaRxWork rx{wqe.remoteJetty(), wqe.opcode(),
+                       wqe.immediate(), payload};
+         if (has_peer_ && wqe.opcode() == 3) {
+-            const uint32_t fragments = payload.empty() ? 0 :
+-                (static_cast<uint32_t>(payload.size()) +
+-                 OU_PEER_MAX_PAYLOAD - 1U) / OU_PEER_MAX_PAYLOAD;
+-            if (peer_ring_tx_available() < fragments) {
++            // A non-inline RMA WQE names memory; its size does not grow with
++            // the referenced payload.  Queue the operation once and stream
++            // fragments as peer-ring slots become available instead of
++            // requiring the entire transfer to fit in the 64-slot ring.
++            if (payload.empty() ||
++                udma_write_requests_.size() >= OU_MAX_MODELED_QUEUE_ENTRIES) {
+                 udma_sq_backpressured_ = true;
+                 return false;
+             }
+@@ -2870,17 +2873,9 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+                 completion.byte_count = payload.size();
+                 udma_write_pending_.emplace(request_id, completion);
+             }
+-            uint32_t offset = 0;
+-            while (offset < payload.size()) {
+-                const uint32_t chunk = std::min<uint32_t>(
+-                    payload.size() - offset, OU_PEER_MAX_PAYLOAD);
+-                const bool last = offset + chunk == payload.size();
+-                peer_send(OU_UDMA_PEER_WRITE, 0, wqe.remoteSegment(),
+-                          wqe.remoteAddress() + offset, chunk, request_id,
+-                          last ? 1 : 0, payload.data() + offset,
+-                          gem5::curTick());
+-                offset += chunk;
+-            }
++            udma_write_requests_.push_back(
++                UdmaWriteRequest{wqe.remoteSegment(), wqe.remoteAddress(),
++                                 0, request_id, std::move(payload)});
+         } else if (has_peer_) {
+             peer_send(wqe.opcode() == 0 ? OU_UDMA_PEER_SEND :
+                           OU_UDMA_PEER_SEND_IMM,
+@@ -2957,6 +2952,23 @@ NICTopologySC::udma_process_rma_peer_work()
+         if (last)
+             udma_read_requests_.pop_front();
+     }
++
++    while (!udma_write_requests_.empty() &&
++           peer_ring_tx_available() != 0) {
++        UdmaWriteRequest &request = udma_write_requests_.front();
++        const uint32_t chunk = std::min<uint32_t>(
++            static_cast<uint32_t>(request.payload.size()) - request.offset,
++            OU_PEER_MAX_PAYLOAD);
++        const bool last = request.offset + chunk == request.payload.size();
++        peer_send(OU_UDMA_PEER_WRITE, 0, request.remote_token_id,
++                  request.remote_va + request.offset, chunk,
++                  request.request_id, last ? 1 : 0,
++                  request.payload.data() + request.offset,
++                  gem5::curTick());
++        request.offset += chunk;
++        if (last)
++            udma_write_requests_.pop_front();
++    }
+ }
+ 
+ void
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 36286eb..4831611 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -449,6 +449,13 @@ class NICTopologySC : public sc_core::sc_module
+         uint32_t offset = 0;
+         uint64_t request_id = 0;
+     };
++    struct UdmaWriteRequest {
++        uint32_t remote_token_id = 0;
++        uint64_t remote_va = 0;
++        uint32_t offset = 0;
++        uint64_t request_id = 0;
++        std::vector<uint8_t> payload;
++    };
+     struct UdmaIotlbKey {
+         uint32_t context_id = 0;
+         uint64_t va_page = 0;
+@@ -483,6 +490,7 @@ class NICTopologySC : public sc_core::sc_module
+     std::deque<UdmaRxWork> udma_rx_pending_;
+     std::unordered_map<uint64_t, UdmaRmaCompletion> udma_write_pending_;
+     std::unordered_map<uint64_t, UdmaReadPending> udma_read_pending_;
++    std::deque<UdmaWriteRequest> udma_write_requests_;
+     std::deque<UdmaReadRequest> udma_read_requests_;
+     std::deque<uint64_t> udma_write_acks_;
+     uint64_t udma_next_rma_id_ = 1;
+diff --git a/integration/umdk/vendor/umdk b/integration/umdk/vendor/umdk
+index b3816ae..6d89296 160000
+--- a/integration/umdk/vendor/umdk
++++ b/integration/umdk/vendor/umdk
+@@ -1 +1 @@
+-Subproject commit b3816ae5a5fd8660425b21bfd3578120b4df23ac
++Subproject commit 6d89296f378b07049bda06230b734e598d9cd173

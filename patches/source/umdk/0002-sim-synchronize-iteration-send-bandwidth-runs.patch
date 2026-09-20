@@ -1,0 +1,97 @@
+From 097c3a5d6b2234d6a070e3bfb26f6f49f0ce26f8 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 20:05:04 +0800
+Subject: [PATCH 2/8] sim: synchronize iteration send bandwidth runs
+
+---
+ .../tools/urma_perftest/perftest_run_test.c   | 40 ++++++++++++++++---
+ 1 file changed, 35 insertions(+), 5 deletions(-)
+
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index e437509..ecf66d8 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -96,14 +96,19 @@ static int toggle_dist_sync(const char *phase)
+ 
+ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+ {
++    bool supported;
++
+     if (!dist_sync_requested()) {
+         return 0;
+     }
+-    if (cfg->cmd != PERFTEST_SEND_LAT || cfg->time_type.bs.iterations != 1 ||
++    supported = cfg->cmd == PERFTEST_SEND_LAT ||
++        (cfg->cmd == PERFTEST_SEND_BW && !cfg->bidirection);
++    if (!supported || cfg->time_type.bs.iterations != 1 ||
+         cfg->pair_num != 1 || cfg->jettys != 1) {
+         (void)fprintf(stderr,
+             "Distributed virtual-time synchronization currently supports only "
+-            "iteration-mode send_lat with one pair and one jetty.\n");
++            "iteration-mode send_lat or unidirectional send_bw with one pair "
++            "and one jetty.\n");
+         return -1;
+     }
+ 
+@@ -3422,6 +3427,7 @@ static int run_send_bw_once(perftest_context_t *ctx, perftest_config_t *cfg)
+ {
+     uint32_t i;
+     int ret;
++    bool dist_sync_active = false;
+ 
+     for (i = 0; i < cfg->pair_num; i++) {
+         ret = sync_time(cfg->comm.sock_fd[i], "send_bw_post_recv");
+@@ -3431,26 +3437,50 @@ static int run_send_bw_once(perftest_context_t *ctx, perftest_config_t *cfg)
+         }
+     }
+ 
++    if (dist_sync_requested()) {
++        if (toggle_dist_sync("enable send_bw") != 0) {
++            return -1;
++        }
++        dist_sync_active = true;
++        for (i = 0; i < cfg->pair_num; i++) {
++            ret = sync_time(cfg->comm.sock_fd[i], "send_bw_dist_active");
++            if (ret != 0) {
++                (void)fprintf(stderr,
++                    "Failed to rendezvous after enabling send_bw distributed synchronization.\n");
++                goto disable_dist_sync;
++            }
++        }
++    }
++
+     if (cfg->bidirection &&
+         (cfg->api_type == PERFTEST_SEND || (cfg->api_type == PERFTEST_WRITE && cfg->enable_imm))) {
+         ret = run_once_bi_bw(ctx, cfg);
+         if (ret != 0) {
+             (void)fprintf(stderr, "Failed to run once bi bw, size: %u.\n", cfg->size);
+-            return -1;
++            goto disable_dist_sync;
+         }
+     } else if (cfg->comm.server_ip != NULL) {
+         ret = run_once_bw(ctx, cfg);
+         if (ret != 0) {
+             (void)fprintf(stderr, "Failed to run once send bw, size: %u.\n", cfg->size);
+-            return -1;
++            goto disable_dist_sync;
+         }
+     } else {
+         ret = run_once_bw_recv(ctx, cfg);
+         if (ret != 0) {
+             (void)fprintf(stderr, "Failed to run once recv bw, size: %u.\n", cfg->size);
+-            return -1;
++            goto disable_dist_sync;
+         }
+     }
++
++disable_dist_sync:
++    if (dist_sync_active && toggle_dist_sync("disable send_bw") != 0) {
++        ret = -1;
++    }
++    if (ret != 0) {
++        return -1;
++    }
++
+     bw_report_data_t local_bw_report = {0};
+     bw_report_data_t remote_bw_report = {0};
+     double cpu_mhz = perftest_time_units_per_usec(false);

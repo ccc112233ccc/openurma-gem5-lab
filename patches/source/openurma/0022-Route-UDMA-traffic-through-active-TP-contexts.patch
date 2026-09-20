@@ -1,0 +1,424 @@
+From 06230a9d4f43b3daceb2d08b10e1b7bbd9bcb563 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Fri, 18 Sep 2026 13:07:52 +0800
+Subject: [PATCH 22/27] Route UDMA traffic through active TP contexts
+
+---
+ .../configs/single_node_fs_clean.py           |   5 +
+ .../gem5_scaffold/src/NICTopologySC.cc        | 138 ++++++++++++++----
+ .../gem5_scaffold/src/NICTopologySC.hh        |  27 +++-
+ .../gem5_scaffold/src/NICTopologySC.py        |   7 +-
+ eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh  |   1 +
+ 5 files changed, 148 insertions(+), 30 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index 283c8df..e2da4c9 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -435,6 +435,7 @@ def create(args):
+         iomem_base=IOMEM_BASE,
+         peer_link_rate=f"{args.peer_link_rate_gbps:g}Gbps",
+         ub_port_count=args.ub_port_count,
++        peer_port_selection=args.peer_port_selection,
+         peer_topology=args.peer_topology,
+         peer_port_map=args.peer_port_map,
+         peer_serialization_stages=args.peer_serialization_stages,
+@@ -772,6 +773,10 @@ def main():
+         help="UB SerDes line rate in decimal Gbit/s")
+     parser.add_argument("--ub-port-count", type=positive_int, default=1,
+         help="physical UB egress ports, each with an independent SerDes queue")
++    parser.add_argument("--peer-port-selection",
++        choices=("tp-context", "legacy-hash"), default="tp-context",
++        help="select egress from official TP state (default) or the deprecated "
++             "mock flow hash")
+     parser.add_argument("--peer-topology", choices=("direct", "l1-switch"),
+         default="direct", help="direct cables or one explicit L1 switch")
+     parser.add_argument("--peer-port-map", default="",
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index ac06eda..64352ab 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -829,10 +829,17 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+         }
+         constexpr uint32_t ModeledTpCount = 1024;
+         const uint32_t tpid = 1 + hash % (ModeledTpCount - 1);
++        const uint32_t tpn_start = tpid;
++        const uint32_t base_port = ub_port_count_ ? hash % ub_port_count_ : 0;
+         openurma_udma::storeLe32(response, 1); // tp_list_cnt
+         openurma_udma::storeLe32(response + 4,
+                                  tpid | (1U << 24)); // one TPN
+-        openurma_udma::storeLe32(response + 8, tpid); // start_tpn
++        openurma_udma::storeLe32(response + 8, tpn_start);
++        udma_tp_routes_[tpid] = UdmaTpRoute{
++            tpid, tpn_start, 1, base_port, false};
++        std::cerr << "[NIC udma official] allocated TP id=" << tpid
++                  << " tpn=" << tpn_start << " port=" << base_port
++                  << " source=GET_TP_LIST\n";
+     } else if (active_tp && response_bytes >= 8 &&
+                request.size() >= Ue2ueHeaderBytes + CtrlqHeaderBytes + 8) {
+         // Activation succeeds with the local TP allocation requested by the
+@@ -840,6 +847,40 @@ NICTopologySC::ubase_emit_ue2ue_ctrlq_response(
+         // request: local TP id/count and local starting TPN.
+         std::memcpy(response,
+                     request.data() + Ue2ueHeaderBytes + CtrlqHeaderBytes, 8);
++        const uint8_t *active = request.data() +
++            Ue2ueHeaderBytes + CtrlqHeaderBytes;
++        const uint32_t local = openurma_udma::loadLe32(active);
++        const uint32_t local_tpid = local & 0x00ffffffU;
++        const uint32_t local_count = local >> 24;
++        const uint32_t local_tpn =
++            openurma_udma::loadLe32(active + 4) & 0x00ffffffU;
++        auto route = udma_tp_routes_.find(local_tpid);
++        if (route != udma_tp_routes_.end() &&
++            route->second.tpn_start == local_tpn &&
++            route->second.tpn_count == local_count) {
++            route->second.active = true;
++            std::cerr << "[NIC udma official] activated TP id="
++                      << local_tpid << " tpn=" << local_tpn
++                      << " count=" << local_count << " port="
++                      << route->second.base_port << "\n";
++        } else {
++            std::cerr << "[NIC udma official] active TP has no allocated "
++                         "route id=" << local_tpid << " tpn=" << local_tpn
++                      << " count=" << local_count << "\n";
++        }
++    } else if (deactive_tp &&
++               request.size() >= Ue2ueHeaderBytes + CtrlqHeaderBytes + 8) {
++        const uint8_t *inactive = request.data() +
++            Ue2ueHeaderBytes + CtrlqHeaderBytes;
++        const uint32_t local_tpid =
++            openurma_udma::loadLe32(inactive) & 0x00ffffffU;
++        auto route = udma_tp_routes_.find(local_tpid);
++        if (route != udma_tp_routes_.end()) {
++            route->second.active = false;
++            std::cerr << "[NIC udma official] deactivated TP id="
++                      << local_tpid << " port=" << route->second.base_port
++                      << "\n";
++        }
+     } else if (seid_query && response_bytes >= 28) {
+         // UDMA_CTRLQ_GET_SEID_INFO returns a management-plane identity.  It
+         // is deliberately separate from the compact UBUS entity EID: the
+@@ -1238,7 +1279,8 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+             ouStoreLe<uint16_t>(response, 30, 1);
+             ouStoreLe<uint16_t>(response, 32, 64);     // SEID/UPI table
+             ouStoreLe<uint16_t>(response, 34, 1);
+-            response[44] = 1;                          // one port
++            response[44] = static_cast<uint8_t>(
++                std::min<uint32_t>(ub_port_count_, UINT8_MAX));
+             ouStoreLe<uint16_t>(response, 48, 128);    // RC queues
+             ouStoreLe<uint16_t>(response, 50, 128);    // RC depth
+             response[52] = 64;                         // RC entry bytes
+@@ -1251,8 +1293,9 @@ NICTopologySC::ubase_cmdq_kick(uint32_t new_pi)
+             ouStoreLe<uint32_t>(response, 88, 8);      // max CAS
+             ouStoreLe<uint32_t>(response, 92, 8);      // max FAA
+         } else if (opcode == 0x6200) {
+-            // UDMA_CMD_QUERY_PORT_INFO.  The modeled endpoint is the 400-Gb/s
+-            // single-port UB link advertised by the lab topology.
++            // UDMA_CMD_QUERY_PORT_INFO. Each modeled physical port exposes
++            // the same 400-Gb/s capability; the request's port index is
++            // validated by the unchanged driver against the device count.
+             response.resize(24, 0);
+             ouStoreLe<uint32_t>(response, 0, 400000);  // Mb/s
+             response[14] = 1;                          // UBCORE_LINK_X1
+@@ -2186,6 +2229,7 @@ NICTopologySC::udma_reset_resources()
+     udma_write_requests_.clear();
+     udma_read_requests_.clear();
+     udma_write_acks_.clear();
++    udma_tp_routes_.clear();
+     udma_next_rma_id_ = 1;
+ }
+ 
+@@ -2808,7 +2852,7 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+                 peer_send(OU_UDMA_PEER_READ_REQ, 0,
+                           wqe.remoteSegment(), wqe.remoteAddress(),
+                           local.length, request_id, 0, nullptr,
+-                          gem5::curTick());
++                          gem5::curTick(), wqe.tpn());
+             }
+             jetty.consumer += wqebbs;
+             ++udma_sq_wqes_;
+@@ -2890,12 +2934,16 @@ NICTopologySC::udma_process_sq(UdmaSqWork work)
+             }
+             udma_write_requests_.push_back(
+                 UdmaWriteRequest{wqe.remoteSegment(), wqe.remoteAddress(),
+-                                 0, request_id, std::move(payload)});
++                                 0, request_id, wqe.tpn(),
++                                 peer_port_for_transport(
++                                     wqe.tpn(), OU_UDMA_PEER_WRITE, 0,
++                                     wqe.remoteSegment()),
++                                 std::move(payload)});
+         } else if (has_peer_) {
+             peer_send(wqe.opcode() == 0 ? OU_UDMA_PEER_SEND :
+                           OU_UDMA_PEER_SEND_IMM,
+                       rx.target_jetty, 0, 0, payload.size(), rx.immediate, 0,
+-                      payload.data(), gem5::curTick());
++                      payload.data(), gem5::curTick(), wqe.tpn());
+         } else if (wqe.opcode() == 3) {
+             if (!payload.empty() &&
+                 !ummu_dma_tid(wqe.remoteSegment(), wqe.remoteAddress(),
+@@ -2940,10 +2988,10 @@ void
+ NICTopologySC::udma_process_rma_peer_work()
+ {
+     while (!udma_write_acks_.empty() && peer_ring_tx_available() != 0) {
+-        const uint64_t request_id = udma_write_acks_.front();
++        const UdmaWriteAck ack = udma_write_acks_.front();
+         udma_write_acks_.pop_front();
+-        peer_send(OU_UDMA_PEER_WRITE_ACK, 0, 0, 0, 0, request_id, 0,
+-                  nullptr, gem5::curTick());
++        peer_send(OU_UDMA_PEER_WRITE_ACK, 0, 0, 0, 0, ack.request_id, 0,
++                  nullptr, gem5::curTick(), UINT32_MAX, ack.return_port);
+     }
+ 
+     while (!udma_read_requests_.empty() &&
+@@ -2962,7 +3010,7 @@ NICTopologySC::udma_process_rma_peer_work()
+         const bool last = request.offset + chunk == request.length;
+         peer_send(OU_UDMA_PEER_READ_RESP, 0, 0, request.offset, chunk,
+                   request.request_id, last ? 1 : 0, payload.data(),
+-                  gem5::curTick());
++                  gem5::curTick(), UINT32_MAX, request.return_port);
+         request.offset += chunk;
+         if (last)
+             udma_read_requests_.pop_front();
+@@ -2979,7 +3027,7 @@ NICTopologySC::udma_process_rma_peer_work()
+                   request.remote_va + request.offset, chunk,
+                   request.request_id, last ? 1 : 0,
+                   request.payload.data() + request.offset,
+-                  gem5::curTick());
++                  gem5::curTick(), request.tpn, request.source_port);
+         request.offset += chunk;
+         if (last)
+             udma_write_requests_.pop_front();
+@@ -3858,7 +3906,7 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+                  "peer ring port %u slot %llu violates configured causal path",
+                  selected_port, (unsigned long long)selected_tail);
+ 
+-        peer_apply(s + sizeof(*hdr), hdr->plen);
++        peer_apply(s + sizeof(*hdr), hdr->plen, selected_port);
+         ++peer_port_rx_packets_[selected_port];
+         peer_port_rx_bytes_[selected_port] +=
+             static_cast<uint64_t>(payload_bytes) + peer_link_overhead_bytes_;
+@@ -3923,10 +3971,43 @@ ou_build_pkt(uint8_t *pkt, uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t
+     if (len && payload) std::memcpy(pkt + 40, payload, len);
+ }
+ 
++uint32_t
++NICTopologySC::peer_port_for_transport(uint32_t tpn, uint8_t op,
++                                       uint32_t dcna,
++                                       uint32_t rtoken) const
++{
++    if (ub_port_count_ <= 1)
++        return 0;
++
++    if (peer_port_selection_ == "legacy-hash") {
++        uint64_t flow_hash = uint64_t(dcna) * 0x9e3779b185ebca87ULL;
++        flow_hash ^= uint64_t(rtoken) * 0xc2b2ae3d27d4eb4fULL;
++        flow_hash ^= uint64_t(op) * 0x165667b19e3779f9ULL;
++        return static_cast<uint32_t>(flow_hash % ub_port_count_);
++    }
++
++    for (const auto &[id, route] : udma_tp_routes_) {
++        (void)id;
++        if (!route.active || tpn < route.tpn_start ||
++            tpn - route.tpn_start >= route.tpn_count)
++            continue;
++        return (route.base_port + tpn - route.tpn_start) % ub_port_count_;
++    }
++
++    // A physical UDMA device never invents a path from application object
++    // fields. Refuse a multi-port transfer until the official control plane
++    // has activated a matching TP instead of silently routing it on port 0.
++    std::cerr << "[NIC peer-route] no active TP route for tpn=" << tpn
++              << "\n";
++    return UINT32_MAX;
++}
++
+ void
+-NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rva,
+-                         uint32_t len, uint64_t imm, uint8_t order,
+-                         const uint8_t *payload, gem5::Tick tx_tick)
++NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
++                         uint64_t rva, uint32_t len, uint64_t imm,
++                         uint8_t order, const uint8_t *payload,
++                         gem5::Tick tx_tick, uint32_t tpn,
++                         uint32_t forced_port)
+ {
+     peer_ring_map();
+     panic_if(peer_node_id_ >= 0 && !ring_,
+@@ -3942,13 +4023,10 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+     const uint64_t wire_bytes = static_cast<uint64_t>(payload_bytes) +
+                                 peer_link_overhead_bytes_;
+     const gem5::Tick serialization = serialization_ticks(wire_bytes);
+-    // Keep every transport flow on one physical port so ordering is preserved,
+-    // while independent jetty/token flows can occupy separate SerDes queues.
+-    uint64_t flow_hash = uint64_t(dcna) * 0x9e3779b185ebca87ULL;
+-    flow_hash ^= uint64_t(rtoken) * 0xc2b2ae3d27d4eb4fULL;
+-    flow_hash ^= uint64_t(op) * 0x165667b19e3779f9ULL;
+-    const uint32_t src_port = static_cast<uint32_t>(
+-        flow_hash % ub_port_count_);
++    const uint32_t src_port = forced_port < ub_port_count_ ? forced_port :
++        peer_port_for_transport(tpn, op, dcna, rtoken);
++    panic_if(src_port >= ub_port_count_,
++             "no active physical-port route for TPN %u", tpn);
+     const uint32_t dst_port = peer_port_map_[src_port];
+     if (peer_port_stage_free_ticks_.size() != ub_port_count_) {
+         peer_port_stage_free_ticks_.assign(
+@@ -4021,6 +4099,7 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+             std::cerr << "[NIC peer-tx ring] seq=" << hdr->seq
+                       << " src_port=" << src_port
+                       << " dst_port=" << dst_port
++                      << " tpn=" << tpn
+                       << " op=0x" << std::hex << (int)op << std::dec
+                       << " len=" << len << " tx=" << tx_tick
+                       << " arrival=" << arrival_tick << "\n";
+@@ -4045,7 +4124,8 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rv
+ 
+ // Apply a received WR packet to THIS node's guest memory + raise completions.
+ void
+-NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen)
++NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen,
++                          uint32_t ingress_port)
+ {
+     if (!pkt || pktlen < 40) return;
+     uint8_t op = pkt[0];
+@@ -4101,7 +4181,8 @@ NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen)
+             return;
+         }
+         if (order && immediate) {
+-            udma_write_acks_.push_back(immediate);
++            udma_write_acks_.push_back(
++                UdmaWriteAck{immediate, ingress_port});
+             timing_dma_kick_.notify(sc_core::SC_ZERO_TIME);
+         }
+         return;
+@@ -4132,7 +4213,7 @@ NICTopologySC::peer_apply(const uint8_t *pkt, size_t pktlen)
+             return;
+         }
+         udma_read_requests_.push_back(
+-            UdmaReadRequest{rtoken, rva, len, 0, immediate});
++            UdmaReadRequest{rtoken, rva, len, 0, immediate, ingress_port});
+         timing_dma_kick_.notify(sc_core::SC_ZERO_TIME);
+         return;
+     }
+@@ -4899,6 +4980,10 @@ gem5::NICTopologySCParams::create() const
+     panic_if(ub_port_count == 0 || ub_port_count > 16,
+              "ub_port_count must be between 1 and 16");
+     nic->ub_port_count_ = ub_port_count;
++    panic_if(peer_port_selection != "tp-context" &&
++                 peer_port_selection != "legacy-hash",
++             "peer_port_selection must be 'tp-context' or 'legacy-hash'");
++    nic->peer_port_selection_ = peer_port_selection;
+     panic_if(peer_topology != "direct" && peer_topology != "l1-switch",
+              "peer_topology must be 'direct' or 'l1-switch'");
+     nic->peer_l1_switch_ = peer_topology == "l1-switch";
+@@ -4942,6 +5027,7 @@ gem5::NICTopologySCParams::create() const
+     nic->peer_switch_delay_ = peer_switch_delay;
+     nic->peer_link_overhead_bytes_ = peer_link_overhead_bytes;
+     std::cerr << "[NIC peer topology] mode=" << peer_topology
++              << " port_selection=" << peer_port_selection
+               << " port_map=";
+     for (uint32_t port = 0; port < nic->peer_port_map_.size(); ++port) {
+         if (port)
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 3326932..dbf81f6 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -179,6 +179,7 @@ class NICTopologySC : public sc_core::sc_module
+     // Network/MemoryBandwidth Params arrive as simulation ticks per byte.
+     double      peer_link_ticks_per_byte_ = 0.0;
+     uint32_t    ub_port_count_ = 1;
++    std::string peer_port_selection_ = "tp-context";
+     bool        peer_l1_switch_ = false;
+     std::vector<uint32_t> peer_port_map_;
+     uint32_t    peer_serialization_stages_ = 1;
+@@ -198,7 +199,8 @@ class NICTopologySC : public sc_core::sc_module
+                             uint64_t index);
+     bool peer_ring_tx_full();
+     void peer_ring_drain(sc_core::sc_time &delay);
+-    void peer_apply(const uint8_t *pkt, size_t pktlen);
++    void peer_apply(const uint8_t *pkt, size_t pktlen,
++                    uint32_t ingress_port = UINT32_MAX);
+ 
+     // Public so the params create() can install the GIC pin pointer.
+     ArmInterruptPin *interrupt = nullptr;
+@@ -459,14 +461,28 @@ class NICTopologySC : public sc_core::sc_module
+         uint32_t length = 0;
+         uint32_t offset = 0;
+         uint64_t request_id = 0;
++        uint32_t return_port = UINT32_MAX;
+     };
+     struct UdmaWriteRequest {
+         uint32_t remote_token_id = 0;
+         uint64_t remote_va = 0;
+         uint32_t offset = 0;
+         uint64_t request_id = 0;
++        uint32_t tpn = UINT32_MAX;
++        uint32_t source_port = UINT32_MAX;
+         std::vector<uint8_t> payload;
+     };
++    struct UdmaWriteAck {
++        uint64_t request_id = 0;
++        uint32_t return_port = UINT32_MAX;
++    };
++    struct UdmaTpRoute {
++        uint32_t tpid = 0;
++        uint32_t tpn_start = 0;
++        uint32_t tpn_count = 0;
++        uint32_t base_port = 0;
++        bool active = false;
++    };
+     struct UdmaIotlbKey {
+         uint32_t context_id = 0;
+         uint64_t va_page = 0;
+@@ -503,7 +519,8 @@ class NICTopologySC : public sc_core::sc_module
+     std::unordered_map<uint64_t, UdmaReadPending> udma_read_pending_;
+     std::deque<UdmaWriteRequest> udma_write_requests_;
+     std::deque<UdmaReadRequest> udma_read_requests_;
+-    std::deque<uint64_t> udma_write_acks_;
++    std::deque<UdmaWriteAck> udma_write_acks_;
++    std::unordered_map<uint32_t, UdmaTpRoute> udma_tp_routes_;
+     uint64_t udma_next_rma_id_ = 1;
+     std::list<UdmaIotlbKey> udma_iotlb_lru_;
+     std::unordered_map<UdmaIotlbKey, UdmaIotlbEntry, UdmaIotlbKeyHash>
+@@ -571,7 +588,11 @@ class NICTopologySC : public sc_core::sc_module
+     // send a WR (header + payload) to the peer NIC over peer_tx_out.
+     void peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken, uint64_t rva,
+                    uint32_t len, uint64_t imm, uint8_t order,
+-                   const uint8_t *payload, gem5::Tick tx_tick);
++                   const uint8_t *payload, gem5::Tick tx_tick,
++                   uint32_t tpn = UINT32_MAX,
++                   uint32_t forced_port = UINT32_MAX);
++    uint32_t peer_port_for_transport(uint32_t tpn, uint8_t op,
++                                     uint32_t dcna, uint32_t rtoken) const;
+     // pop the oldest posted receive on dest jetty `dj` (used by both the local
+     // doorbell path and the cross-node peer path).
+     using RecvT = std::tuple<uint32_t, uint32_t, uint64_t, uint64_t, int, uint32_t>;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.py b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+index 1f50e80..25be25e 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.py
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+@@ -73,7 +73,12 @@ class NICTopologySC(SystemC_ScModule):
+         "simulation ticks per serialized byte.")
+     ub_port_count = Param.Unsigned(1,
+         "Number of physical UB egress ports. Each port owns an independent "
+-        "serialization pipeline; flows are assigned deterministically.")
++        "serialization pipeline; the official path selects one through the "
++        "driver-programmed TP context.")
++    peer_port_selection = Param.String("tp-context",
++        "Physical-port selection source: tp-context uses the TP allocation "
++        "programmed by the official control path; legacy-hash preserves the "
++        "early mock datapath only for explicit regression runs.")
+     peer_topology = Param.String("direct",
+         "UB peer topology: direct or l1-switch")
+     peer_port_map = Param.String("",
+diff --git a/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh b/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh
+index 163cf41..f242557 100644
+--- a/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh
++++ b/eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh
+@@ -137,6 +137,7 @@ class SqWqe
+     bool owner() const { return (loadLe32(bytes.data()) >> 31) != 0; }
+     uint8_t opcode() const { return (loadLe32(bytes.data() + 4) >> 8) & 0xffU; }
+     uint16_t inlineLength() const { return loadLe32(bytes.data() + 4) >> 22; }
++    uint32_t tpn() const { return loadLe32(bytes.data() + 8) & 0xffffffU; }
+     uint8_t sgeCount() const { return loadLe32(bytes.data() + 8) >> 24; }
+     uint32_t remoteJetty() const { return loadLe32(bytes.data() + 12) & 0xfffffU; }
+     uint32_t remoteSegment() const { return remoteJetty(); }

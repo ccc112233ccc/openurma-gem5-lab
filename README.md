@@ -1,78 +1,75 @@
-# OpenURMA Tier-G interactive initramfs
+# OpenURMA + gem5 双节点全系统仿真实验室
 
-This directory builds an interactive ARM64 initramfs without changing the
-OpenURMA checkout.  Unlike OpenURMA's demonstration `init.c`, this guest does
-not run one command and power off: it loads the official kernel stack and then
-keeps a BusyBox shell attached to the gem5 serial console.
+本仓库从公开源码开始，构建可交互的 ARM64 gem5 全系统环境。两个独立 guest
+运行 openEuler OLK 6.6、官方 `ubcore/uburma/ubagg` 驱动、官方 UMDK/UDMA
+provider、`urma_admin` 和 `urma_perftest`；缺失的 UDMA/UB 硬件行为由 gem5
+设备模型补齐。当前版本已验证设备发现、EID 与链路状态、Jetty/TP、SQ/RQ/CQ、
+SEND/SEND_IMM、RMA READ/WRITE、双物理端口、TP 选路、L1 switch 拓扑和官方
+bonding 逻辑设备数据面。
 
-The current saved checkpoint runs the unmodified official UBFI, UBUS, UMMU,
-UBASE and UDMA modules through probe. UBASE creates `ubase.udma.0` and
-`ubase.unic.0`; official `udma.ko` binds to the UDMA auxiliary device,
-registers `udma0` with ubcore and creates `/dev/uburma/udma0`. The next
-saved stage gives the official device a configurable management-plane EID and
-reports its modeled 400-Gb/s port as `link ACTIVE`.  Official `urma_perftest`
-now creates its context, queues, Jettys and process-scoped TPs through the
-official stack and reaches the send/receive wait. An untagged development
-snapshot now decodes the official queue contexts and connects their SQ, RQ,
-doorbell and CQ memory to the modeled data path. End-to-end SQ-to-CQE runtime
-validation is still in progress, so the last validated stage remains the
-management-plane resource checkpoint.
+## 从零开始
 
-## Required prebuilt inputs
-
-- A built **OLK-6.6 ARM64** tree containing `vmlinux`, `ipv6.ko`, the official
-  `ubcore.ko`, and the official `uburma.ko`.
-- The OpenURMA `openurma_ubcore.ko` built against that exact kernel tree.
-- The vendored UMDK cross-built for ARM64 (`liburma`, `liburma_common`,
-  `urma_admin`, and `urma_perftest`).
-- A statically linked ARM64 BusyBox. On an ARM64 Ubuntu container the
-  `busybox-static` package normally supplies `/bin/busybox`.
-- An ARM64 cross compiler and `cpio`.
-
-OLK-6.6 is deliberate: the vendored UMDK v25.12.0 emits TLV ioctls, while the
-older OLK-5.10 `uburma` module in the original demo script expects plain C
-structures. The builder rejects that mismatched pairing and also verifies every
-module's `vermagic` against the selected kernel.
-
-## Build the image
-
-The OLK checkout must live on the container's case-sensitive ext4 filesystem.
-In the current lab it is `/opt/openurma-gem5-lab/oe66`; do **not** build the
-host bind-mounted `openurma-gem5-lab/oe66` tree because macOS's default
-case-insensitive filesystem aliases several distinct kernel paths.
-
-Run the packager inside the ARM64 build container:
+推荐环境是 Apple Silicon Mac + Docker Desktop；ARM64 Linux 主机同样可用。
+至少预留约 8 GiB 内存、80 GiB 磁盘空间。首次构建需要下载 gem5、OpenURMA、
+OpenClickNP、openEuler UMDK/UMMU/OLK 和 gem5 ARM 固件，并编译内核与 gem5，
+因此会花较长时间。后续执行是增量的。
 
 ```bash
-KSRC=/opt/openurma-gem5-lab/oe66 \
-ARM_BUILD=/workspace/openurma-gem5-lab/artifacts/umdk-build \
-BUSYBOX_ARM64=/bin/busybox \
-OPENURMA_ROOT=/workspace/OpenURMA \
-OUT=/workspace/openurma-gem5-lab/out/openurma-interactive.cpio.gz \
-  /workspace/openurma-gem5-lab/build-interactive-initramfs.sh
+git clone <本仓库的 GitHub URL>
+cd openurma-gem5-lab
+./setup.sh --jobs 2
 ```
 
-Output:
+`setup.sh` 完成以下工作并在每一步校验固定版本：
+
+1. 构建 Ubuntu 22.04 ARM64 工具容器；
+2. 拉取公开上游的精确基线，并从 `patches/source/` 恢复本实验的完整提交；
+3. 在 Docker 大小写敏感卷中拉取并编译 OLK，避免 macOS 文件名冲突；
+4. 编译带 OpenURMA 设备模型的 gem5、官方 UMDK/UDMA provider 和内核驱动；
+5. 生成带 BusyBox shell 的 initramfs，并核验 ELF 架构、内核 `vermagic` 和摘要。
+
+只验证源码拉取和补丁恢复，不进行长时间编译：
+
+```bash
+./setup.sh --sources-only
+```
+
+完整构建成功后启动默认的快速双节点：
+
+```bash
+./run-dual.sh
+./status-dual.sh
+```
+
+再开两个终端连接串口：
+
+```bash
+./attach-node0.sh
+./attach-node1.sh
+```
+
+两个 guest 都出现 shell 后，可以先运行：
 
 ```text
-out/openurma-interactive.cpio.gz
-out/openurma-interactive.manifest.txt
+urma_admin show
 ```
 
-The script performs no downloads. It packages the already-built modules and
-UMDK tools, builds the Tier-G `liburma_openurma.so` provider, the compact
-`k_smoke` check, and the 14-case `k_dataplane` exercise; it recursively copies
-their ARM64 shared-library dependencies and checks architecture plus kernel ABI
-before creating the archive.
+随后在 node0、node1 分别运行：
 
-The generated manifest records the archive digest plus the exact kernel,
-module, provider, helper and benchmark input paths and SHA-256 digests. The
-default dual-node launcher verifies that contract before boot and refuses a
-stale or truncated image. A deliberately supplied custom initramfs remains the
-caller's own artifact contract.
+```text
+# node0
+ou-lat-server --profile ctp-rm-send-imm-i128 20 128 21115
 
-If a module was built outside its usual tree, pass its full path with
-`UBCORE_KO=...`, `UBURMA_KO=...`, `IPV6_KO=...`, or `OPENURMA_KO=...`.
+# node1
+ou-lat-client --profile ctp-rm-send-imm-i128 20 128 21115
+```
+
+看到 node0 的 `Waiting for client to connect...` 表示服务端正在正常等待 node1，
+不是卡死。停止实验使用 `./stop-dual.sh`。更完整的 SEND/READ/WRITE 和包长扫描
+命令见后文。
+
+OLK-6.6 是有意选择的：当前官方 UMDK 使用 TLV ioctl，旧 OLK-5.10 的
+`uburma` ABI 与之不匹配。构建脚本会拒绝混用版本。
 
 ## Boot and attach
 
@@ -81,14 +78,14 @@ the required `M5_PATH` for the ARM boot loader and uses the persistent kernel
 copy exported by `build_olk66.sh`:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/run.sh
+./run.sh
 ```
 
 gem5's ARM UART opens a TCP terminal inside the container, normally port 3456.
 Keep the first terminal running and attach from a second host terminal:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/attach.sh
+./attach.sh
 ```
 
 If gem5 reports a different listener port, pass it explicitly, for example
@@ -160,7 +157,7 @@ The default profile is now the shortest path to an interactive, two-node
 functional check:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh
+./run-dual.sh
 ```
 
 It runs one `AtomicSimpleCPU` per guest with the UDMA provider and the same
@@ -172,7 +169,7 @@ resource setup, and end-to-end traffic checks.
 For a later timing/trend experiment, opt in explicitly to the server model:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh --profile server
+./run-dual.sh --profile server
 ```
 
 That profile still boots with `AtomicSimpleCPU`, switches to the four-core
@@ -193,7 +190,7 @@ propagation delay. The switch has independent output-port queues and an optional
 fixed forwarding delay:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
+./run-dual.sh \
   --profile server --ub-port-count 2 \
   --peer-topology l1-switch --peer-port-map 0,1 \
   --peer-port-selection tp-context \
@@ -230,7 +227,7 @@ Each simulated socket can advertise multiple physical UB ports without turning
 them into one wider link. For example, the current dual-port bring-up is:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
+./run-dual.sh \
   --profile fast --provider official --ub-port-count 2
 ```
 
@@ -255,12 +252,12 @@ for one TP to stripe over several ports, two NUMA sockets, or a separate UDMA
 instance per socket.
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh
-bash /Users/caobo/workspace/openurma-gem5-lab/status-dual.sh
+./run-dual.sh
+./status-dual.sh
 # after both guests report "guest shell ready"
-bash /Users/caobo/workspace/openurma-gem5-lab/sync-dual.sh
+./sync-dual.sh
 # after a completed timing run, require config + O3 + DMA evidence
-bash /Users/caobo/workspace/openurma-gem5-lab/validate-server-profile.sh \
+./validate-server-profile.sh \
   --require-runtime
 ```
 
@@ -268,8 +265,8 @@ Inspect the resolved profile without starting guests, or select the old
 no-cache/100G behavior explicitly:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh --print-config
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
+./run-dual.sh --print-config
+./run-dual.sh \
   --profile legacy
 ```
 
@@ -290,7 +287,7 @@ changes only the CPU interpretation while retaining the structural `udma400`
 link and UDMA settings:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/run-dual.sh \
+./run-dual.sh \
   --profile udma400 --cpu-mode atomic_hot
 ```
 
@@ -329,8 +326,8 @@ device-service and fitted bandwidth terms remain zero.
 Open two more host terminals:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/attach-node0.sh
-bash /Users/caobo/workspace/openurma-gem5-lab/attach-node1.sh
+./attach-node0.sh
+./attach-node1.sh
 ```
 
 The fixed assignments are:
@@ -366,14 +363,14 @@ zero stagger simply avoids an unnecessary pre-test catch-up cost.
 
 ```bash
 # quick functional run: defaults to 100 measured samples, 128-byte messages
-bash /Users/caobo/workspace/openurma-gem5-lab/run-latency.sh
+./run-latency.sh
 
 # comparison run matching the supplied hardware iteration count
-bash /Users/caobo/workspace/openurma-gem5-lab/run-latency.sh \
+./run-latency.sh \
   --profile ctp-rm-send-imm-i128 --samples 16384 --size 128
 
 # ask the instrumented stack to delimit/reset/dump gem5 ROI statistics
-bash /Users/caobo/workspace/openurma-gem5-lab/run-latency.sh \
+./run-latency.sh \
   --roi-stats --samples 16384 --size 128
 ```
 
@@ -423,7 +420,7 @@ booting a new pair. Both wrappers also accept `--roi-stats`, or equivalently
 For a reproducible size curve, use the sweep helper after `sync-dual.sh`:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/sweep-latency.sh \
+./sweep-latency.sh \
   --profile ctp-rm-send-imm-i128 --samples 16384
 ```
 
@@ -629,7 +626,7 @@ path instead, so a passive RMA target does not need to post a receive WQE.
 Stop only these two guests and their Ethernet relay with:
 
 ```bash
-bash /Users/caobo/workspace/openurma-gem5-lab/stop-dual.sh
+./stop-dual.sh
 ```
 
 ## Verified run (2026-09-10)
@@ -654,10 +651,10 @@ change the simulator/kernel ABI:
 
 | Component | Version or exact commit |
 | --- | --- |
-| gem5 | `v24.0.0.1`, commit `b1a44b89c7bae73fae2dc547bc1f871452075b85` |
-| OpenURMA | `0ae5dce300154d761f97095864bda0cf2546b265` |
+| gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `c8affd15e10f596e6eb7b2dbc64163affc3876c0` |
+| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `05fc6b2642c560cf42bdc4a47f0042154993dbba` |
 | OpenClickNP | `c1c6acc58032a1894507d88659b3cca668b0e1a5` |
-| vendored UMDK | `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58` |
+| vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `34960cc2610cda1319e999f15dc19ea62a1dde91` |
 | openEuler OLK-6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |
 
 The ARM firmware/resource bundle is gem5's official
@@ -676,7 +673,7 @@ After any currently running SCons process has finished, reproduce the patched
 simulator inside the ARM64 build container:
 
 ```bash
-docker exec -it openurma-repro-20260909 bash -lc \
+docker exec -it openurma-gem5-lab bash -lc \
   'JOBS=1 /workspace/openurma-gem5-lab/build_gem5.sh'
 ```
 
@@ -687,7 +684,7 @@ idempotently, installs both checked-in fixed topology sources, builds
 `libopenurma_sc_tlm.a` against gem5's embedded SystemC ABI, builds `m5term`, and
 finally invokes `scons --linker=gold --limit-ld-memory-usage
 build/ARM/gem5.opt USE_SYSTEMC=1` with
-`EXTRAS=/workspace/OpenURMA/eval/twonode/gem5_scaffold/src`. `EXTRAS` is
+`EXTRAS=/workspace/openurma-gem5-lab/sources/OpenURMA/eval/twonode/gem5_scaffold/src`. `EXTRAS` is
 required because Python's source-tree walk does not follow the
 `src/dev/openurma` symlink; without it, gem5 can finish successfully while
 silently omitting `UBController` and `NICTopologySC`. No top-level `SConstruct`

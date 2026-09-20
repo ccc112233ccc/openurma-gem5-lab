@@ -1,0 +1,16 @@
+From 1c701795d226e10f2e4e933c320dd27eaeab3f29 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Thu, 17 Sep 2026 20:06:02 +0800
+Subject: [PATCH 14/27] Pin synchronized send bandwidth instrumentation
+
+---
+ integration/umdk/vendor/umdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/integration/umdk/vendor/umdk b/integration/umdk/vendor/umdk
+index 6878bcb..097c3a5 160000
+--- a/integration/umdk/vendor/umdk
++++ b/integration/umdk/vendor/umdk
+@@ -1 +1 @@
+-Subproject commit 6878bcb26c10c415e662615730b2c946e533689f
++Subproject commit 097c3a5d6b2234d6a070e3bfb26f6f49f0ce26f8

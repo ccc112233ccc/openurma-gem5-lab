@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Paths are inside the ARM64 Linux build container. They may be overridden for
 # a different checkout while the documented lab layout remains the default.
-container="${OPENURMA_CONTAINER:-openurma-repro-20260909}"
+container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
 gem5="${OPENURMA_GEM5:-/workspace/openurma-gem5-lab/gem5/build/ARM/gem5.opt}"
 m5_path="${OPENURMA_M5_PATH:-/workspace/openurma-gem5-lab/system}"
 kernel="${OPENURMA_KERNEL:-/workspace/openurma-gem5-lab/artifacts/kernel/vmlinux}"
@@ -40,7 +40,7 @@ for resource in boot.arm64 boot.arm; do
 done
 
 echo "Starting the OpenURMA full-system guest. In a second terminal run:"
-echo "  bash /Users/caobo/workspace/openurma-gem5-lab/attach.sh"
+echo "  ./attach.sh"
 echo "The UART transcript is also written to $outdir/system.terminal."
 
 exec docker exec -it \
