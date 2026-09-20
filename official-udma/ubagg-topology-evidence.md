@@ -9,6 +9,31 @@ feeder passes the explicit two-node topology to the official
 
 ## Modeled hardware contract
 
+### Why the stock tools show five device/EID entries
+
+The five visible entries are not five ports and do not imply that gem5 is
+simulating two CPU packages.  They are one logical aggregation identity plus
+four physical identities required by the stock matrix-server balance
+provider:
+
+* one `bonding_dev_0` EID: the application-visible logical aggregation EID;
+* plane 0: one primary EID and one physical-port EID;
+* plane 1: one primary EID and one physical-port EID.
+
+The official ABI calls the two plane records `io_die_info[2]`.  More
+importantly, the unmodified UMDK provider fixes `PRIMARY_EID_NUM` to 2 and
+states that matrix-server multipath has two planes.  In `balance` mode it
+requires both primary EIDs, creates a physical context/Jetty for each, and
+schedules work across them.  This metadata is independent of the number of
+gem5 CPU cores.
+
+The provider also supports `standalone`, which consumes only
+`io_die_info[0]`.  That path always selects physical path 0 for matrix-server
+multipath; it does not turn two port EIDs under one record into balanced
+paths.  Therefore collapsing this lab topology to one populated record would
+either disable the exercised two-plane balance behavior or require modifying
+the official provider, contrary to this stage's design rule.
+
 For a configured 20-bit node EID `B`, `GET_SEID_INFO` exposes four identities:
 
 * primary EIDs: `B`, `B + 0x10000`

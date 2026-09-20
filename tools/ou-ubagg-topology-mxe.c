@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: MIT
-/* Supply the explicit two-node lab topology through the official UVS API. */
+/* Supply the explicit two-node lab topology through the official UVS API.
+ *
+ * The official matrix-server balance provider names these two entries
+ * io_die_info[], but consumes them as two data-plane planes: one primary EID
+ * plus up to nine port EIDs per plane.  They do not describe the gem5 CPU
+ * count.  Keeping both entries is required by the unmodified provider's
+ * PRIMARY_EID_NUM == 2 contract.
+ */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -60,14 +67,14 @@ static void fill_node(struct lab_topo_info *topo, uint32_t base,
 {
     compact_eid(topo->bonding_eid, bond);
     topo->is_cur_node = current;
-    for (uint32_t die = 0; die < IODIE_NUM; ++die) {
-        const uint32_t primary = base + die * 0x10000U;
-        const uint32_t port = base + (die + 2U) * 0x10000U;
-        const uint32_t peer_port = peer_base + (die + 2U) * 0x10000U;
-        compact_eid(topo->io_die_info[die].primary_eid, primary);
-        compact_eid(topo->io_die_info[die].port_eid[0], port);
-        compact_eid(topo->io_die_info[die].peer_port_eid[0], peer_port);
-        topo->io_die_info[die].socket_id = (int)die;
+    for (uint32_t plane = 0; plane < IODIE_NUM; ++plane) {
+        const uint32_t primary = base + plane * 0x10000U;
+        const uint32_t port = base + (plane + 2U) * 0x10000U;
+        const uint32_t peer_port = peer_base + (plane + 2U) * 0x10000U;
+        compact_eid(topo->io_die_info[plane].primary_eid, primary);
+        compact_eid(topo->io_die_info[plane].port_eid[0], port);
+        compact_eid(topo->io_die_info[plane].peer_port_eid[0], peer_port);
+        topo->io_die_info[plane].socket_id = (int)plane;
     }
 }
 
@@ -97,6 +104,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "official uvs_set_topo_info failed\n");
         return 1;
     }
-    printf("official UVS topology installed for node %u\n", node);
+    printf("official UVS balance topology installed for node %u\n", node);
+    printf("  logical aggregate EID : 0x%05x (bonding_dev_0)\n",
+           node == 0 ? bond0 : bond1);
+    printf("  plane 0 primary/port  : 0x%05x / 0x%05x\n",
+           node == 0 ? base0 : base1,
+           (node == 0 ? base0 : base1) + 0x20000U);
+    printf("  plane 1 primary/port  : 0x%05x / 0x%05x\n",
+           (node == 0 ? base0 : base1) + 0x10000U,
+           (node == 0 ? base0 : base1) + 0x30000U);
+    printf("  note: the two official io_die_info entries are balance planes,"
+           " not gem5 CPUs\n");
     return 0;
 }
