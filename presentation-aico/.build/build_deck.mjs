@@ -20,9 +20,9 @@ const FINAL_PPTX = path.join(OUTPUT_DIR, `OpenURMA_gem5_AICO_style_${VERSION}.pp
 
 const IMG_COVER = path.join(AICO, "assets/huawei-refs/covers/背景-深灰纹理.jpeg");
 const IMG_COVER_GEOM = path.join(AICO, "assets/huawei-refs/components/装饰-白色几何线框1.png");
-const IMG_BOOT = "/var/folders/yp/xpx6mk9x5xzgmpf95djdjwwc0000gn/T/codex-clipboard-d4ec0f4e-e2a8-4875-a56f-49109133a2d3.png";
-const IMG_ACTIVE = "/var/folders/yp/xpx6mk9x5xzgmpf95djdjwwc0000gn/T/codex-clipboard-f7af11e0-5108-4c5d-b56e-c98f871328f4.png";
-const IMG_RESULT = "/var/folders/yp/xpx6mk9x5xzgmpf95djdjwwc0000gn/T/codex-clipboard-e0a2b538-17e5-456c-815e-2728573719f7.png";
+const IMG_READ_RESULT = path.join(LAB, "evidence/official-rma-2026-09-19/01-command-and-result.png");
+const IMG_RESOURCES = path.join(LAB, "evidence/official-rma-2026-09-19/02-official-resources.png");
+const IMG_PORT_PACKETS = path.join(LAB, "evidence/official-rma-2026-09-19/03-dual-port-packets.png");
 
 // Noto Sans SC is the AICO HTML font. Hiragino Sans GB is used here because it
 // is available to the local PowerPoint renderer and preserves Chinese weight.
@@ -59,16 +59,12 @@ process.env.RUNTIME_NODE_MODULES = RUNTIME_NODE_MODULES;
 await fs.mkdir(BUILD_DIR, { recursive: true });
 await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
-const [coverBytes, coverGeomBytes, bootSource, activeSource, resultBytes] = await Promise.all([
+const [coverBytes, coverGeomBytes, readResultBytes, resourceBytes, portPacketBytes] = await Promise.all([
   fs.readFile(IMG_COVER),
   fs.readFile(IMG_COVER_GEOM),
-  fs.readFile(IMG_BOOT),
-  fs.readFile(IMG_ACTIVE),
-  fs.readFile(IMG_RESULT),
-]);
-const [bootBytes, activeBytes] = await Promise.all([
-  sharp(bootSource).extract({ left: 0, top: 430, width: 2174, height: 620 }).png().toBuffer(),
-  sharp(activeSource).extract({ left: 0, top: 0, width: 1640, height: 200 }).png().toBuffer(),
+  fs.readFile(IMG_READ_RESULT),
+  fs.readFile(IMG_RESOURCES),
+  fs.readFile(IMG_PORT_PACKETS),
 ]);
 
 const deck = Presentation.create({ slideSize: { width: 1280, height: 720 } });
@@ -230,605 +226,305 @@ function cornerBrackets(slide, position, color = C.red) {
 // 1. Cover
 {
   const s = deck.slides.add();
-  addImage(s, coverBytes, "image/jpeg", { left: 0, top: 0, width: 1280, height: 720 }, "AICO-PPT dark technical texture", "cover");
-  shape(s, "rect", { left: 0, top: 0, width: 1280, height: 720 }, "#11151C", "#11151C", 0).opacity = 0.18;
-  addImage(s, coverGeomBytes, "image/png", { left: 650, top: 30, width: 610, height: 520 }, "white geometric network artwork", "contain");
-  shape(s, "rect", { left: 72, top: 78, width: 38, height: 5 }, C.red, C.red, 0);
-  textBox(s, "OPENURMA × GEM5 / SYSTEMS TECH TALK", { left: 126, top: 69, width: 520, height: 24 }, {
-    typeface: MONO, fontSize: 14, bold: true, color: "#F0C3C6", wrap: "none",
+  addImage(s, coverBytes, "image/jpeg", { left: 0, top: 0, width: 1280, height: 720 }, "dark technical texture", "cover");
+  shape(s, "rect", { left: 0, top: 0, width: 1280, height: 720 }, "#10141B", "#10141B", 0).opacity = 0.22;
+  addImage(s, coverGeomBytes, "image/png", { left: 700, top: 24, width: 540, height: 495 }, "geometric network artwork", "contain");
+  shape(s, "rect", { left: 72, top: 76, width: 42, height: 5 }, C.red, C.red, 0);
+  textBox(s, "OPENURMA × GEM5 / TECHNICAL SHARING", { left: 128, top: 67, width: 500, height: 24 }, {
+    typeface: MONO, fontSize: 14, bold: true, color: "#E6B9BD", wrap: "none",
   });
-  textBox(s, "把 OpenURMA", { left: 72, top: 164, width: 650, height: 76 }, {
-    fontSize: 56, bold: true, color: C.paper, verticalAlignment: "middle",
+  textBox(s, "让官方 UB 全栈", { left: 72, top: 160, width: 650, height: 78 }, {
+    fontSize: 54, bold: true, color: C.paper, verticalAlignment: "middle",
   });
-  textBox(s, "跑进", { left: 72, top: 239, width: 170, height: 76 }, {
-    fontSize: 56, bold: true, color: C.paper, verticalAlignment: "middle",
+  textBox(s, "跑进 gem5", { left: 72, top: 238, width: 610, height: 78 }, {
+    fontSize: 58, bold: true, color: C.paper, verticalAlignment: "middle",
   });
-  textBox(s, "gem5", { left: 225, top: 239, width: 255, height: 76 }, {
-    typeface: MONO, fontSize: 56, bold: true, color: C.red2, verticalAlignment: "middle",
+  textBox(s, "设备发现、UMMU/UDMA、双端口聚合与双节点 RMA", { left: 76, top: 344, width: 700, height: 42 }, {
+    fontSize: 22, color: "#D7DCE5", autoFit: "shrinkText",
   });
-  textBox(s, "双节点全系统仿真、UDMA 设备模型与 SEND_IMM 路径", { left: 76, top: 342, width: 650, height: 42 }, {
-    fontSize: 22, color: "#D8DDE5", autoFit: "shrinkText",
+  const n0 = boxWithText(s, "gem5 node 0\nOLK 6.6 + UMDK", { left: 735, top: 510, width: 190, height: 78 }, {
+    fill: "#171B22", lineFill: "#A6AFBB", color: C.paper, typeface: MONO, fontSize: 14, radius: 9,
   });
-
-  const coverNode0 = boxWithText(s, "node 0\nserver", { left: 735, top: 508, width: 150, height: 74 }, {
-    fill: "#171B22", lineFill: "#A6AFBB", color: C.paper, typeface: MONO, fontSize: 15, radius: 9,
+  const n1 = boxWithText(s, "gem5 node 1\nOLK 6.6 + UMDK", { left: 1020, top: 510, width: 190, height: 78 }, {
+    fill: "#171B22", lineFill: C.red2, color: C.paper, typeface: MONO, fontSize: 14, radius: 9, lineWidth: 2,
   });
-  const coverNode1 = boxWithText(s, "node 1\nclient", { left: 1060, top: 508, width: 150, height: 74 }, {
-    fill: "#171B22", lineFill: C.red2, color: C.paper, typeface: MONO, fontSize: 15, radius: 9, lineWidth: 2,
-  });
-  connect(s, coverNode0, coverNode1, { color: C.red2, width: 3, bidirectional: true });
-  boxWithText(s, "400G / 100 ns", { left: 902, top: 524, width: 140, height: 42 }, {
-    fill: C.red, lineFill: C.red, color: C.paper, typeface: MONO, fontSize: 12, radius: 21,
+  connect(s, n0, n1, { color: C.red2, width: 3, bidirectional: true });
+  boxWithText(s, "2 × 400G", { left: 936, top: 528, width: 74, height: 38 }, {
+    fill: C.red, lineFill: C.red, color: C.paper, typeface: MONO, fontSize: 11, radius: 19,
   }).bringToFront();
-  line(s, 76, 604, 570, 0, "#737E8D", 1);
-  textBox(s, "技术分享 · 2026.09", { left: 76, top: 624, width: 260, height: 24 }, {
-    typeface: MONO, fontSize: 14, color: C.paper,
-  });
-  textBox(s, "ARM64 FULL SYSTEM  /  OFFICIAL UDMA PROVIDER  /  DUAL NODE", { left: 650, top: 626, width: 560, height: 22 }, {
+  line(s, 76, 608, 570, 0, "#737E8D", 1);
+  textBox(s, "技术分享 · 2026.09", { left: 76, top: 628, width: 260, height: 24 }, { typeface: MONO, fontSize: 14, color: C.paper });
+  textBox(s, "10 OFFICIAL KERNEL MODULES  /  DUAL PLANE  /  SEND + READ + WRITE", { left: 620, top: 628, width: 590, height: 22 }, {
     typeface: MONO, fontSize: 11, color: "#AEB7C5", alignment: "right", autoFit: "shrinkText", wrap: "none",
   });
-  addNotes(s,
-    "这是一场系统技术分享。开场问题是：在没有真实 UDMA 硬件的情况下，如何让官方 provider 继续执行 WQE、doorbell 与 CQ 轮询，并让两套 gem5 guest 真正完成一次跨节点 SEND_IMM。\n\n" +
-    "视觉参考：" + path.join(AICO, "references/design-system.md") + "、" + path.join(AICO, "references/huawei-style.md") + "。\n" +
-    "封面素材：" + IMG_COVER + "、" + IMG_COVER_GEOM + "。本 deck 未沿用 AICO 模板自带的 Huawei Logo、密级与免责声明。"
-  );
+  addNotes(s, "新版技术分享以当前官方驱动全栈为主线。核心问题是：保留官方驱动和 provider 的真实职责，只在 gem5 中补齐硬件行为，最终让两个独立全系统节点完成 SEND、READ、WRITE 和 UB 聚合。\n\n视觉沿用现有 AICO 风格，不使用企业 Logo、密级或免责声明。")
 }
 
-// 2. TOC
+// 2. System architecture
 {
   const s = deck.slides.add();
-  s.background.fill = C.paper;
-  textBox(s, "目录 / CONTENTS", { left: 60, top: 44, width: 300, height: 20 }, {
-    typeface: MONO, fontSize: 13, bold: true, color: C.red,
-  });
-  textBox(s, "今天讲四件事", { left: 60, top: 82, width: 400, height: 55 }, {
-    fontSize: 39, bold: true, color: C.ink,
-  });
-  line(s, 60, 146, 76, 0, C.red, 3);
+  header(s, "1 · 系统全景 / ARCHITECTURE", "一台 Apple Silicon Mac 运行两个独立 UB 全系统节点", 2);
 
-  const panel = roundRect(s, { left: 60, top: 180, width: 525, height: 440 }, C.bg, C.grid, 14, 1);
-  const center = boxWithText(s, "先看效果\n再拆路径", { left: 238, top: 326, width: 170, height: 110 }, {
-    fill: C.dark, lineFill: C.dark, color: C.paper, fontSize: 21, radius: 55,
-  });
-  const tocNodes = [
-    ["01", "系统全景", 95, 225],
-    ["02", "代码边界", 395, 225],
-    ["03", "执行机制", 95, 493],
-    ["04", "运行与观察", 395, 493],
-  ];
-  const nodeShapes = tocNodes.map(([num, label, x, y], i) => {
-    const n = boxWithText(s, `${num}\n${label}`, { left: x, top: y, width: 130, height: 80 }, {
-      fill: i === 0 ? C.redPale : C.paper,
-      lineFill: i === 0 ? C.red : C.border,
-      lineWidth: i === 0 ? 2 : 1,
-      color: i === 0 ? C.red : C.ink,
-      fontSize: 18,
-      typeface: FONT,
-    });
-    connect(s, n, center, { fromSide: x < 250 ? "right" : "left", toSide: x < 250 ? "left" : "right", color: C.border, width: 1.5, arrow: false });
-    return n;
-  });
-  panel.sendToBack();
-  center.bringToFront();
-  nodeShapes.forEach(n => n.bringToFront());
-
-  const items = [
-    ["01", "系统全景", "宿主、两套 guest 与 UB 数据路径"],
-    ["02", "代码边界", "官方 provider 与 gem5 设备模型如何分工"],
-    ["03", "执行机制", "一次 SEND_IMM 如何跨节点走完"],
-    ["04", "运行与观察", "如何复现，以及结果如何解释"],
-  ];
-  items.forEach(([num, title, sub], i) => {
-    const y = 197 + i * 105;
-    textBox(s, num, { left: 635, top: y + 7, width: 48, height: 30 }, {
-      typeface: MONO, fontSize: 16, bold: true, color: i === 0 ? C.red : C.grayBlue,
-    });
-    textBox(s, title, { left: 700, top: y, width: 410, height: 38 }, {
-      fontSize: 25, bold: true, color: i === 0 ? C.red : C.ink, autoFit: "shrinkText",
-    });
-    textBox(s, sub, { left: 700, top: y + 43, width: 440, height: 28 }, {
-      fontSize: 16, color: C.body, autoFit: "shrinkText",
-    });
-    textBox(s, String(i + 1).padStart(2, "0"), { left: 1160, top: y + 12, width: 50, height: 24 }, {
-      typeface: MONO, fontSize: 12, color: i === 0 ? C.red : C.grayBlue, alignment: "right",
-    });
-    if (i < items.length - 1) line(s, 635, y + 86, 575, 0, C.grid, 1);
-  });
-  footer(s, 2);
-  addNotes(s,
-    "目录按技术分享的讲解顺序组织：先看实验环境与运行现象，再拆官方代码和仿真设备的边界，随后解释跨节点执行与虚拟时间，最后给出复现方法和结果解读。\n\n" +
-    "规划文件：" + path.join(PRESENTATION_DIR, "OpenURMA_gem5_AICO.plan.md")
-  );
-}
-
-// 3. Target implementation stack
-{
-  const s = deck.slides.add();
-  header(s, "1.1 · 系统全景 / SETUP", "一台 Apple Silicon Mac 承载两套可交互的 ARM64 UB 客机", 3);
-
-  function guestStack(x, node, role, consolePort, eid, oobIp) {
-    const outer = roundRect(s, { left: x, top: 170, width: 520, height: 408 }, C.paper, C.grayBlue, 14, 1.5);
-    shape(s, "rect", { left: x + 1, top: 171, width: 518, height: 43 }, C.pale, C.pale, 0);
-    textBox(s, `${node} / ${role}`, { left: x + 18, top: 181, width: 210, height: 24 }, {
-      typeface: MONO, fontSize: 15, bold: true, color: C.ink, wrap: "none",
-    });
-    textBox(s, `gem5 24.0.0.1 · PL011 ${consolePort}`, { left: x + 240, top: 184, width: 260, height: 20 }, {
-      typeface: MONO, fontSize: 11, color: C.grayBlue, alignment: "right", autoFit: "shrinkText", wrap: "none",
-    });
-
-    const app = boxWithText(s, `urma_perftest send_lat  /  ${role.toLowerCase()}\n${eid}  ·  OOB ${oobIp}`, {
-      left: x + 20, top: 226, width: 480, height: 54,
-    }, { fill: C.pale, lineFill: C.grayBlue, color: C.ink, fontSize: 15, lineWidth: 1.2 });
-    const provider = boxWithText(s, "openEuler UMDK 25.12.0\nliburma + liburma-udma.so", {
-      left: x + 20, top: 288, width: 480, height: 48,
-    }, { fill: C.paper, lineFill: C.border, color: C.ink, fontSize: 15 });
-    const guest = boxWithText(s, "openEuler OLK 6.6 ARM64 kernel  +  BusyBox initramfs", {
-      left: x + 20, top: 344, width: 480, height: 42,
-    }, { fill: C.paper, lineFill: C.border, color: C.ink, fontSize: 14 });
-    const officialKmod = boxWithText(s, "uburma.ko + ubcore.ko\n官方内核模块", {
-      left: x + 20, top: 394, width: 285, height: 52,
-    }, { fill: C.paper, lineFill: C.border, color: C.ink, fontSize: 14 });
-    const addedKmod = boxWithText(s, "openurma_ubcore.ko\n注册 openurma0", {
-      left: x + 313, top: 394, width: 187, height: 52,
-    }, { fill: C.redPale, lineFill: C.red, color: C.red, fontSize: 14, lineWidth: 1.8 });
-    const cpu = boxWithText(s, "ArmAtomicSimpleCPU\n1 core · 3 GHz · no CPU cache", {
-      left: x + 20, top: 454, width: 294, height: 54,
-    }, { fill: C.dark, lineFill: C.dark, color: C.paper, typeface: MONO, fontSize: 13, radius: 8 });
-    const memory = boxWithText(s, "1 GB DDR3-1600\n1 channel", {
-      left: x + 322, top: 454, width: 178, height: 54,
-    }, { fill: C.pale, lineFill: C.border, color: C.ink, typeface: MONO, fontSize: 13, radius: 8 });
-    const nic = boxWithText(s, "NICTopologySC UDMA NIC · Doorbell / DMA / CQE", {
-      left: x + 20, top: 516, width: 480, height: 42,
-    }, { fill: C.redPale, lineFill: C.red, color: C.red, typeface: MONO, fontSize: 13, lineWidth: 1.8, radius: 8 });
-    outer.sendToBack();
-    return { app, provider, guest, officialKmod, addedKmod, cpu, memory, nic };
+  function hostNode(x, node, port, ip) {
+    const frame = roundRect(s, { left: x, top: 167, width: 500, height: 400 }, C.paper, C.grayBlue, 12, 1.4);
+    textBox(s, node, { left: x + 18, top: 180, width: 210, height: 25 }, { typeface: MONO, fontSize: 16, bold: true, color: C.ink });
+    textBox(s, `PL011 ${port} · OOB ${ip}`, { left: x + 245, top: 183, width: 235, height: 20 }, { typeface: MONO, fontSize: 11, color: C.grayBlue, alignment: "right" });
+    const app = boxWithText(s, "urma_perftest / urma_admin / ubagg_cli", { left: x + 18, top: 220, width: 464, height: 46 }, { fill: C.pale, lineFill: C.border, fontSize: 15 });
+    const umdk = boxWithText(s, "官方 UMDK\nliburma + UDMA provider + UBAGG provider", { left: x + 18, top: 275, width: 464, height: 55 }, { fill: C.paper, lineFill: C.border, fontSize: 15 });
+    const kernel = boxWithText(s, "openEuler OLK 6.6 ARM64\n10 个官方 UB 内核模块", { left: x + 18, top: 339, width: 464, height: 57 }, { fill: C.paper, lineFill: C.border, fontSize: 15 });
+    const cpu = boxWithText(s, "AtomicSimpleCPU · 1 core · 3 GHz\n1 GB DDR3-1600", { left: x + 18, top: 405, width: 220, height: 62 }, { fill: C.dark, lineFill: C.dark, color: C.paper, typeface: MONO, fontSize: 13, radius: 8 });
+    const nic = boxWithText(s, "NICTopologySC\nUBASE · UMMU · UDMA", { left: x + 247, top: 405, width: 235, height: 62 }, { fill: C.redPale, lineFill: C.red, color: C.red, typeface: MONO, fontSize: 13, lineWidth: 1.8, radius: 8 });
+    const ports = boxWithText(s, "port 0    port 1\n400G       400G", { left: x + 18, top: 478, width: 464, height: 66 }, { fill: C.paper, lineFill: C.red, color: C.ink, typeface: MONO, fontSize: 14, lineWidth: 1.6 });
+    frame.sendToBack();
+    return { app, nic, ports };
   }
-
-  const node0 = guestStack(60, "NODE 0", "SERVER", "3460", "EID fe80::1", "10.0.0.1");
-  const node1 = guestStack(700, "NODE 1", "CLIENT", "3470", "EID fe80::2", "10.0.0.2");
-
-  connect(s, node0.app, node1.app, { color: C.grayBlue, width: 1.5, dashed: true, bidirectional: true });
-  const oob = boxWithText(s, "OOB TCP\nsetup / control", { left: 590, top: 232, width: 100, height: 42 }, {
-    fill: C.paper, lineFill: C.border, color: C.grayBlue, typeface: MONO, fontSize: 11, radius: 20,
-  });
-  oob.bringToFront();
-
-  connect(s, node0.nic, node1.nic, { color: C.red, width: 3.5, bidirectional: true });
-  const ub = boxWithText(s, "UB DATA\n400G · 100 ns", { left: 586, top: 510, width: 108, height: 54 }, {
-    fill: C.dark, lineFill: C.dark, color: C.paper, typeface: MONO, fontSize: 12, radius: 27,
-  });
-  ub.bringToFront();
-
-  line(s, 320, 578, 0, 23, C.grayBlue, 1.5);
-  line(s, 960, 578, 0, 23, C.grayBlue, 1.5);
-  const host = roundRect(s, { left: 60, top: 601, width: 1160, height: 66 }, C.dark, C.dark, 10, 0);
-  textBox(s, "macOS HOST", { left: 82, top: 618, width: 140, height: 22 }, {
-    typeface: MONO, fontSize: 14, bold: true, color: C.paper, wrap: "none",
-  });
-  textBox(s, "MacBook Air · Apple M4 · 16 GB", { left: 222, top: 617, width: 280, height: 24 }, {
-    typeface: MONO, fontSize: 13, color: "#E5E8ED", autoFit: "shrinkText", wrap: "none",
-  });
-  textBox(s, "Docker Desktop Linux VM · aarch64 Ubuntu 22.04 container", { left: 500, top: 617, width: 435, height: 24 }, {
-    typeface: MONO, fontSize: 12, color: "#C7CDD8", autoFit: "shrinkText", wrap: "none",
-  });
-  textBox(s, "openurma-repro-20260909", { left: 940, top: 617, width: 255, height: 24 }, {
-    typeface: MONO, fontSize: 12, bold: true, color: "#F0C3C6", alignment: "right", autoFit: "shrinkText", wrap: "none",
-  });
-  textBox(s, "100 ns distributed-time synchronization runs beside the two guests; it is not a UB switch", {
-    left: 500, top: 643, width: 695, height: 15,
-  }, { typeface: MONO, fontSize: 9.5, color: "#9FA8B6", alignment: "right", autoFit: "shrinkText", wrap: "none" });
-  host.sendToBack();
-
-  addNotes(s,
-    "这页先建立运行层次。最底层是当前 macOS / Apple Silicon 宿主；Docker Desktop 中的 ARM64 Ubuntu 22.04 容器同时运行两个独立 gem5 24.0.0.1 进程。每个 gem5 进程包含一套可登录的 ARM64 full-system guest。\n\n" +
-    "guest 不是完整 openEuler 用户态发行版：它使用 openEuler OLK 6.6 ARM64 内核与 BusyBox initramfs。用户态运行基于官方源码适配的 urma_perftest，UDMA provider 子目录保持原样。官方 ubcore.ko 与 uburma.ko 继续运行，openurma_ubcore.ko 和 NICTopologySC 补齐设备注册与硬件行为。\n\n" +
-    "本页对齐当前 run-dual 快速配置：每节点 1 个 ArmAtomicSimpleCPU、3 GHz、无 CPU cache、1 GB DDR3-1600。manifest 虽保留 cache 参数，但 cpu_mode=atomic 时配置不会实例化 cache。红线是 400 Gbit/s、100 ns 的 UB 数据路径；灰色虚线是只负责建连和资源交换的 Ethernet OOB。\n\n" +
-    "来源：" + path.join(LAB, "run-dual/run-manifest.txt") + "；" +
-    path.join(LAB, "run-dual/node0/gem5.log") + "；" +
-    path.join(LAB, "README.md") + ":1-124。"
-  );
+  const h0 = hostNode(60, "NODE 0 / SERVER", "3460", "10.0.0.1");
+  const h1 = hostNode(720, "NODE 1 / CLIENT", "3470", "10.0.0.2");
+  connect(s, h0.app, h1.app, { color: C.grayBlue, width: 1.4, dashed: true, bidirectional: true });
+  boxWithText(s, "TCP OOB", { left: 590, top: 224, width: 100, height: 36 }, { fill: C.paper, lineFill: C.border, color: C.grayBlue, typeface: MONO, fontSize: 11, radius: 18 }).bringToFront();
+  connect(s, h0.ports, h1.ports, { color: C.red, width: 3.2, bidirectional: true });
+  boxWithText(s, "L1 SWITCH\n0↔0  1↔1", { left: 579, top: 487, width: 122, height: 50 }, { fill: C.dark, lineFill: C.dark, color: C.paper, typeface: MONO, fontSize: 11, radius: 25 }).bringToFront();
+  line(s, 310, 568, 0, 24, C.grayBlue, 1.5);
+  line(s, 970, 568, 0, 24, C.grayBlue, 1.5);
+  shape(s, "rect", { left: 60, top: 593, width: 1160, height: 70 }, C.dark, C.dark, 0);
+  textBox(s, "macOS / Apple Silicon", { left: 82, top: 612, width: 270, height: 25 }, { typeface: MONO, fontSize: 16, bold: true, color: C.paper });
+  textBox(s, "Docker Desktop ARM64 Linux · two gem5 24.0.0.1 processes", { left: 350, top: 612, width: 610, height: 25 }, { typeface: MONO, fontSize: 13, color: "#D0D5DE", alignment: "center" });
+  textBox(s, "100 ns sync quantum", { left: 970, top: 612, width: 225, height: 25 }, { typeface: MONO, fontSize: 13, color: "#F0C3C6", alignment: "right" });
+  addNotes(s, "当前 profile 是 fast/official：每节点一个 AtomicSimpleCPU，3 GHz，1 GB DDR3-1600；两个独立 gem5 进程分别启动 OLK 6.6 guest。OOB Ethernet 只负责资源交换，UB 数据走两条独立 400 Gbit/s 端口，经显式 L1 switch 映射。\n\n来源：" + path.join(LAB, "run-dual/run-manifest.txt"));
 }
 
-// 4. Working demo
+// 3. Official stack
 {
   const s = deck.slides.add();
-  header(s, "1.2 · 先看效果 / DEMO", "当前原型已经完成一次双节点 CTP/RM SEND_IMM", 4);
-
-  const stats = [
-    ["2", "独立 ARM64 Linux 节点", "分别启动、分别接入串口"],
-    ["ACTIVE", "openurma0 端口状态", "本地管理面报告端口 ACTIVE"],
-    ["128 B", "CTP/RM SEND_IMM", "服务端与客户端完成 20 次采样"],
+  header(s, "2 · 官方软件栈 / OFFICIAL STACK", "10 个官方内核模块从发现路径贯通到聚合数据面", 3);
+  const vals = [
+    ["层次", "官方模块", "当前已验证的职责"],
+    ["URMA 核心", "ubcore.ko · uburma.ko", "设备、EID、Segment、Jetty与用户接口"],
+    ["设备发现", "ubfi.ko · ubus.ko · hisi_ubus.ko", "UBIOS/UBC 表、资源窗口、配置消息与队列"],
+    ["地址转换", "ummu-core.ko · ummu.ko", "TID、上下文绑定、页表遍历、队列与 payload DMA"],
+    ["设备管理", "ubase.ko", "CmdQ、Mailbox、CtrlQ、事件与辅助设备"],
+    ["数据面", "udma.ko", "udma0、JFC/JFR/JFS/Jetty、TP、SQE/CQE"],
+    ["聚合", "ubagg.ko", "bonding_dev_0、双 primary plane 与双端口 balance"],
   ];
-  stats.forEach(([value, label, sub], i) => {
-    const x = 60 + i * 395;
-    textBox(s, value, { left: x, top: 170, width: 355, height: 68 }, {
-      typeface: MONO, fontSize: i === 1 ? 43 : 50, bold: true, color: C.red,
-      alignment: "center", verticalAlignment: "middle", autoFit: "shrinkText",
-    });
-    textBox(s, label, { left: x, top: 244, width: 355, height: 30 }, {
-      fontSize: 20, bold: true, color: C.ink, alignment: "center", autoFit: "shrinkText",
-    });
-    textBox(s, sub, { left: x + 15, top: 282, width: 325, height: 44 }, {
-      fontSize: 16, color: C.body, alignment: "center", autoFit: "shrinkText",
-    });
-    if (i < 2) line(s, x + 374, 180, 0, 136, C.grid, 1);
-  });
-
-  labelText(s, "WHAT HAPPENS", { left: 60, top: 365, width: 280, height: 20 });
-  const steps = [
-    ["启动两个 guest", "Linux + initramfs"],
-    ["加载基础模块", "ubcore / uburma"],
-    ["注册仿真设备", "openurma0 / ABI=udma"],
-    ["两端完成 send_lat", "CTP/RM SEND_IMM"],
-  ];
-  const nodes = steps.map(([title, sub], i) => boxWithText(s, `${title}\n${sub}`, {
-    left: 60 + i * 293, top: 402, width: 250, height: 98,
-  }, {
-    fill: i === 2 ? C.redPale : C.paper,
-    lineFill: i === 2 ? C.red : C.border,
-    lineWidth: i === 2 ? 2 : 1,
-    color: i === 2 ? C.red : C.ink,
-    fontSize: 18,
-  }));
-  for (let i = 0; i < nodes.length - 1; i++) connect(s, nodes[i], nodes[i + 1], { color: C.red2, width: 2 });
-  textBox(s, "后续页面沿着这条路径拆解：谁写 WQE，谁消费 Doorbell，谁完成 DMA 与 CQE。", {
-    left: 60, top: 548, width: 1160, height: 46,
-  }, { fontSize: 20, color: C.body, alignment: "center", autoFit: "shrinkText" });
-  addNotes(s,
-    "先展示运行现象，再进入机制。两个节点分别进入 Linux；urma_admin 能枚举 openurma0、eid0，并显示本地端口 ACTIVE；官方 provider 参与 WQE/CQE 热路径，整套系统完成 SEND_IMM 双端闭环。ACTIVE 只表示本地管理面状态，peer 连通要看双端 send_lat 是否真正完成。\n\n" +
-    "运行证据见用户提供的三张截图；当前 profile 见：" + path.join(LAB, "run-dual/run-manifest.txt")
-  );
-}
-
-// 5. Code boundary
-{
-  const s = deck.slides.add();
-  header(s, "2.1 · 代码边界 / BOUNDARY", "官方代码保持原有职责，gem5 补齐缺失的设备侧行为", 5);
-  const values = [
-    ["来源", "组件", "代码处理", "在请求路径中的作用"],
-    ["官方原样", "ubcore.ko + uburma.ko", "原样运行", "UB 核心与用户态 ioctl / mmap 通道"],
-    ["官方原样", "liburma-udma.so", "原样运行", "创建资源、编码 WQE、写 Doorbell、轮询 CQE"],
-    ["官方原样", "urma_admin", "原样运行", "枚举设备、EID 与 link 状态"],
-    ["官方基础 + 适配", "urma_perftest", "加入仿真适配", "保留 benchmark 主体，补 gem5 时钟、双端同步、ROI 与统计"],
-    ["本工程新增", "openurma_ubcore.ko", "新增 bridge", "实现 ubcore device ops，注册 openurma0 并下发资源描述"],
-    ["本工程新增", "NICTopologySC + UdmaSimAbi", "新增设备模型", "消费 Doorbell，DMA 读写 SQ/RQ/CQ，跨节点投递"],
-    ["本工程新增", "libummu.so.1 shim", "新增仿真 shim", "满足本次映射与记账，不等同完整 UMMU"],
-    ["本工程新增", "initramfs / run / sync / attach", "新增运行脚本", "构建镜像，启动与同步双节点，接入两个串口"],
-  ];
-  const table = s.tables.add({
-    rows: values.length,
-    columns: 4,
-    left: 60,
-    top: 164,
-    width: 1160,
-    height: 450,
-    columnWidths: [175, 270, 165, 550],
-    values,
-  });
+  const table = s.tables.add({ rows: vals.length, columns: 3, left: 60, top: 170, width: 1160, height: 350, columnWidths: [185, 390, 585], values: vals });
   table.borders.assign({ style: "solid", fill: "#000000", width: 1 });
   table.styleOptions = { headerRow: true, bandedRows: false };
-  for (let r = 0; r < values.length; r++) {
-    table.rows[r].height = r === 0 ? 46 : 50.5;
-    for (let c = 0; c < 4; c++) {
+  for (let r = 0; r < vals.length; r++) {
+    table.rows[r].height = r === 0 ? 48 : 50;
+    for (let c = 0; c < 3; c++) {
       const cell = table.getCell(r, c);
       cell.fill = r === 0 ? C.red : C.paper;
-      cell.text.style = {
-        typeface: c === 1 ? MONO : FONT,
-        fontSize: r === 0 ? 16 : (c === 3 ? 15 : 16),
-        bold: r === 0 || c === 0,
-        color: r === 0 ? C.paper : C.ink,
-        verticalAlignment: "middle",
-        alignment: c === 0 || c === 2 ? "center" : "left",
-        autoFit: "shrinkText",
-      };
-    }
-    if (r > 0) {
-      const kind = values[r][0];
-      const color = kind === "官方原样" ? C.ink : (kind.includes("适配") ? C.grayBlue : C.red);
-      table.getCell(r, 0).text.style = {
-        typeface: FONT, fontSize: 15, bold: true, color,
-        alignment: "center", verticalAlignment: "middle", autoFit: "shrinkText",
-      };
+      cell.text.style = { typeface: c === 1 ? MONO : FONT, fontSize: r === 0 ? 16 : 16, bold: r === 0 || c === 0, color: r === 0 ? C.paper : C.ink, verticalAlignment: "middle", alignment: c === 0 ? "center" : "left", autoFit: "shrinkText" };
     }
   }
-  shape(s, "rect", { left: 60, top: 632, width: 5, height: 31 }, C.red, C.red, 0);
-  textBox(s, "关键边界：CONFIG_UB_UDMA 关闭；本次没有加载官方 kernel UDMA 硬件驱动，硬件行为由仿真设备承接。", {
-    left: 79, top: 634, width: 1141, height: 28,
-  }, { fontSize: 16, bold: true, color: C.ink, autoFit: "shrinkText" });
-  addNotes(s,
-    "这页是软件归属的权威口径。可以称为官方原样运行的是 ubcore、uburma、urma_admin 和 UDMA userspace provider。urma_perftest 的主体来自官方 UMDK，但加入了仿真时间与统计适配。其余 bridge、仿真 NIC、同步和运行包装是本工程新增。\n\n" +
-    "来源：\n" +
-    path.join(LAB, "build_olk66.sh") + ":70-85（CONFIG_UB_UDMA disabled）\n" +
-    path.join(OPENURMA, "integration/umdk/vendor/umdk/src/urma/hw/udma") + "（官方 provider，工作树 clean）\n" +
-    path.join(OPENURMA, "integration/umdk/vendor/umdk/src/urma/tools/urma_perftest") + "（本地适配）\n" +
-    path.join(OPENURMA, "integration/umdk/kmod/openurma_ubcore.c") + "（新增）\n" +
-    path.join(OPENURMA, "eval/twonode/gem5_scaffold/src/UdmaSimAbi.hh") + " 与 NICTopologySC.cc（新增）"
-  );
+  metric(s, "10", "官方 UB 内核模块", { left: 60, top: 552, width: 250, height: 92 }, { valueSize: 35 });
+  metric(s, "5 + 3", "官方库/provider + 官方工具", { left: 345, top: 552, width: 300, height: 92 }, { valueSize: 33 });
+  metric(s, "0", "为仿真修改的官方驱动源码", { left: 680, top: 552, width: 300, height: 92 }, { valueSize: 35, valueColor: C.red, fill: C.redPale, lineFill: C.red });
+  metric(s, "udma0", "当前官方数据设备", { left: 1015, top: 552, width: 205, height: 92 }, { valueSize: 28 });
+  addNotes(s, "统计不包含 Linux 通用 ipv6.ko，也不包含我们自己的 openurma_ub_v2m.ko。10 个官方模块均以未修改源码加载；支持范围按已经通过的发现、控制和数据面路径计算，不等同每个模块的全部可选功能。\n\n来源：" + path.join(LAB, "overlay/init") + ":103-113；" + path.join(LAB, "official-udma/README.md") + ":20-45。")
 }
 
-// 6. Provider and simulated data path
+// 4. Responsibility boundary
 {
   const s = deck.slides.add();
-  header(s, "2.2 · 请求路径 / CODE PATH", "一次 SEND_IMM 从官方 provider 的 WQE 走到对端 CQE", 6);
-
-  const officialCode = `for (it = wr; it != NULL; it = it->next) {\n  ret = udma_u_post_one_wr(...);\n  wr_cnt++;\n}\nif (wr_cnt) {\n  UDMA_TO_DEVICE_BARRIER();\n  udma_update_sq_db(sq);\n}\n*db_addr = sq->pi;`;
-  const simCode = `if (off == doorbell) {\n  producer = loadLe32(data);\n  udma_enqueue_sq(jetty.id, producer);\n}\nudma_dma_ring(... sq_va ..., false);\n// decode WQE and transfer payload\nudma_dma_ring(... cq_va ..., true);`;
-  codeBlock(s, "OFFICIAL / udma_u_jfs.c + .h", officialCode, { left: 60, top: 162, width: 486, height: 218 }, { fontSize: 14 });
-  codeBlock(s, "ADDED / NICTopologySC.cc", simCode, { left: 60, top: 395, width: 486, height: 218 }, { accent: C.grayBlue, titleColor: "#AEB7C5", fontSize: 14 });
-
-  labelText(s, "OFFICIAL USERSPACE", { left: 590, top: 163, width: 240, height: 20 });
-  const p1 = boxWithText(s, "编码 WQE", { left: 590, top: 205, width: 160, height: 64 }, { fill: C.paper, lineFill: C.border, fontSize: 18 });
-  const p2 = boxWithText(s, "内存屏障", { left: 788, top: 205, width: 160, height: 64 }, { fill: C.paper, lineFill: C.border, fontSize: 18 });
-  const p3 = boxWithText(s, "写 Doorbell", { left: 986, top: 205, width: 160, height: 64 }, { fill: C.paper, lineFill: C.border, fontSize: 18 });
-  [p1, p2, p3].forEach((n) => n.bringToFront());
-  connect(s, p1, p2, { color: C.grayBlue, width: 2 });
-  connect(s, p2, p3, { color: C.grayBlue, width: 2 });
-  labelText(s, "ADDED GEM5 UDMA", { left: 590, top: 315, width: 240, height: 20 });
-
-  const g1 = boxWithText(s, "捕获 Doorbell", { left: 986, top: 342, width: 160, height: 64 }, { fill: C.redPale, lineFill: C.red, color: C.red, fontSize: 18, lineWidth: 2 });
-  const g2 = boxWithText(s, "DMA 读 SQ\n与 payload", { left: 788, top: 342, width: 160, height: 64 }, { fill: C.redPale, lineFill: C.red, color: C.red, fontSize: 17, lineWidth: 2 });
-  const g3 = boxWithText(s, "peer 投递", { left: 590, top: 342, width: 160, height: 64 }, { fill: C.redPale, lineFill: C.red, color: C.red, fontSize: 18, lineWidth: 2 });
-  connect(s, p3, g1, { kind: "straight", fromSide: "bottom", toSide: "top", color: C.red2, width: 2 });
-  connect(s, g1, g2, { fromSide: "left", toSide: "right", color: C.red, width: 2 });
-  connect(s, g2, g3, { fromSide: "left", toSide: "right", color: C.red, width: 2 });
-
-  const cqe = boxWithText(s, "CQE 回写", { left: 590, top: 478, width: 160, height: 64 }, { fill: C.redPale, lineFill: C.red, color: C.red, fontSize: 18, lineWidth: 2 });
-  const poll = boxWithText(s, "轮询完成", { left: 788, top: 478, width: 160, height: 64 }, { fill: C.paper, lineFill: C.border, color: C.ink, fontSize: 18 });
-  connect(s, g3, cqe, { kind: "straight", fromSide: "bottom", toSide: "top", color: C.red, width: 2 });
-  connect(s, cqe, poll, { color: C.grayBlue, width: 2 });
-  textBox(s, "官方 provider 读取 completion", { left: 788, top: 555, width: 358, height: 24 }, {
-    fontSize: 14, color: C.body, alignment: "center",
-  });
-  textBox(s, "CPU 负责 WQE 语义与队列推进；缺失的设备侧消费、DMA 和跨节点传输由 gem5 接管。", {
-    left: 590, top: 614, width: 556, height: 35,
-  }, { fontSize: 17, color: C.ink, bold: true, alignment: "center", autoFit: "shrinkText" });
-  addNotes(s,
-    "左上是官方 provider 的真实热路径：逐个编码 WR、执行 device barrier，然后写 SQ doorbell。右侧不是伪造 API 返回，而是仿真设备捕获 doorbell、DMA 读取客机内存中的 SQ/WQE 和 payload，再向 peer 投递并写回 CQE。官方 provider 最后仍通过原有 CQ polling 得到完成。\n\n" +
-    "来源：\n" +
-    path.join(OPENURMA, "integration/umdk/vendor/umdk/src/urma/hw/udma/udma_u_jfs.c") + ":821-837\n" +
-    path.join(OPENURMA, "integration/umdk/vendor/umdk/src/urma/hw/udma/udma_u_jfs.h") + ":129-133\n" +
-    path.join(OPENURMA, "eval/twonode/gem5_scaffold/src/NICTopologySC.cc") + ":2402-2421、1440-1457、1504-1523、1278-1287"
-  );
+  header(s, "3 · 代码边界 / RESPONSIBILITY", "软件继续做软件的事，模型只补硬件缺口", 4);
+  textBox(s, "官方软件路径", { left: 60, top: 176, width: 360, height: 36 }, { fontSize: 25, bold: true, color: C.ink });
+  const official = [
+    ["应用", "urma_perftest / urma_admin / ubagg_cli"],
+    ["UMDK", "liburma / UDMA provider / UBAGG provider"],
+    ["OLK", "10 个官方 UB 内核模块"],
+  ].map(([a,b], i) => boxWithText(s, `${a}\n${b}`, { left: 60, top: 230 + i * 96, width: 470, height: 72 }, { fill: C.paper, lineFill: C.border, fontSize: 17 }));
+  connect(s, official[0], official[1], { kind: "straight", fromSide: "bottom", toSide: "top", color: C.grayBlue, width: 2 });
+  connect(s, official[1], official[2], { kind: "straight", fromSide: "bottom", toSide: "top", color: C.grayBlue, width: 2 });
+  textBox(s, "gem5 设备侧", { left: 735, top: 176, width: 360, height: 36 }, { fontSize: 25, bold: true, color: C.red });
+  const sim = [
+    ["发现与固件", "UBIOS / UBC / UBUS / UBASE 响应"],
+    ["执行与 DMA", "UMMU 翻译、SQ/RQ/CQ、payload DMA"],
+    ["网络与完成", "TP 路由、双端口传输、CQE 与 MSI"],
+  ].map(([a,b], i) => boxWithText(s, `${a}\n${b}`, { left: 735, top: 230 + i * 96, width: 485, height: 72 }, { fill: C.redPale, lineFill: C.red, color: C.red, fontSize: 17, lineWidth: 1.6 }));
+  connect(s, sim[0], sim[1], { kind: "straight", fromSide: "bottom", toSide: "top", color: C.red2, width: 2 });
+  connect(s, sim[1], sim[2], { kind: "straight", fromSide: "bottom", toSide: "top", color: C.red2, width: 2 });
+  connect(s, official[2], sim[0], { color: C.red, width: 3 });
+  boxWithText(s, "MMIO · DMA · interrupt", { left: 554, top: 314, width: 158, height: 44 }, { fill: C.dark, lineFill: C.dark, color: C.paper, typeface: MONO, fontSize: 11, radius: 22 }).bringToFront();
+  shape(s, "rect", { left: 60, top: 565, width: 1160, height: 73 }, C.dark, C.dark, 0);
+  textBox(s, "不替换 WQE，不绕过 Doorbell，不在 benchmark 里复制远端内存", { left: 92, top: 585, width: 1096, height: 34 }, { fontSize: 22, bold: true, color: C.paper, alignment: "center", autoFit: "shrinkText" });
+  addNotes(s, "官方 provider 仍创建对象、编码 WQE、写 Doorbell并轮询完成；官方内核驱动仍执行 probe、资源管理、Mailbox和TP控制。gem5 承担真实硬件应完成的队列消费、DMA、包处理和中断。唯一测试仪器化是可选的分布式虚拟时间边界。")
 }
 
-// 7. Virtual time and link timing
+// 5. Hardware model
 {
   const s = deck.slides.add();
-  header(s, "3.1 · 虚拟时间 / TIMING", "100 ns 同步量子约束双进程因果推进，链路延迟来自传输机制", 7);
-  shape(s, "rect", { left: 60, top: 164, width: 780, height: 56 }, C.dark, C.dark, 0);
-  textBox(s, "t_delivery = t_send + payload_bits / 400 Gbit/s + 100 ns", { left: 83, top: 178, width: 734, height: 30 }, {
-    typeface: MONO, fontSize: 20, bold: true, color: C.paper, alignment: "center", autoFit: "shrinkText",
+  header(s, "4 · 仿真硬件 / DEVICE MODEL", "一个复合设备模型覆盖六组硬件契约", 5);
+  const core = boxWithText(s, "NICTopologySC\n复合 UB endpoint", { left: 485, top: 283, width: 310, height: 116 }, { fill: C.dark, lineFill: C.dark, color: C.paper, typeface: MONO, fontSize: 22, radius: 58 });
+  const blocks = [
+    ["UBIOS / UBC", "设备发现与资源表", 60, 174],
+    ["UBUS", "配置消息与资源窗口", 60, 430],
+    ["UBASE", "CmdQ / Mailbox / CtrlQ", 865, 174],
+    ["UMMU", "TID、页表与 IOTLB", 865, 430],
+    ["UDMA", "WQE、队列、DMA、CQE", 315, 536],
+    ["UB LINK", "双端口、L1 switch、时序", 705, 536],
+  ].map(([a,b,x,y], i) => {
+    const n = boxWithText(s, `${a}\n${b}`, { left: x, top: y, width: 355, height: 82 }, { fill: i >= 4 ? C.redPale : C.paper, lineFill: i >= 4 ? C.red : C.border, color: i >= 4 ? C.red : C.ink, typeface: i >= 4 ? MONO : FONT, fontSize: 17, lineWidth: i >= 4 ? 1.6 : 1 });
+    connect(s, n, core, { fromSide: x < 400 ? "right" : (x > 800 ? "left" : "top"), toSide: x < 400 ? "left" : (x > 800 ? "right" : "bottom"), color: i >= 4 ? C.red : C.grayBlue, width: 1.8, arrow: false });
+    return n;
   });
-  textBox(s, "* 当前空闲链路 / 单流近似；FIFO 排队由事件链另行体现", { left: 60, top: 224, width: 780, height: 16 }, {
-    fontSize: 10, color: C.grayBlue, alignment: "right", autoFit: "shrinkText",
+  core.bringToFront();
+  labelText(s, "INHERITED PIPELINE", { left: 485, top: 174, width: 250, height: 20 }, C.grayBlue);
+  textBox(s, "OpenURMA 原有 38 个 SystemC/TLM 模块作为 NIC 流水基础", { left: 430, top: 210, width: 420, height: 42 }, { fontSize: 17, color: C.body, alignment: "center", autoFit: "shrinkText" });
+  addNotes(s, "按顶层源码对象统计，当前主路径是 NICTopologySC，单节点测试还使用 WireLoopback。按功能边界统计，复合模型覆盖六组硬件职责。原项目的 38 个 SystemC/TLM 模块属于继承基础，不应全部归为本轮从零编写。\n\n来源：" + path.join(OPENURMA, "eval/twonode/gem5_scaffold/src/NICTopologySC.hh") + ":1-20。")
+}
+
+// 6. Data path
+{
+  const s = deck.slides.add();
+  header(s, "5 · 数据热路径 / RMA", "一条官方 READ WQE 如何跨两套 guest 完成", 6);
+  const stages = [
+    ["1", "官方 provider", "写 64 B WQEBB\n提交地址与长度"],
+    ["2", "SQ Doorbell", "udma.ko 推进 PI\n模型捕获写入"],
+    ["3", "UMMU + DMA", "按 TID 翻译 SQ\n读取 WQE 与 SGE"],
+    ["4", "READ request", "TP 选择端口\n跨 peer ring"],
+    ["5", "远端 DMA", "解析 rseg\n读取目标内存"],
+    ["6", "response + CQE", "回写本地 SGE\n完整响应后完成"],
+  ];
+  const nodes = stages.map(([n,t,b], i) => {
+    const x = 60 + (i % 3) * 395;
+    const y = i < 3 ? 190 : 430;
+    const box = boxWithText(s, `${n}  ${t}\n${b}`, { left: x, top: y, width: 340, height: 112 }, { fill: i >= 2 ? C.redPale : C.paper, lineFill: i >= 2 ? C.red : C.border, color: i >= 2 ? C.red : C.ink, fontSize: 18, lineWidth: i >= 2 ? 1.6 : 1 });
+    return box;
   });
+  connect(s, nodes[0], nodes[1], { color: C.grayBlue, width: 2 });
+  connect(s, nodes[1], nodes[2], { color: C.red2, width: 2 });
+  connect(s, nodes[2], nodes[3], { kind: "elbow", fromSide: "bottom", toSide: "top", color: C.red, width: 2 });
+  connect(s, nodes[3], nodes[4], { color: C.red, width: 2 });
+  connect(s, nodes[4], nodes[5], { color: C.red, width: 2 });
+  textBox(s, "大 payload 仍只占一个 WQEBB。模型按 8088 B 最大载荷分片，全部响应到齐后只生成一个 CQE。", { left: 120, top: 595, width: 1040, height: 46 }, { fontSize: 20, bold: true, color: C.ink, alignment: "center", autoFit: "shrinkText" });
+  addNotes(s, "READ 与 WRITE 均使用官方 provider 的固定格式 WQE。READ 的 payload 由远端 DMA 读取并分片返回；WRITE 则由发起端读取本地 SGE并在目标端写入。64 KiB READ/WRITE正式通过；单 WQE 的 1 MiB路径作为机制性诊断也已完成，但当前设备能力仍只声明64 KiB。\n\n来源：" + path.join(LAB, "official-udma/dual-node-perftest-evidence.md") + ":68-150。")
+}
 
-  labelText(s, "CONSERVATIVE ADVANCE", { left: 60, top: 246, width: 280, height: 20 });
-  const laneY0 = 300;
-  const laneY1 = 425;
-  textBox(s, "NODE 0", { left: 60, top: laneY0 + 15, width: 80, height: 24 }, { typeface: MONO, fontSize: 14, bold: true, color: C.ink });
-  textBox(s, "NODE 1", { left: 60, top: laneY1 + 15, width: 80, height: 24 }, { typeface: MONO, fontSize: 14, bold: true, color: C.ink });
-  line(s, 145, laneY0 + 34, 695, 0, C.border, 2);
-  line(s, 145, laneY1 + 34, 695, 0, C.border, 2);
-  const a = boxWithText(s, "doorbell\nt_send", { left: 175, top: laneY0, width: 130, height: 68 }, { fill: C.paper, lineFill: C.border, typeface: MONO, fontSize: 16 });
-  const b = boxWithText(s, "计算可交付时刻\n序列化 + 传播", { left: 365, top: laneY0, width: 190, height: 68 }, { fill: C.redPale, lineFill: C.red, color: C.red, fontSize: 16, lineWidth: 2 });
-  const c = boxWithText(s, "写入 peer ring", { left: 615, top: laneY0, width: 160, height: 68 }, { fill: C.paper, lineFill: C.border, fontSize: 16 });
-  connect(s, a, b, { color: C.red2, width: 2 });
-  connect(s, b, c, { color: C.red2, width: 2 });
-  const d = boxWithText(s, "同步窗口安全", { left: 365, top: laneY1, width: 190, height: 68 }, { fill: C.redPale, lineFill: C.red, color: C.red, fontSize: 16, lineWidth: 2 });
-  const e = boxWithText(s, "到期投递\n更新 RQ / CQ", { left: 615, top: laneY1, width: 160, height: 68 }, { fill: C.paper, lineFill: C.border, fontSize: 16 });
-  connect(s, c, d, { kind: "elbow", fromSide: "bottom", toSide: "top", color: C.red, width: 2 });
-  connect(s, d, e, { color: C.red, width: 2 });
+// 7. Aggregation topology
+{
+  const s = deck.slides.add();
+  header(s, "6 · UB 聚合 / DUAL PLANE", "一个逻辑 EID 映射到两个 primary plane 和两个端口", 7);
+  const logical = boxWithText(s, "bonding_dev_0\n逻辑聚合 EID 0x00200", { left: 90, top: 210, width: 270, height: 92 }, { fill: C.dark, lineFill: C.dark, color: C.paper, typeface: MONO, fontSize: 17, radius: 46 });
+  const p0 = boxWithText(s, "plane 0\nprimary 0x00100\nport EID 0x20100", { left: 70, top: 380, width: 210, height: 104 }, { fill: C.redPale, lineFill: C.red, color: C.red, typeface: MONO, fontSize: 14, lineWidth: 1.7 });
+  const p1 = boxWithText(s, "plane 1\nprimary 0x10100\nport EID 0x30100", { left: 315, top: 380, width: 210, height: 104 }, { fill: C.redPale, lineFill: C.red, color: C.red, typeface: MONO, fontSize: 14, lineWidth: 1.7 });
+  connect(s, logical, p0, { kind: "elbow", fromSide: "bottom", toSide: "top", color: C.red, width: 2 });
+  connect(s, logical, p1, { kind: "elbow", fromSide: "bottom", toSide: "top", color: C.red, width: 2 });
+  textBox(s, "官方 balance provider 为两个 primary EID 分别建立 context、Jetty 与 TP。两个 plane 都是活动路径，不是主备关系。", { left: 65, top: 525, width: 480, height: 78 }, { fontSize: 18, color: C.ink, alignment: "center", autoFit: "shrinkText" });
+  addImage(s, resourceBytes, "image/png", { left: 585, top: 175, width: 625, height: 352 }, "official resource and dual-port evidence", "contain");
+  textBox(s, "真实日志：两个 Jetty 使用独立 doorbell，TP 5 绑定 port 0，TP 6 绑定 port 1", { left: 600, top: 547, width: 595, height: 48 }, { fontSize: 18, bold: true, color: C.ink, alignment: "center", autoFit: "shrinkText" });
+  textBox(s, "urma_admin 的 5 个可见 EID = 1 个逻辑聚合身份 + 2 个 primary EID + 2 个 port EID", { left: 90, top: 625, width: 1100, height: 30 }, { typeface: MONO, fontSize: 15, color: C.red, alignment: "center", autoFit: "shrinkText" });
+  addNotes(s, "官方 ABI 名为 io_die_info[2]，但 UMDK balance 路径明确按两个 data-plane plane 使用。standalone 只使用 plane 0，并不会在同一记录的两个 port EID 间自动 balance。\n\n来源：" + path.join(LAB, "official-udma/ubagg-topology-evidence.md") + ":12-45；截图：" + IMG_RESOURCES);
+}
 
+// 8. Virtual time
+{
+  const s = deck.slides.add();
+  header(s, "7 · 时间与链路 / VIRTUAL TIME", "跨进程推进遵循 100 ns 保守同步边界", 8);
+  shape(s, "rect", { left: 60, top: 166, width: 760, height: 58 }, C.dark, C.dark, 0);
+  textBox(s, "t_arrival = t_send + serialization(payload, 400G) + 100 ns", { left: 78, top: 181, width: 724, height: 28 }, { typeface: MONO, fontSize: 19, bold: true, color: C.paper, alignment: "center", autoFit: "shrinkText" });
+  const a = boxWithText(s, "node 0\n发布带 arrival tick 的 packet", { left: 90, top: 310, width: 250, height: 92 }, { fill: C.paper, lineFill: C.border, fontSize: 17 });
+  const b = boxWithText(s, "100 ns\nlookahead window", { left: 500, top: 310, width: 230, height: 92 }, { fill: C.redPale, lineFill: C.red, color: C.red, typeface: MONO, fontSize: 16, lineWidth: 2 });
+  const c = boxWithText(s, "node 1\n到达安全边界后消费 packet", { left: 880, top: 310, width: 250, height: 92 }, { fill: C.paper, lineFill: C.border, fontSize: 17 });
+  connect(s, a, b, { color: C.red2, width: 2.5 });
+  connect(s, b, c, { color: C.red2, width: 2.5 });
+  line(s, 130, 485, 960, 0, C.grayBlue, 1.5);
   for (let i = 0; i < 6; i++) {
-    const x = 145 + i * 139;
-    line(s, x, 525, 0, 18, i === 0 || i === 5 ? C.red : C.border, i === 0 || i === 5 ? 2 : 1);
-    textBox(s, `${i * 100} ns`, { left: x - 30, top: 548, width: 70, height: 18 }, { typeface: MONO, fontSize: 10, color: C.grayBlue, alignment: "center" });
+    const x = 130 + i * 192;
+    line(s, x, 476, 0, 18, i === 0 || i === 5 ? C.red : C.border, i === 0 || i === 5 ? 2 : 1);
+    textBox(s, `${i * 100} ns`, { left: x - 35, top: 510, width: 80, height: 18 }, { typeface: MONO, fontSize: 10, color: C.grayBlue, alignment: "center" });
   }
-  line(s, 145, 534, 695, 0, C.grayBlue, 1.5);
-  textBox(s, "两端只推进到共同可证明安全的虚拟时间边界", { left: 180, top: 586, width: 625, height: 28 }, {
-    fontSize: 17, color: C.body, alignment: "center",
-  });
-
-  roundRect(s, { left: 885, top: 164, width: 335, height: 468 }, C.paper, C.border, 14, 1);
-  labelText(s, "RUN MANIFEST", { left: 910, top: 188, width: 190, height: 20 });
-  const params = [
-    ["peer link", "400 Gbit/s"],
-    ["propagation", "100 ns"],
-    ["sync quantum", "100 ns"],
-    ["serialization", "1 stage"],
-    ["switch delay", "0 ns"],
-    ["fixed service add-ons", "0 ns"],
-    ["data pipeline", "pipe_data=0"],
-  ];
-  params.forEach(([k, v], i) => {
-    const y = 232 + i * 52;
-    textBox(s, k, { left: 910, top: y, width: 165, height: 22 }, { typeface: MONO, fontSize: 12, color: C.body, autoFit: "shrinkText" });
-    textBox(s, v, { left: 1068, top: y - 2, width: 125, height: 25 }, {
-      typeface: MONO, fontSize: 14, bold: true, color: k === "sync quantum" ? C.red : C.ink, alignment: "right", autoFit: "shrinkText",
-    });
-    if (i < params.length - 1) line(s, 910, y + 33, 283, 0, C.grid, 1);
-  });
-  addNotes(s,
-    "模型把两个 gem5 进程的推进限制在保守同步窗口内。发送侧基于 payload 大小与 400 Gbit/s 链路计算序列化时间，再叠加 100 ns propagation。peer 事件只有在接收端推进到安全边界后才投递，避免宿主调度快慢改变事件因果顺序。\n\n" +
-    "当前没有用固定 service delay 去拟合实测：direct_wqe_latency、sq_fetch_latency、sq_wqebb_latency、payload_dma_latency 均为 0；switch delay 也为 0。\n\n" +
-    "来源：" + path.join(LAB, "run-dual/run-manifest.txt") + "；" +
-    path.join(OPENURMA, "eval/twonode/gem5_scaffold/src/NICTopologySC.cc") + ":2239-2250、2147-2187。"
-  );
+  textBox(s, "宿主调度只影响仿真跑得快慢，不改变 packet 的虚拟到达顺序", { left: 185, top: 555, width: 910, height: 40 }, { fontSize: 22, bold: true, color: C.ink, alignment: "center", autoFit: "shrinkText" });
+  textBox(s, "当前未增加拟合实测的固定 DMA / WQE / switch service delay", { left: 250, top: 610, width: 780, height: 28 }, { typeface: MONO, fontSize: 14, color: C.red, alignment: "center" });
+  addNotes(s, "链路按每端口独立 400 Gbit/s 序列化时间线推进，一程传播100 ns；两个gem5进程每100 ns建立保守同步边界。当前 fixed service add-ons 与 switch delay均为0，结果用于验证因果关系与趋势，不用额外延迟项拟合真实交换机绝对值。\n\n来源：" + path.join(LAB, "run-dual/run-manifest.txt"));
 }
 
-// 8. Boot and ACTIVE observation
+// 9. Experiment matrix
 {
   const s = deck.slides.add();
-  header(s, "3.2 · 运行观察 / RUNTIME", "启动日志显示设备已注册，urma_admin 显示本地端口 ACTIVE", 8);
-
-  labelText(s, "GUEST BOOT", { left: 60, top: 160, width: 220, height: 20 });
-  const bootPos = { left: 60, top: 192, width: 850, height: 274 };
-  shape(s, "rect", bootPos, C.code, C.code, 0);
-  addImage(s, bootBytes, "image/png", { left: 70, top: 202, width: 830, height: 254 }, "Guest boot log showing ubcore, uburma and openurma_ubcore modules", "contain");
-  cornerBrackets(s, bootPos, C.red);
-
-  textBox(s, "日志里能读出什么", { left: 955, top: 184, width: 250, height: 34 }, { fontSize: 21, bold: true, color: C.ink });
-  const ev = [
-    ["01", "ubcore.ko 与 uburma.ko 已加载"],
-    ["02", "openurma_ubcore.ko 已加载"],
-    ["03", "openurma0 注册为 UB / ABI=udma"],
+  header(s, "8 · 已验证实验 / COVERAGE", "官方路径已完成 SEND、READ、WRITE 与双端口聚合", 9);
+  const vals = [
+    ["路径", "规模", "结果", "证据含义"],
+    ["CTP SEND_IMM", "128 B", "双端返回 0", "官方 SQE、RQE、CQE 与跨节点往返"],
+    ["WRITE bandwidth", "128 B", "349.10 MiB/s", "小包 WQE 与目标端 DMA"],
+    ["WRITE bandwidth", "8 KiB", "22,217.84 MiB/s", "8088 + 104 B 分片与 ACK"],
+    ["WRITE bandwidth", "64 KiB", "44,074.69 MiB/s", "9 个 fragment，单个 CQE"],
+    ["READ bandwidth", "128 B", "731.43 MiB/s", "请求、远端 DMA、响应、本地 DMA"],
+    ["READ bandwidth", "8 KiB", "22,923.99 MiB/s", "双端同时发流，完整返回"],
+    ["READ bandwidth", "64 KiB", "24,466.37 MiB/s", "正式 capability 上限内通过"],
+    ["UBAGG balance", "128 B READ", "2.88 µs", "两个 primary plane 在 port 0/1 交替"],
   ];
-  ev.forEach(([n, t], i) => {
-    textBox(s, n, { left: 955, top: 241 + i * 67, width: 42, height: 24 }, { typeface: MONO, fontSize: 15, bold: true, color: C.red });
-    textBox(s, t, { left: 1002, top: 236 + i * 67, width: 205, height: 45 }, { fontSize: 16, color: C.ink, bold: true, autoFit: "shrinkText" });
-  });
-
-  labelText(s, "URMA_ADMIN SHOW", { left: 60, top: 497, width: 240, height: 20 });
-  const activePos = { left: 60, top: 528, width: 1160, height: 102 };
-  shape(s, "rect", activePos, C.code, C.code, 0);
-  addImage(s, activeBytes, "image/png", { left: 70, top: 536, width: 1140, height: 86 }, "urma_admin output showing openurma0 and ACTIVE link", "contain");
-  cornerBrackets(s, activePos, C.red);
-  boxWithText(s, "ACTIVE", { left: 1070, top: 486, width: 134, height: 35 }, {
-    fill: C.red, lineFill: C.red, color: C.paper, typeface: MONO, fontSize: 17, radius: 18,
-    autoFit: "none", insets: { top: 0, right: 0, bottom: 0, left: 0 },
-  });
-  addNotes(s,
-    "启动日志说明模块顺序和设备注册已经完成。urma_admin 的输出来自官方用户态管理工具，它通过正式 API 枚举到 openurma0、eid0，并显示本地端口 ACTIVE。当前驱动向管理面报告 ACTIVE；该状态本身不等价于 peer 已连通，仍需观察双端 send_lat 是否完成。\n\n" +
-    "用户截图：\n" + IMG_BOOT + "\n" + IMG_ACTIVE + "\n" +
-    "相关源码：" + path.join(OPENURMA, "integration/umdk/kmod/openurma_ubcore.c") + ":1366-1423。"
-  );
+  const table = s.tables.add({ rows: vals.length, columns: 4, left: 60, top: 165, width: 1160, height: 430, columnWidths: [250, 170, 210, 530], values: vals });
+  table.borders.assign({ style: "solid", fill: "#000000", width: 1 });
+  table.styleOptions = { headerRow: true, bandedRows: false };
+  for (let r = 0; r < vals.length; r++) {
+    table.rows[r].height = r === 0 ? 46 : 48;
+    for (let c = 0; c < 4; c++) {
+      const cell = table.getCell(r, c);
+      cell.fill = r === 0 ? C.red : (r === vals.length - 1 ? C.redPale : C.paper);
+      cell.text.style = { typeface: c <= 2 ? MONO : FONT, fontSize: r === 0 ? 15 : 14.5, bold: r === 0 || c === 0, color: r === 0 ? C.paper : (r === vals.length - 1 ? C.red : C.ink), verticalAlignment: "middle", alignment: c === 3 ? "left" : "center", autoFit: "shrinkText" };
+    }
+  }
+  textBox(s, "正式 READ/WRITE capability 当前为 64 KiB；1 MiB 单 WQE 仅作为机制性诊断，不写进正式设备能力。", { left: 80, top: 620, width: 1120, height: 32 }, { fontSize: 17, bold: true, color: C.ink, alignment: "center", autoFit: "shrinkText" });
+  addNotes(s, "带宽数字来自五次迭代的结构性验证，不用于与真实板卡作性能对标。实验说明 WQE、UMMU、fragment streaming、远端DMA和CQE链路已经闭合。UBAGG READ latency只有两条测量样本，作用是功能证据。\n\n来源：" + path.join(LAB, "official-udma/dual-node-perftest-evidence.md") + ":68-150；" + path.join(LAB, "official-udma/ubagg-dataplane-evidence.md") + ":118-190。")
 }
 
-// 9. Reproduction commands
+// 10. Command evidence
 {
   const s = deck.slides.add();
-  header(s, "4.1 · 动手复现 / TRY IT", "两端各一条命令启动同一 CTP/RM/SEND_IMM 测试", 9);
-
-  const server = roundRect(s, { left: 60, top: 172, width: 510, height: 330 }, C.code, C.code, 14, 0);
-  const client = roundRect(s, { left: 710, top: 172, width: 510, height: 330 }, C.code, C.code, 14, 0);
-  shape(s, "rect", { left: 60, top: 172, width: 6, height: 330 }, C.grayBlue, C.grayBlue, 0);
-  shape(s, "rect", { left: 714, top: 172, width: 6, height: 330 }, C.red, C.red, 0);
-  textBox(s, "NODE 0 / SERVER", { left: 86, top: 194, width: 300, height: 24 }, { typeface: MONO, fontSize: 14, bold: true, color: "#AEB7C5" });
-  textBox(s, "ou-lat-server --profile\nctp-rm-send-imm-i128 20 128 21115", { left: 86, top: 244, width: 452, height: 90 }, {
-    typeface: MONO, fontSize: 20, bold: true, color: C.paper, autoFit: "shrinkText",
-  });
-  textBox(s, "创建 Jetty / MR / JFC\n监听控制通道并等待客户端", { left: 86, top: 382, width: 452, height: 68 }, {
-    fontSize: 18, color: "#C9CFD8", autoFit: "shrinkText",
-  });
-
-  textBox(s, "NODE 1 / CLIENT", { left: 742, top: 194, width: 300, height: 24 }, { typeface: MONO, fontSize: 14, bold: true, color: C.red2 });
-  textBox(s, "ou-lat-client --profile\nctp-rm-send-imm-i128 20 128 21115", { left: 742, top: 244, width: 446, height: 90 }, {
-    typeface: MONO, fontSize: 20, bold: true, color: C.paper, autoFit: "shrinkText",
-  });
-  textBox(s, "连接服务端并交换资源\n发起 CTP/RM SEND_IMM", { left: 742, top: 382, width: 446, height: 68 }, {
-    fontSize: 18, color: "#C9CFD8", autoFit: "shrinkText",
-  });
-  connect(s, server, client, { color: C.red, width: 4, bidirectional: true });
-  boxWithText(s, "400 Gbit/s\npeer path", { left: 584, top: 285, width: 112, height: 70 }, {
-    fill: C.paper, lineFill: C.red, color: C.red, typeface: MONO, fontSize: 15, radius: 35, lineWidth: 2,
-  });
-
-  labelText(s, "PROFILE EXPANSION", { left: 60, top: 535, width: 240, height: 20 });
-  const profile = [
-    ["传输模式", "CTP / RM"],
-    ["语义", "SEND_IMM"],
-    ["JFS post list", "1"],
-    ["inline", "128 B"],
-    ["measured", "20"],
-  ];
-  profile.forEach(([k, v], i) => {
-    const x = 60 + i * 232;
-    textBox(s, k, { left: x, top: 574, width: 205, height: 22 }, { typeface: MONO, fontSize: 12, color: C.body, alignment: "center", autoFit: "shrinkText" });
-    textBox(s, v, { left: x, top: 606, width: 205, height: 28 }, { typeface: MONO, fontSize: 17, bold: true, color: i === 1 ? C.red : C.ink, alignment: "center", autoFit: "shrinkText" });
-    if (i < profile.length - 1) line(s, x + 220, 570, 0, 69, C.grid, 1);
-  });
-  textBox(s, "包装脚本只固定双端角色与参数；底层运行基于官方源码适配的 urma_perftest，UDMA provider 子目录保持原样。", { left: 60, top: 653, width: 1160, height: 24 }, {
-    fontSize: 15, color: C.body, alignment: "center", autoFit: "shrinkText",
-  });
-  addNotes(s,
-    "send_lat 需要服务端和客户端各运行一个进程，因为两端先交换地址、EID、Jetty 等资源信息，再进入数据测量。包装命令统一了 CTP/RM/SEND_IMM、JFS post list、inline 与采样参数；底层运行基于官方源码适配的 urma_perftest，UDMA provider 子目录未改。\n\n" +
-    "相关文件：" + path.join(LAB, "overlay/usr/local/bin/ou-lat-server") + "、" +
-    path.join(LAB, "overlay/usr/local/bin/ou-lat-client") + "、" +
-    path.join(OPENURMA, "integration/umdk/vendor/umdk/src/urma/tools/urma_perftest")
-  );
+  header(s, "9.1 · 运行证据 / COMMAND", "官方 urma_perftest 完成 UBAGG READ 时延测试", 10);
+  addImage(s, readResultBytes, "image/png", { left: 60, top: 156, width: 1160, height: 522 }, "official urma_perftest READ latency evidence", "contain");
+  addNotes(s, "截图由真实 PL011 UART 记录生成，仅合并终端自动换行，数值未改写。命令使用 bonding_dev_0、CTP、balance和128 B READ；两次连续运行都返回0。当前短样本只用于证明可重复执行。\n\n截图：" + IMG_READ_RESULT)
 }
 
-// 10. Result interpretation
+// 11. Packet evidence
 {
   const s = deck.slides.add();
-  header(s, "4.2 · 结果解读 / OBSERVATION", "为什么 20 个样本下 p99 会等于最大值", 10);
-  const resultPos = { left: 60, top: 160, width: 1160, height: 215 };
-  shape(s, "rect", resultPos, C.code, C.code, 0);
-  addImage(s, resultBytes, "image/png", { left: 70, top: 168, width: 1140, height: 199 }, "128-byte send_lat result with 20 samples and latency statistics", "contain");
-  cornerBrackets(s, resultPos, C.red);
-  labelText(s, "NODE 0 / SERVER OUTPUT", { left: 60, top: 380, width: 250, height: 18 });
-
-  const metrics = [
-    ["44.03 µs", "min / median"],
-    ["52.15 µs", "average"],
-    ["35.16 µs", "stdev"],
-    ["205.42 µs", "max / p99"],
-  ];
-  metrics.forEach(([v, l], i) => metric(s, v, l, { left: 60 + i * 293, top: 402, width: 265, height: 92 }, {
-    valueColor: i === 3 ? C.red : C.ink,
-    fill: i === 3 ? C.redPale : C.paper,
-    lineFill: i === 3 ? C.red : C.border,
-    valueSize: 28,
-  }));
-
-  roundRect(s, { left: 60, top: 521, width: 490, height: 112 }, C.redPale, C.red, 12, 1.5);
-  labelText(s, "WHY P99 = MAX", { left: 82, top: 540, width: 200, height: 20 });
-  textBox(s, "ceil(0.99 × 20) = 20", { left: 82, top: 570, width: 430, height: 30 }, {
-    typeface: MONO, fontSize: 18, bold: true, color: C.red, autoFit: "shrinkText",
-  });
-  textBox(s, "nearest-rank 取第 20 个样本，因此当前 p99 与最大值相同。", { left: 82, top: 607, width: 430, height: 20 }, {
-    fontSize: 13, color: C.ink, autoFit: "shrinkText",
-  });
-
-  roundRect(s, { left: 575, top: 521, width: 645, height: 112 }, C.paper, C.border, 12, 1);
-  labelText(s, "FOLLOW-UP EXPERIMENTS", { left: 598, top: 540, width: 220, height: 20 }, C.grayBlue);
-  const next = [
-    ["01", "样本扩到 1001+，再讨论尾延迟"],
-    ["02", "按 2 B 到 4096 B 扫描包长趋势"],
-    ["03", "直连与 L1 交换拓扑分别比较"],
-  ];
-  next.forEach(([n, t], i) => {
-    textBox(s, n, { left: 598 + i * 200, top: 575, width: 34, height: 22 }, { typeface: MONO, fontSize: 13, bold: true, color: C.red });
-    textBox(s, t, { left: 635 + i * 200, top: 567, width: 158, height: 49 }, { fontSize: 14, color: C.ink, autoFit: "shrinkText" });
-    if (i < 2) line(s, 792 + i * 200, 568, 0, 49, C.grid, 1);
-  });
-  addNotes(s,
-    "本页指标来自截图中的 Node 0/server 输出，不泛化为另一端数据。这组 20 次结果已经证明 WQE、doorbell、DMA、peer 和 CQE 的时间链能够闭合。nearest-rank 定义下，20 个样本的 p99 排名是第 20 个，所以它必然等于最大值；当前数据不用于估计稳定尾分位。\n\n" +
-    "下一步先把样本数提高到至少 1001，再做 2 B 到 4096 B 包长扫描。直连拓扑与经过 L1 交换的实测需要分开看趋势，不把两种物理结构做绝对值拟合。\n\n" +
-    "用户截图：" + IMG_RESULT
-  );
+  header(s, "9.2 · 包级证据 / PACKETS", "READ 请求与响应在两个端口间交替", 11);
+  addImage(s, portPacketBytes, "image/png", { left: 60, top: 156, width: 1160, height: 522 }, "dual-port READ request and response evidence", "contain");
+  addNotes(s, "日志显示 seq 16/18 使用 port 1 和TP 6，seq 17/19 使用 port 0 和TP 5；响应保持原入口端口返回。该证据说明分流来自官方 provider创建的两个物理Jetty/TP与模型执行的端口路由，而不是benchmark硬编码。\n\n截图：" + IMG_PORT_PACKETS)
 }
 
-// 11. Thanks
+// 12. Scope and close
 {
   const s = deck.slides.add();
   s.background.fill = C.paper;
   shape(s, "rect", { left: 0, top: 0, width: 12, height: 720 }, C.red, C.red, 0);
-  textBox(s, "Thank you.", { left: 78, top: 170, width: 640, height: 120 }, {
-    fontSize: 76, bold: false, color: C.ink, verticalAlignment: "middle",
+  textBox(s, "当前边界", { left: 72, top: 62, width: 380, height: 58 }, { fontSize: 40, bold: true, color: C.ink });
+  line(s, 74, 136, 110, 0, C.red, 4);
+  textBox(s, "已经打通", { left: 72, top: 178, width: 380, height: 36 }, { fontSize: 24, bold: true, color: C.red });
+  const done = [
+    "10 个官方 UB 内核模块",
+    "官方 UDMA 与 UBAGG provider",
+    "双节点 SEND / READ / WRITE",
+    "双 primary plane 与双物理端口",
+    "UMMU 支持的队列与 payload DMA",
+  ];
+  done.forEach((t, i) => {
+    textBox(s, String(i + 1).padStart(2, "0"), { left: 72, top: 232 + i * 58, width: 38, height: 22 }, { typeface: MONO, fontSize: 13, bold: true, color: C.red });
+    textBox(s, t, { left: 120, top: 226 + i * 58, width: 440, height: 34 }, { fontSize: 18, color: C.ink, autoFit: "shrinkText" });
   });
-  line(s, 82, 326, 128, 0, C.red, 4);
-  textBox(s, "OpenURMA × gem5 双节点全系统仿真", { left: 82, top: 360, width: 560, height: 44 }, {
-    fontSize: 24, bold: true, color: C.ink, autoFit: "shrinkText",
+  textBox(s, "仍需补齐", { left: 680, top: 178, width: 380, height: 36 }, { fontSize: 24, bold: true, color: C.grayBlue });
+  const todo = [
+    "CDMA、OBMM、Sentry 等可选硬件",
+    "官方 bonding-group 表与单 TP 多端口散列",
+    "UMMU cfg_table 销毁告警",
+    "更完整的异常、恢复与压力覆盖",
+    "面向具体硬件配置的绝对性能标定",
+  ];
+  todo.forEach((t, i) => {
+    textBox(s, String(i + 1).padStart(2, "0"), { left: 680, top: 232 + i * 58, width: 38, height: 22 }, { typeface: MONO, fontSize: 13, bold: true, color: C.grayBlue });
+    textBox(s, t, { left: 728, top: 226 + i * 58, width: 470, height: 34 }, { fontSize: 18, color: C.ink, autoFit: "shrinkText" });
   });
-  textBox(s, "Questions & Discussion", { left: 82, top: 424, width: 360, height: 30 }, {
-    typeface: MONO, fontSize: 17, color: C.grayBlue,
-  });
-  roundRect(s, { left: 800, top: 170, width: 340, height: 340 }, C.bg, C.grid, 170, 1);
-  textBox(s, "UB", { left: 855, top: 244, width: 230, height: 110 }, {
-    typeface: MONO, fontSize: 78, bold: true, color: C.red, alignment: "center", verticalAlignment: "middle",
-  });
-  textBox(s, "FULL-SYSTEM\nDUAL-NODE", { left: 855, top: 356, width: 230, height: 72 }, {
-    typeface: MONO, fontSize: 18, bold: true, color: C.ink, alignment: "center", verticalAlignment: "middle",
-  });
-  textBox(s, "2026.09", { left: 82, top: 650, width: 160, height: 22 }, { typeface: MONO, fontSize: 13, color: C.body });
-  addNotes(s, "收尾仅保留项目名称与 Q&A，不重复总结。技术边界、运行命令与结果解释都在前页。\n\n视觉结构参考 AICO-PPT 技术分享模板结语页，但未沿用企业 Logo、使命宣言或免责声明。")
+  shape(s, "rect", { left: 72, top: 560, width: 1126, height: 72 }, C.dark, C.dark, 0);
+  textBox(s, "当前成果是一条可运行、可观察、可继续扩展的官方 UB 全栈仿真主链路", { left: 105, top: 580, width: 1060, height: 34 }, { fontSize: 23, bold: true, color: C.paper, alignment: "center", autoFit: "shrinkText" });
+  textBox(s, "Questions & Discussion", { left: 72, top: 660, width: 400, height: 25 }, { typeface: MONO, fontSize: 15, color: C.grayBlue });
+  addNotes(s, "收尾明确区分已验证范围与下一步。当前可以称为官方主链路已经贯通，但不能称为所有UB硬件和全部驱动功能均已实现。")
 }
 
 const requirements = {
-  explicitTotalSlideCount: 11,
-  requiredNativeTableOwnerSlides: [5],
+  explicitTotalSlideCount: 12,
+  requiredNativeTableOwnerSlides: [3, 9],
   requiredNativeChartOwnerSlides: [],
 };
 const fontPolicy = { basis: "design", families: [FONT, MONO] };
@@ -848,9 +544,10 @@ const result = await finalizePresentation({
   layoutArgs: [
     "--expected-slide-size-emu", "12192000,6858000",
     "--validate-heading-fit",
-    "--require-native-table-slide", "5",
+    "--require-native-table-slide", "3",
+    "--require-native-table-slide", "9",
   ],
-  requiredNativeTableOwnerSlides: [5],
+  requiredNativeTableOwnerSlides: [3, 9],
   requiredNativeChartOwnerSlides: [],
   fontPolicy,
   verifyArtifactToolImport: true,
