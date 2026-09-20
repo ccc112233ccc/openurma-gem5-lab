@@ -15,7 +15,7 @@ OpenClickNP、openEuler UMDK/UMMU/OLK 和 gem5 ARM 固件，并编译内核与 g
 因此会花较长时间。后续执行是增量的。
 
 ```bash
-git clone <本仓库的 GitHub URL>
+git clone https://github.com/ccc112233ccc/openurma-gem5-lab.git
 cd openurma-gem5-lab
 ./setup.sh --jobs 2
 ```
