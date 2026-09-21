@@ -66,7 +66,7 @@ if docker exec "$container" test -e "$marker"; then
     exit 0
 fi
 
-echo "Configuring all guests' pair-relayed OOB control interfaces..."
+echo "Configuring all guests on the shared OOB control network..."
 echo "All UARTs must be detached; use ~. at the start of a line first."
 docker exec "$container" python3 "$serial_tool" \
     --ports "${uart_ports[@]}" --command /usr/local/bin/ou-net-up \
@@ -75,7 +75,7 @@ docker exec "$container" python3 "$serial_tool" \
 cpu_mode="$(docker exec "$container" awk -F= \
     '$1 == "cpu_mode" { print $2; exit }' "$run_root/run-manifest.txt" 2>/dev/null || true)"
 docker exec "$container" touch "$marker"
-echo "All pair-local OOB IPv4 addresses are active."
+echo "All unique OOB IPv4 addresses are active."
 if [[ "$cpu_mode" == server_o3 ]]; then
     echo "The guests remain on their fast boot CPUs while idle."
     echo "Each synchronized send_lat run switches to ArmO3 only for its warm-up and measured loop, then switches back."

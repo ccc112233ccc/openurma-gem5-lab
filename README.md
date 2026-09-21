@@ -133,25 +133,31 @@ switch delay. A host-relayed e1000 link carries
 only the stock `urma_perftest` TCP handshake and resource exchange; it is kept
 outside the measured interval.
 
-The same launcher supports an even number of guests from 2 through 8. The
-first scalable topology deliberately uses adjacent independent pairs
-(`0<->1`, `2<->3`, ...), all attached to one UB switch process:
+The same launcher supports 2 through 8 guests. Every guest attaches to one
+shared UB switch and one shared learning Ethernet control network. The UB
+switch routes each DATA/SYNC record by destination EID, so communication is
+not restricted to adjacent node numbers:
 
 ```bash
 ./run-dual.sh --nodes 4 --profile fast --provider official \
   --sync-mode adapter-local
 ./sync-dual.sh
+# client node3 -> server node0
+./run-node-pair-latency.sh 0 3 100 128 21115
+# optional: run adjacent pairs concurrently as a scaling workload
 ./run-paired-latency.sh --samples 100 --size 128
 ./attach-nodeN.sh 2
 ```
 
-Every pair has an isolated TCP/OOB setup relay; UB DATA and SYNC records pass
-through the common switch. Adapter-local synchronization waits only for the
-paired peer, whereas `global-barrier` makes all gem5 instances participate in
-one dist-gem5 barrier. This stage is intended to measure synchronization
-scaling without confusing it with arbitrary-destination routing. General EID
-routing between every node is a later topology stage; `--nodes` does not yet
-turn the adjacent-pair experiment into all-to-all traffic.
+`-S 10.0.0.X` selects the remote userspace process for the official TCP
+resource exchange. That exchange carries the remote UB EID into the official
+kernel `GET_TP_LIST` request. The modeled device records the resulting
+`TPN -> destination EID` relation, reads the TPN from each official SQE, and
+puts the EIDs in the Adapter header. The independent switch alone decides the
+egress endpoint. Thus the IP is control-plane addressing; UB payload delivery
+is EID based. Adapter-local synchronization waits only for the EID peer of the
+active session, whereas `global-barrier` makes every gem5 instance participate
+in one dist-gem5 barrier.
 
 The detailed `server` profile is a reduced-core Arm server slice: four 3 GHz
 `ArmO3CPU` cores with an explicit 8-wide front/back end, 192-entry ROB,
@@ -240,7 +246,8 @@ endpoint-to-endpoint transport for A/B regression. In the default
 `switch-adapter` mode, node 0 and node 1 no longer share one UB data ring:
 they map `/tmp/openurma-dual.node0.adapter` and
 `/tmp/openurma-dual.node1.adapter` respectively, while the switch maps both.
-The common 64-byte Adapter header supports versioned `DATA` and `SYNC` records.
+The common 64-byte Adapter header supports versioned `DATA` and `SYNC` records
+and carries source and destination EIDs.
 With the default two nodes, `adapter-local` therefore has exactly three timed
 simulator processes: gem5 node 0, the UB switch, and gem5 node 1. An N-node run
 has N gem5 processes plus the same switch process; there is no dist-gem5
@@ -379,9 +386,10 @@ The fixed assignments are:
 | node0 | 3460 | `openurma-node0` | `...:0100` | `10.0.0.1/24` |
 | node1 | 3470 | `openurma-node1` | `...:0101` | `10.0.0.2/24` |
 
-For larger paired runs, UARTs continue at a stride of 10, EIDs continue from
-`...:0102`, and every even/odd pair reuses `10.0.0.1/10.0.0.2` inside its own
-isolated OOB relay.
+For larger runs, UARTs continue at a stride of 10, EIDs continue from
+`...:0102`, and OOB addresses continue as `10.0.0.(node+1)` on the shared
+learning Ethernet switch. For example node3 uses UART 3490, EID `...:0103`
+and OOB `10.0.0.4`.
 
 First prove that payload bytes cross the two independent guest memories.  Run
 the server first:
@@ -403,9 +411,9 @@ Its default benchmark profile is an exact, explicit comparison configuration:
 CTP, RM (`-p 0`), SEND_IMM, `-I 128`, and `-J 1`.
 The two UART commands pass through one host-side start gate and are injected
 without a wall-clock stagger by default. The UMDK client already retries its
-TCP connect. Correctness does not depend on simultaneous host submission: the
-guest-side collective rendezvous freezes the first role until its peer arrives;
-zero stagger simply avoids an unnecessary pre-test catch-up cost.
+TCP connect. Fine-grained synchronization is enabled only after the TCP
+exchange and TP setup have established the peer EID; zero stagger simply
+reduces unnecessary setup wait.
 
 ```bash
 # quick functional run: defaults to 100 measured samples, 128-byte messages
@@ -426,8 +434,8 @@ UART transcript. Use `--format tsv` for machine-readable output only and
 is still available as `--profile legacy`.
 
 To run the same test manually in the two consoles, start node0 and then node1.
-The first role waits at the guest-side virtual-time rendezvous; the host helper
-above remains the reproducible and faster route:
+The server waits in the official TCP control path until the client connects;
+the host helper above remains the reproducible and faster route:
 
 ```sh
 # node0
@@ -484,11 +492,12 @@ positionally or with `--sizes`; the helper refuses to overwrite a non-empty
 result directory.
 
 Both wrappers set `OPENURMA_DIST_SYNC=1`; the patched perftest first performs a
-collective ON/OFF rendezvous before opening the TCP control connection. Thus a
-manually started server waits for the client in virtual time instead of racing
-ahead according to host wall time. After setup, perftest performs its last TCP
-readiness handshake, collectively enables Adapter-local synchronization, runs
-the latency loop, then collectively disables synchronization before reporting.
+normal TCP/resource exchange and TP creation while fine-grained synchronization
+is off. After setup supplies the peer EID, perftest performs its last TCP
+readiness handshake, collectively enables EID-scoped Adapter synchronization,
+runs the latency loop, then collectively disables synchronization before
+reporting. Starting the server first is safe because it blocks in the official
+TCP accept path rather than advancing the measured virtual-time epoch.
 The same unmodified guest command selects the legacy dist-gem5 implementation
 when the launcher is run with `--sync-mode global-barrier`.
 
@@ -507,6 +516,9 @@ with two concurrent 128-byte pairs retained identical virtual latency results
 and widened the steady-state wall-time advantage from about 3.8% to about 6%.
 The raw transcripts and methodology are in
 [`results/sync-nnode-20260921/REPORT.md`](results/sync-nnode-20260921/REPORT.md).
+That report is the historical fixed-pair scaling checkpoint. The subsequent
+arbitrary-EID implementation and cross-pair SEND/READ/WRITE validation are in
+[`results/eid-routing-20260921/REPORT.md`](results/eid-routing-20260921/REPORT.md).
 In iteration mode, the optional stats reset is immediately before the first
 post-warm-up timestamp and its dump immediately follows the timestamp closing
 the final reported delta, so the ROI block covers the same samples as the
@@ -716,9 +728,9 @@ change the simulator/kernel ABI:
 | Component | Version or exact commit |
 | --- | --- |
 | gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `724651433c9bdee2c7f0484ab85b9620b0810993` |
-| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `8260ffe97c5ec1bc23a948a3d32e6cbaadd25177` |
+| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `231b43387ec5e7b34430562f6def90d68b584b3c` |
 | OpenClickNP | `c1c6acc58032a1894507d88659b3cca668b0e1a5` |
-| vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `34960cc2610cda1319e999f15dc19ea62a1dde91` |
+| vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `f84b90b8ddd8173b851334f55d332783d248bfc7` |
 | openEuler OLK-6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |
 
 The ARM firmware/resource bundle is gem5's official

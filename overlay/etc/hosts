@@ -2,3 +2,9 @@
 ::1 localhost openurma-gem5
 10.0.0.1 openurma-node0
 10.0.0.2 openurma-node1
+10.0.0.3 openurma-node2
+10.0.0.4 openurma-node3
+10.0.0.5 openurma-node4
+10.0.0.6 openurma-node5
+10.0.0.7 openurma-node6
+10.0.0.8 openurma-node7

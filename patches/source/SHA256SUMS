@@ -1,5 +1,6 @@
 5fa4d6f9dace11b1ad0ee4d27df8b0cb8e8f8edcfef266ce1293f37f4d210849  patches/source/gem5/0001-sim-add-OpenURMA-device-and-deterministic-timing-sup.patch
 5f249337a758384bfc3aa02f278f7f52f2dc0c042e33744642afa526ec60c3c7  patches/source/gem5/0002-Enforce-distributed-synchronization-wake-deadlines.patch
+2108ae9cce3348fc6cf4756dc5220e04a148d2e5f38789b9a4ab877472d82b0d  patches/source/gem5/0003-Route-sync-toggles-to-adapter-simulation-loop.patch
 a3e6faedc980738e13c6193e7737a45a4acd347142e3fd37bec3846705863ed0  patches/source/openurma/0001-sim-checkpoint-dual-node-and-official-UBUS-discovery.patch
 f13cc57bfb759b98c5f065a6ec391088123c6cc7b2b4a764e422b6f2462d1e63  patches/source/openurma/0002-Model-UBASE-command-queue-and-USI-capability.patch
 e53f899eacde498cea8b32c2a990ff24954b9c640b26633a715b2358e0ea14b8  patches/source/openurma/0003-Model-UBASE-CtrlQ-responses-and-Type-1-MSI-delivery.patch
@@ -27,6 +28,11 @@ e5b1b10d3b73e935f40cfbb7b57bdeb7679ce583365a59995dd57f569f8609b0  patches/source
 e607d2000aebadf0d625c71d93cdda60e740c6127e39315d4dd7c5511af0b1cb  patches/source/openurma/0025-Enable-synchronized-official-bonding-WRITE-latency.patch
 b07a276f5b0d38069c2c9d8988ce7b2e62bd905ba5d60a8a37220d0535adcc70  patches/source/openurma/0026-Enable-synchronized-official-bonding-READ-latency.patch
 3d8fcd6cb41100554a6b7f66ae37db25acb3b4bef0dcb16d4a779f9941cd2bef  patches/source/openurma/0027-Preserve-device-DMA-state-across-official-RMA-runs.patch
+7096f75a364286e10bf1ea27a2dc1d36e63482efeb2935896922a5550243d721  patches/source/openurma/0028-Add-switch-adapter-boundary-for-UB-traffic.patch
+e3f7c78e5500ecab3783e1a86d31133099cb8c12ef3b88c88e9c001e64689400  patches/source/openurma/0029-Add-adapter-local-virtual-time-synchronization.patch
+2863908a54f1510887a7bf619a3772d02070af4a031deaa141372034deab268e  patches/source/openurma/0030-Report-adapter-synchronization-loop-profile.patch
+0b2e04803364540dc5cf1d4ab0375b253cc4408b5d544d8c65f2ef37d87a1100  patches/source/openurma/0031-Run-adapter-synchronization-in-gem5-event-queue.patch
+f74ed334b96913ffdb2f7fdb83f6357284051aa4bf16625f45d5958546d99de7  patches/source/openurma/0032-Route-adapter-traffic-by-official-peer-EID.patch
 bb5182e9935fd993bcfd330b232920610c075540cdfe320ad002885fb22804c5  patches/source/umdk/0001-sim-add-deterministic-gem5-perftest-instrumentation.patch
 850fdf20c3541a5a4941476b246b0d80ab5c8f28853a1d3ba73caa3fedb5ac38  patches/source/umdk/0002-sim-synchronize-iteration-send-bandwidth-runs.patch
 f2ba4e59bd69cf738692aeef4e983ddc93ba0c3f0dc9b07e1c9771a25ebd06e6  patches/source/umdk/0003-Support-synchronized-bidirectional-RMA-bandwidth-tes.patch
@@ -35,3 +41,4 @@ f2ba4e59bd69cf738692aeef4e983ddc93ba0c3f0dc9b07e1c9771a25ebd06e6  patches/source
 fdddde3bced073eed20d27981559434545bffe93ca9ae0272a0d4bb5199a2510  patches/source/umdk/0006-Synchronize-distributed-write-latency-loops.patch
 322e948e7c0295c017675a637a69ff7f9b20fc988840f7856ee0cba7f9553bb1  patches/source/umdk/0007-Keep-server-synchronized-during-one-sided-READ-laten.patch
 683f313ebc093ec544d3a2c81560abc63329f38646048841585e31bec4f462da  patches/source/umdk/0008-Make-distributed-RMA-latency-runs-repeatable.patch
+0a4a6e24d9f739ade0c5cd26feb89ecad758eb346658d1f63b6eaf432d6e16d7  patches/source/umdk/0009-Enter-adapter-synchronization-after-TP-setup.patch

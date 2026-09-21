@@ -8,4 +8,4 @@ fi
 # on both guests concurrently.  Once both event queues enter conservative
 # synchronization, it is safe to enable the OOB IPv4 control path.
 /usr/bin/ou-dist-sync || exit $?
-exec ip addr replace "10.0.0.$((OPENURMA_NODE % 2 + 1))/24" dev eth0
+exec ip addr replace "10.0.0.$((OPENURMA_NODE + 1))/24" dev eth0

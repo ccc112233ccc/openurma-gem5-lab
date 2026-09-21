@@ -21,6 +21,7 @@ done
 samples="${1:-100}"
 size="${2:-128}"
 port="${3:-21115}"
+server_ip="${4:-${OPENURMA_SERVER_IP:-10.0.0.1}}"
 out=/tmp/ou-lat-client.out
 if [ -n "${OPENURMA_DEVICE:-}" ]; then
     device=$OPENURMA_DEVICE
@@ -30,8 +31,8 @@ else
     device=openurma0
 fi
 
-if [ "$#" -gt 3 ]; then
-    echo "usage: ou-lat-client [--profile ctp-rm-send-imm-i128|legacy] [--roi-stats] [samples] [size] [port]" >&2
+if [ "$#" -gt 4 ]; then
+    echo "usage: ou-lat-client [--profile ctp-rm-send-imm-i128|legacy] [--roi-stats] [samples] [size] [port] [server-ip]" >&2
     exit 2
 fi
 case "$samples:$size:$port" in
@@ -55,11 +56,11 @@ case "$profile" in
         profile=ctp-rm-send-imm-i128
         set -- urma_perftest send_lat -d "$device" --eid_idx 0 --ctp \
             -s "$size" -P "$port" -J 1 -I 128 -n "$iters" --enable_imm \
-            -p 0 -S 10.0.0.1
+            -p 0 -S "$server_ip"
         ;;
     legacy)
         set -- urma_perftest send_lat -d "$device" --eid_idx 0 \
-            -s "$size" -P "$port" -n "$iters" -p 0 -S 10.0.0.1
+            -s "$size" -P "$port" -n "$iters" -p 0 -S "$server_ip"
         ;;
     *)
         echo "ou-lat-client: unknown profile '$profile'" >&2

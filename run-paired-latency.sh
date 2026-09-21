@@ -90,7 +90,12 @@ for ((node = 0; node < node_count; ++node)); do
     role=client
     (( node % 2 == 0 )) && role=server
     uart_ports+=("$((uart0 + node * uart_stride))")
-    commands+=("ou-lat-$role --profile $profile $guest_roi_arg $samples $size $port")
+    if [[ "$role" == server ]]; then
+        commands+=("ou-lat-server --profile $profile $guest_roi_arg $samples $size $port")
+    else
+        server_ip="10.0.0.$node"
+        commands+=("ou-lat-client --profile $profile $guest_roi_arg $samples $size $port $server_ip")
+    fi
 done
 
 transcript=$(mktemp "${TMPDIR:-/tmp}/openurma-paired-latency.XXXXXX")

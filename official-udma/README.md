@@ -12,7 +12,7 @@ this track passes.
 | gem5 | `c8affd15e10f596e6eb7b2dbc64163affc3876c0` (lab target) |
 | OLK 6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |
 | OpenURMA | `f5d501115108caa868d58454c43e5b0abb2d5193` (lab target) |
-| vendored UMDK | `34960cc2610cda1319e999f15dc19ea62a1dde91` (lab target) |
+| vendored UMDK | `f84b90b8ddd8173b851334f55d332783d248bfc7` (lab target) |
 
 The working trees contain the current laboratory changes.  They are inputs to
 the baseline and must not be reset as part of official-driver bring-up.

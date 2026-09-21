@@ -123,7 +123,7 @@ uint64_t checkedAdd(uint64_t lhs, uint64_t rhs)
 
 struct Switch {
     std::vector<std::unique_ptr<Mapping>> links;
-    std::vector<uint32_t> peer_map;
+    std::vector<uint32_t> endpoint_eids;
     uint32_t ports;
     uint64_t link_latency_ticks;
     uint64_t switch_delay_ticks;
@@ -138,11 +138,11 @@ struct Switch {
     std::vector<uint64_t> active_phase;
 
     Switch(const std::vector<std::string> &paths,
-           std::vector<uint32_t> peers, uint32_t p,
+           std::vector<uint32_t> eids, uint32_t p,
            uint64_t latency, uint64_t delay, uint64_t rate,
            uint32_t overhead, std::vector<uint32_t> mapping,
            uint32_t stages)
-      : peer_map(std::move(peers)), ports(p),
+      : endpoint_eids(std::move(eids)), ports(p),
         link_latency_ticks(latency), switch_delay_ticks(delay),
         rate_gbps(rate), overhead_bytes(overhead),
         serialization_stages(stages), port_map(std::move(mapping)),
@@ -151,22 +151,36 @@ struct Switch {
         last_output_timestamp(paths.size(), std::vector<uint64_t>(p)),
         active_phase(paths.size())
     {
-        if (paths.size() < 2 || paths.size() != peer_map.size())
+        if (paths.size() < 2 || paths.size() != endpoint_eids.size())
             throw std::runtime_error(
-                "ring path and peer-map counts must match and be at least two");
+                "ring path and endpoint-EID counts must match and be at least two");
         links.reserve(paths.size());
         for (const auto &path : paths)
             links.emplace_back(std::make_unique<Mapping>(path, p));
-        for (uint32_t source = 0; source < peer_map.size(); ++source) {
-            const uint32_t peer = peer_map[source];
-            if (peer >= peer_map.size() || peer == source ||
-                peer_map[peer] != source) {
-                throw std::runtime_error(
-                    "peer map must describe symmetric, non-self pairs");
-            }
+        for (uint32_t endpoint = 0; endpoint < endpoint_eids.size(); ++endpoint) {
+            if (endpoint_eids[endpoint] == 0 || endpoint_eids[endpoint] > 0xfffff)
+                throw std::runtime_error("endpoint EIDs must be non-zero 20-bit values");
+            for (uint32_t previous = 0; previous < endpoint; ++previous)
+                if ((endpoint_eids[previous] & 0xffffU) ==
+                    (endpoint_eids[endpoint] & 0xffffU))
+                    throw std::runtime_error(
+                        "endpoint EIDs must have unique low 16 bits");
         }
         if (serialization_stages != 0 && rate_gbps == 0)
             throw std::runtime_error("serialization requires a positive line rate");
+    }
+
+    uint32_t routeEndpoint(uint32_t eid) const
+    {
+        if (eid == 0 || eid > 0xfffff)
+            throw std::runtime_error("packet carries an invalid destination EID");
+        // The modeled UDMA device exposes a primary EID plus physical-port
+        // aliases at +0x10000 increments. They all terminate at the same
+        // endpoint adapter, so the low 16 bits are the route key.
+        for (uint32_t endpoint = 0; endpoint < endpoint_eids.size(); ++endpoint)
+            if ((endpoint_eids[endpoint] & 0xffffU) == (eid & 0xffffU))
+                return endpoint;
+        throw std::runtime_error("destination EID is not registered on this switch");
     }
 
     uint64_t serializationTicks(uint64_t wire_bytes) const
@@ -182,8 +196,6 @@ struct Switch {
         constexpr uint32_t EndpointToSwitch = 1;
         constexpr uint32_t SwitchToEndpoint = 0;
         Mapping &input = *links[source_link];
-        const uint32_t destination_link = peer_map[source_link];
-        Mapping &output = *links[destination_link];
         auto &in = input.ring->direction[EndpointToSwitch][source_port];
         const uint64_t tail = __atomic_load_n(&in.tail.value, __ATOMIC_RELAXED);
         const uint64_t head = __atomic_load_n(&in.head.value, __ATOMIC_ACQUIRE);
@@ -196,6 +208,14 @@ struct Switch {
             throw std::runtime_error("adapter protocol version mismatch");
         if (source->source_port != source_port)
             throw std::runtime_error("message published on wrong ingress port");
+        if ((source->source_eid & 0xffffU) !=
+            (endpoint_eids[source_link] & 0xffffU))
+            throw std::runtime_error("message source EID does not match ingress endpoint");
+        const uint32_t destination_link =
+            routeEndpoint(source->destination_eid);
+        if (destination_link == source_link)
+            throw std::runtime_error("switch-adapter packet loops back to its source");
+        Mapping &output = *links[destination_link];
         const uint32_t destination_port = port_map[source_port];
         auto &out = output.ring->direction[SwitchToEndpoint][destination_port];
         const uint64_t out_head = __atomic_load_n(&out.head.value, __ATOMIC_RELAXED);
@@ -272,18 +292,39 @@ struct Switch {
                     __ATOMIC_ACQUIRE);
             bool synchronized_active = false;
             for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint) {
-                const uint32_t peer = peer_map[endpoint];
+                const uint32_t target_eid = __atomic_load_n(
+                    &links[endpoint]->ring->sync_destination_eid,
+                    __ATOMIC_ACQUIRE);
+                if (target_eid == 0)
+                    continue;
+                const uint32_t peer = routeEndpoint(target_eid);
                 const uint64_t peer_phase = phases[peer];
+                const uint32_t reverse_eid = __atomic_load_n(
+                    &links[peer]->ring->sync_destination_eid,
+                    __ATOMIC_ACQUIRE);
+                const bool reciprocal = reverse_eid != 0 &&
+                    routeEndpoint(reverse_eid) == endpoint;
+                const bool local_active = (phases[endpoint] & 1) != 0;
+                const bool peer_active = (peer_phase & 1) != 0;
+                uint64_t acknowledged_phase = 0;
+                if (reciprocal && local_active == peer_active)
+                    acknowledged_phase = phases[endpoint];
+                else if (reciprocal && local_active && !peer_active)
+                    // Tell a still-active endpoint that its peer has reached
+                    // OFF. gem5 may then run to its own OFF pseudo-op without
+                    // waiting for another finite null-message horizon.
+                    acknowledged_phase = phases[endpoint] + 1;
                 if (__atomic_load_n(
                         &links[endpoint]->ring->peer_sync_phase,
-                        __ATOMIC_RELAXED) != peer_phase) {
+                        __ATOMIC_RELAXED) != acknowledged_phase) {
                     __atomic_store_n(
-                        &links[endpoint]->ring->peer_sync_phase, peer_phase,
+                        &links[endpoint]->ring->peer_sync_phase,
+                        acknowledged_phase,
                         __ATOMIC_RELEASE);
                     progress = true;
                 }
-                const bool pair_active = phases[endpoint] == peer_phase &&
-                                         (phases[endpoint] & 1) != 0;
+                const bool pair_active = reciprocal && local_active &&
+                                         peer_active;
                 synchronized_active |= pair_active;
                 if (pair_active && active_phase[endpoint] != phases[endpoint]) {
                     for (auto &stage : egress_free[endpoint])
@@ -337,10 +378,10 @@ std::vector<uint32_t> parseMap(const std::string &text, uint32_t ports)
     return result;
 }
 
-std::vector<uint32_t> parsePeerMap(const std::string &text)
+std::vector<uint32_t> parseEndpointEids(const std::string &text)
 {
     if (text.empty())
-        throw std::runtime_error("peer map cannot be empty");
+        throw std::runtime_error("endpoint EID list cannot be empty");
     std::vector<uint32_t> result;
     std::size_t begin = 0;
     while (begin <= text.size()) {
@@ -348,7 +389,7 @@ std::vector<uint32_t> parsePeerMap(const std::string &text)
         const std::string token = text.substr(
             begin, end == std::string::npos ? std::string::npos : end - begin);
         result.push_back(static_cast<uint32_t>(
-            parseUnsigned(token.c_str(), "peer map")));
+            parseUnsigned(token.c_str(), "endpoint EID")));
         if (end == std::string::npos)
             break;
         begin = end + 1;
@@ -367,7 +408,7 @@ int main(int argc, char **argv)
                      "SERIALIZATION_STAGES\n"
                      "   or: ub-switch-sim --multi PORTS LINK_LATENCY "
                      "SWITCH_DELAY RATE_GBPS OVERHEAD_BYTES PORT_MAP "
-                     "SERIALIZATION_STAGES PEER_MAP RING...\n";
+                     "SERIALIZATION_STAGES ENDPOINT_EIDS RING...\n";
         return 2;
     }
     try {
@@ -379,12 +420,12 @@ int main(int argc, char **argv)
         std::vector<std::string> paths;
         std::vector<uint32_t> peers;
         if (multi) {
-            peers = parsePeerMap(argv[9]);
+            peers = parseEndpointEids(argv[9]);
             for (int index = 10; index < argc; ++index)
                 paths.emplace_back(argv[index]);
         } else {
             paths = {argv[1], argv[2]};
-            peers = {1, 0};
+            peers = {0x100, 0x101};
         }
         Switch model(paths, std::move(peers), ports,
             parseTimeTicks(argv[base + 1], "link latency"),

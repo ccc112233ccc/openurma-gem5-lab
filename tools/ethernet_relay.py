@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Relay frames between two gem5 EtherTapStub sockets.
+"""Learning Ethernet switch for gem5 EtherTapStub sockets.
 
 EtherTapStub prefixes each raw Ethernet frame with a four-byte, network-order
-length.  The relay preserves that framing and never interprets the packet.
+length. The relay learns source MAC addresses, unicasts known destinations,
+and floods broadcasts, multicasts, and unknown destinations.
 """
 
 from __future__ import annotations
@@ -51,10 +52,13 @@ def recv_exact(sock: socket.socket, size: int) -> bytes:
     return bytes(data)
 
 
-def forward(
-    label: str,
+def receive_port(
+    source_index: int,
     source: socket.socket,
-    destination: socket.socket,
+    sockets: list[socket.socket],
+    send_locks: list[threading.Lock],
+    mac_table: dict[bytes, int],
+    table_lock: threading.Lock,
     stopped: threading.Event,
 ) -> None:
     try:
@@ -63,13 +67,32 @@ def forward(
             (length,) = struct.unpack("!I", header)
             if length < 14 or length > MAX_FRAME:
                 raise ValueError(f"invalid Ethernet frame length {length}")
-            destination.sendall(header + recv_exact(source, length))
+            frame = recv_exact(source, length)
+            destination_mac = frame[:6]
+            source_mac = frame[6:12]
+            with table_lock:
+                if not (source_mac[0] & 1):
+                    mac_table[source_mac] = source_index
+                destination_index = mac_table.get(destination_mac)
+            if destination_mac[0] & 1 or destination_index is None:
+                destinations = [
+                    index for index in range(len(sockets))
+                    if index != source_index
+                ]
+            elif destination_index == source_index:
+                destinations = []
+            else:
+                destinations = [destination_index]
+            packet = header + frame
+            for index in destinations:
+                with send_locks[index]:
+                    sockets[index].sendall(packet)
     except (EOFError, OSError, ValueError) as error:
         if not stopped.is_set():
-            print(f"[ethernet-relay] {label}: {error}", flush=True)
+            print(f"[ethernet-relay] port {source_index}: {error}", flush=True)
     finally:
         stopped.set()
-        for sock in (source, destination):
+        for sock in sockets:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -78,32 +101,38 @@ def forward(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("endpoint0", help="unix:PATH or tcp:HOST:PORT")
-    parser.add_argument("endpoint1", help="unix:PATH or tcp:HOST:PORT")
+    parser.add_argument(
+        "endpoints", nargs="+",
+        help="two or more unix:PATH or tcp:HOST:PORT endpoints",
+    )
     parser.add_argument("--connect-timeout", type=float, default=300.0)
     args = parser.parse_args()
+    if len(args.endpoints) < 2:
+        parser.error("at least two endpoints are required")
 
     deadline = time.monotonic() + args.connect_timeout
-    left = connect(args.endpoint0, deadline)
-    print(f"[ethernet-relay] connected {args.endpoint0}", flush=True)
-    right = connect(args.endpoint1, deadline)
-    print(f"[ethernet-relay] connected {args.endpoint1}", flush=True)
+    sockets = []
+    for endpoint in args.endpoints:
+        sockets.append(connect(endpoint, deadline))
+        print(f"[ethernet-relay] connected {endpoint}", flush=True)
 
     stopped = threading.Event()
+    send_locks = [threading.Lock() for _ in sockets]
+    mac_table: dict[bytes, int] = {}
+    table_lock = threading.Lock()
     workers = [
         threading.Thread(
-            target=forward, args=("node0 -> node1", left, right, stopped)
-        ),
-        threading.Thread(
-            target=forward, args=("node1 -> node0", right, left, stopped)
-        ),
+            target=receive_port,
+            args=(index, sock, sockets, send_locks, mac_table, table_lock, stopped),
+        )
+        for index, sock in enumerate(sockets)
     ]
     for worker in workers:
         worker.start()
     for worker in workers:
         worker.join()
-    left.close()
-    right.close()
+    for sock in sockets:
+        sock.close()
     return 0
 
 

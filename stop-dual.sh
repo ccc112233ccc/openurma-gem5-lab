@@ -46,7 +46,10 @@ for ((node = 0; node < node_count; ++node)); do
 done
 stop_one switch "$run_root/switch/gem5.pid" "$run_root/switch"
 stop_one ub-switch "$run_root/ub-switch/gem5.pid" "$ub_switch_binary"
-if docker exec "$container" test -r "$run_root/relay/relay.pid"; then
+if docker exec "$container" test -r "$run_root/oob-switch/relay.pid"; then
+    stop_one oob-switch "$run_root/oob-switch/relay.pid" \
+        "$lab/tools/ethernet_relay.py"
+elif docker exec "$container" test -r "$run_root/relay/relay.pid"; then
     stop_one relay "$run_root/relay/relay.pid" "$lab/tools/ethernet_relay.py"
 else
     for ((pair = 0; pair < node_count / 2; ++pair)); do

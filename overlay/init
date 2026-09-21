@@ -53,8 +53,8 @@ case "$OPENURMA_NODE" in
     '') hostname openurma-gem5; eid_last_byte=1; guest_ip="" ;;
     *)
         hostname "openurma-node$OPENURMA_NODE"
-        eid_last_byte=$((OPENURMA_NODE % 2 + 1))
-        guest_ip="10.0.0.$eid_last_byte"
+        eid_last_byte=$((OPENURMA_NODE + 1))
+        guest_ip="10.0.0.$((OPENURMA_NODE + 1))"
         ;;
 esac
 if [ "$OPENURMA_PROVIDER" = official ]; then

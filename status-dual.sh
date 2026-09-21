@@ -40,7 +40,9 @@ for ((node = 0; node < node_count; ++node)); do
 done
 show_process switch "$run_root/switch/gem5.pid"
 show_process ub-switch "$run_root/ub-switch/gem5.pid"
-if docker exec "$container" test -r "$run_root/relay/relay.pid"; then
+if docker exec "$container" test -r "$run_root/oob-switch/relay.pid"; then
+    show_process oob-switch "$run_root/oob-switch/relay.pid"
+elif docker exec "$container" test -r "$run_root/relay/relay.pid"; then
     show_process relay "$run_root/relay/relay.pid"
 else
     for ((pair = 0; pair < node_count / 2; ++pair)); do
@@ -63,4 +65,4 @@ uart_stride=$((uart1 - uart0))
 for ((node = 0; node < node_count; ++node)); do
     echo "node$node UART: localhost:$((uart0 + node * uart_stride))"
 done
-echo "Logs:  $run_root/nodeN/gem5.log, system.terminal, switch/gem5.log, ub-switch/gem5.log, and relayN/relay.log"
+echo "Logs:  $run_root/nodeN/gem5.log, system.terminal, switch/gem5.log, ub-switch/gem5.log, and oob-switch/relay.log"

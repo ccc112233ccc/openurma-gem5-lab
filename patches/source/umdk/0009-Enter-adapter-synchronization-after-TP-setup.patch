@@ -1,0 +1,56 @@
+From f84b90b8ddd8173b851334f55d332783d248bfc7 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Mon, 21 Sep 2026 19:52:14 +0800
+Subject: [PATCH] Enter adapter synchronization after TP setup
+
+---
+ .../tools/urma_perftest/perftest_run_test.c   | 26 +++++++------------
+ 1 file changed, 9 insertions(+), 17 deletions(-)
+
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index b41174b..e2d600d 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -39,11 +39,12 @@
+  * channel's lookahead while latency traffic is in flight.  Keep process
+  * TCP control-plane setup and resource creation outside that very fine-grained
+  * barrier, then enter/leave it collectively around only the ping-pong loop.
+- * A short ON/OFF rendezvous before connecting first aligns both event queues,
+- * so launching the server earlier cannot turn host waiting time into a large
+- * virtual-time skew. The AArch64 build invokes gem5 in-process, avoiding a
+- * fork/exec while synchronization is active. Native gem5 CPUs use the magic
+- * instruction; KVM uses the runtime-selected m5ops MMIO address transport.
++ * The measured rendezvous is entered only after resource exchange has created
++ * an official TP. At that point the NIC knows the peer EID and the Adapter can
++ * synchronize exactly those two endpoints. The AArch64 build invokes gem5
++ * in-process, avoiding a fork/exec while synchronization is active. Native
++ * gem5 CPUs use the magic instruction; KVM uses the runtime-selected m5ops
++ * MMIO address transport.
+  */
+ static bool dist_sync_requested(void)
+ {
+@@ -116,18 +117,9 @@ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+         return -1;
+     }
+ 
+-    /*
+-     * DistIface's first toggle performs an immediate collective control
+-     * barrier and schedules both event queues at the same tick.  The second
+-     * collective toggle is executed only after that common barrier releases,
+-     * then disables periodic synchronization for the control-plane setup.
+-     */
+-    if (toggle_dist_sync("enable pre-test rendezvous") != 0) {
+-        return -1;
+-    }
+-    if (toggle_dist_sync("disable pre-test rendezvous") != 0) {
+-        return -1;
+-    }
++    /* TCP retry and the ordinary resource handshake align setup. A pre-connect
++     * Adapter toggle cannot name a peer because GET_TP_LIST has not yet carried
++     * the destination EID into the modeled NIC. */
+     return 0;
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

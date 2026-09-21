@@ -2,6 +2,10 @@
 
 Date: 2026-09-21
 
+> Historical checkpoint: this report measures the first fixed-pair scaling
+> stage. The current implementation routes arbitrary peers by EID; see
+> `../eid-routing-20260921/REPORT.md`.
+
 ## Scope
 
 This checkpoint generalizes the experiment from one fixed pair to an even
