@@ -120,6 +120,9 @@ CPU, cache, and memory:
   --mem-ctrl-command-window T   OPENURMA_MEM_CTRL_COMMAND_WINDOW
 
 UB link:
+  --ub-transport MODE           OPENURMA_UB_TRANSPORT
+                                (switch-adapter|direct-ring; default:
+                                switch-adapter)
   --ub-port-count N             OPENURMA_UB_PORT_COUNT
   --peer-topology MODE          OPENURMA_PEER_TOPOLOGY (direct|l1-switch)
   --peer-port-map LIST          OPENURMA_PEER_PORT_MAP (for example 0,1)
@@ -253,6 +256,7 @@ cli_mem_ctrl_frontend_latency=""
 cli_mem_ctrl_backend_latency=""
 cli_mem_ctrl_command_window=""
 cli_ub_port_count=""
+cli_ub_transport=""
 cli_peer_topology=""
 cli_peer_port_map=""
 cli_peer_port_selection=""
@@ -467,6 +471,8 @@ while (( $# > 0 )); do
         --mem-ctrl-command-window=*) cli_mem_ctrl_command_window=${1#*=}; shift ;;
         --ub-port-count) need_value "$@"; cli_ub_port_count=$2; shift 2 ;;
         --ub-port-count=*) cli_ub_port_count=${1#*=}; shift ;;
+        --ub-transport) need_value "$@"; cli_ub_transport=$2; shift 2 ;;
+        --ub-transport=*) cli_ub_transport=${1#*=}; shift ;;
         --peer-topology) need_value "$@"; cli_peer_topology=$2; shift 2 ;;
         --peer-topology=*) cli_peer_topology=${1#*=}; shift ;;
         --peer-port-map) need_value "$@"; cli_peer_port_map=$2; shift 2 ;;
@@ -615,7 +621,7 @@ profile_mem_ctrl_frontend_latency=10ns
 profile_mem_ctrl_backend_latency=10ns
 profile_mem_ctrl_command_window=10ns
 profile_ub_port_count=1
-profile_peer_topology=direct
+profile_peer_topology=l1-switch
 profile_peer_port_map=""
 profile_peer_port_selection=tp-context
 profile_udma_poll_interval=10ns
@@ -843,6 +849,7 @@ mem_ctrl_frontend_latency="${OPENURMA_MEM_CTRL_FRONTEND_LATENCY:-$profile_mem_ct
 mem_ctrl_backend_latency="${OPENURMA_MEM_CTRL_BACKEND_LATENCY:-$profile_mem_ctrl_backend_latency}"
 mem_ctrl_command_window="${OPENURMA_MEM_CTRL_COMMAND_WINDOW:-$profile_mem_ctrl_command_window}"
 ub_port_count="${OPENURMA_UB_PORT_COUNT:-$profile_ub_port_count}"
+ub_transport="${OPENURMA_UB_TRANSPORT:-switch-adapter}"
 peer_topology="${OPENURMA_PEER_TOPOLOGY:-$profile_peer_topology}"
 peer_port_map="${OPENURMA_PEER_PORT_MAP:-$profile_peer_port_map}"
 peer_port_selection="${OPENURMA_PEER_PORT_SELECTION:-$profile_peer_port_selection}"
@@ -957,6 +964,7 @@ provider="${OPENURMA_PROVIDER:-$profile_provider}"
 [[ -n "$cli_mem_ctrl_backend_latency" ]] && mem_ctrl_backend_latency=$cli_mem_ctrl_backend_latency
 [[ -n "$cli_mem_ctrl_command_window" ]] && mem_ctrl_command_window=$cli_mem_ctrl_command_window
 [[ -n "$cli_ub_port_count" ]] && ub_port_count=$cli_ub_port_count
+[[ -n "$cli_ub_transport" ]] && ub_transport=$cli_ub_transport
 [[ -n "$cli_peer_topology" ]] && peer_topology=$cli_peer_topology
 [[ -n "$cli_peer_port_map" ]] && peer_port_map=$cli_peer_port_map
 [[ -n "$cli_peer_port_selection" ]] && peer_port_selection=$cli_peer_port_selection
@@ -1041,8 +1049,12 @@ fi
 initrd="${OPENURMA_INITRD:-$default_initrd}"
 config="${OPENURMA_CONFIG:-$lab/configs/single_node_fs_openurma.py}"
 switch_config="${OPENURMA_SWITCH_CONFIG:-$lab/gem5/configs/dist/sw.py}"
+ub_switch_source="${OPENURMA_UB_SWITCH_SOURCE:-$lab/tools/ub_switch_sim.cc}"
+ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 ring="${OPENURMA_DUAL_RING:-/tmp/openurma-dual.peer-ring}"
+ring0="${OPENURMA_DUAL_RING0:-/tmp/openurma-dual.node0.adapter}"
+ring1="${OPENURMA_DUAL_RING1:-/tmp/openurma-dual.node1.adapter}"
 tap0="${OPENURMA_DUAL_TAP0:-/tmp/openurma-dual.eth0.sock}"
 tap1="${OPENURMA_DUAL_TAP1:-/tmp/openurma-dual.eth1.sock}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"
@@ -1223,6 +1235,13 @@ case "$peer_topology" in
     direct|l1-switch) ;;
     *) die "peer topology must be direct or l1-switch" ;;
 esac
+case "$ub_transport" in
+    direct-ring|switch-adapter) ;;
+    *) die "UB transport must be direct-ring or switch-adapter" ;;
+esac
+if [[ "$ub_transport" == switch-adapter && "$peer_topology" != l1-switch ]]; then
+    die "switch-adapter requires --peer-topology l1-switch"
+fi
 case "$peer_port_selection" in
     tp-context|legacy-hash) ;;
     *) die "peer port selection must be tp-context or legacy-hash" ;;
@@ -1371,6 +1390,7 @@ memory_controller_command_window=$mem_ctrl_command_window
 peer_latency_ns=$peer_latency_ns
 sync_quantum_ns=$sync_quantum_ns
 ub_port_count=$ub_port_count
+ub_transport=$ub_transport
 peer_topology=$peer_topology
 peer_port_map=${peer_port_map:-identity}
 peer_port_selection=$peer_port_selection
@@ -1482,6 +1502,9 @@ for node in node0 node1 switch; do
         die "$node is already running; use status-dual.sh or stop-dual.sh"
     fi
 done
+if pid_is_live "$run_root/ub-switch/gem5.pid" "$ub_switch_binary"; then
+    die "UB switch is already running; use status-dual.sh or stop-dual.sh"
+fi
 if pid_is_live "$run_root/relay/relay.pid" "$lab/tools/ethernet_relay.py"; then
     die "relay is already running; use status-dual.sh or stop-dual.sh"
 fi
@@ -1491,12 +1514,23 @@ if docker exec "$container" test -d "$run_root"; then
     docker exec "$container" mv "$run_root" "$run_root.previous-$stamp"
     echo "Archived the previous run as $run_root.previous-$stamp"
 fi
-docker exec "$container" mkdir -p "$run_root/node0" "$run_root/node1" "$run_root/switch" "$run_root/relay"
+docker exec "$container" mkdir -p "$run_root/node0" "$run_root/node1" \
+    "$run_root/switch" "$run_root/ub-switch" "$run_root/relay"
 print_resolved_config | docker exec -i "$container" sh -c \
     'umask 022; tee "$1" >/dev/null' _ "$run_root/run-manifest.txt"
-docker exec "$container" rm -f "$ring" "$tap0" "$tap1"
+docker exec "$container" rm -f "$ring" "$ring0" "$ring1" "$tap0" "$tap1"
 # Must match the per-port trailing-slot ABI in NICTopologySC.cc.
-docker exec "$container" truncate -s "$peer_ring_bytes" "$ring"
+if [[ "$ub_transport" == switch-adapter ]]; then
+    docker exec "$container" truncate -s "$peer_ring_bytes" "$ring0"
+    docker exec "$container" truncate -s "$peer_ring_bytes" "$ring1"
+    docker exec "$container" test -r "$ub_switch_source" ||
+        die "missing UB switch source: $ub_switch_source"
+    docker exec "$container" mkdir -p "$(dirname "$ub_switch_binary")"
+    docker exec "$container" g++ -std=c++17 -O2 -pthread \
+        "$ub_switch_source" -o "$ub_switch_binary"
+else
+    docker exec "$container" truncate -s "$peer_ring_bytes" "$ring"
+fi
 
 # The stock dist-gem5 switch owns the synchronization protocol.  It starts
 # first and waits for both node connections, just like util/dist/gem5-dist.sh.
@@ -1520,12 +1554,39 @@ for _ in $(seq 1 100); do
 done
 [[ -n "$actual_dist_port" ]] || die "dist switch did not begin listening; see $run_root/switch/gem5.log"
 
+if [[ "$ub_transport" == switch-adapter ]]; then
+    docker exec -d "$container" \
+        bash "$lab/tools/run-background.sh" \
+        "$run_root/ub-switch/gem5.pid" "$run_root/ub-switch/gem5.log" \
+        "$ub_switch_binary" "$ring0" "$ring1" "$ub_port_count" \
+        "${peer_latency_ns}ns" "$peer_switch_delay" \
+        "$peer_link_rate_gbps" "$peer_link_overhead_bytes" \
+        "${peer_port_map:-}" "$peer_serialization_stages"
+    for _ in $(seq 1 100); do
+        if docker exec "$container" grep -q '\[UB_SWITCH\] ready' \
+            "$run_root/ub-switch/gem5.log" 2>/dev/null; then
+            break
+        fi
+        sleep 0.05
+    done
+    docker exec "$container" grep -q '\[UB_SWITCH\] ready' \
+        "$run_root/ub-switch/gem5.log" 2>/dev/null ||
+        die "UB switch did not become ready; see $run_root/ub-switch/gem5.log"
+fi
+
 launch_node() {
     node=$1
     uart=$2
     mac=$3
     tap=$4
     out="$run_root/node$node"
+    node_ring="$ring"
+    peer_node="$node"
+    if [[ "$ub_transport" == switch-adapter ]]; then
+        if [[ "$node" == 0 ]]; then node_ring="$ring0"; else node_ring="$ring1"; fi
+        # Each endpoint is side zero of its own point-to-point adapter link.
+        peer_node=0
+    fi
     official_args=()
     if [[ "$provider" == official ]]; then
         official_args+=(--official-udma-discovery)
@@ -1623,7 +1684,8 @@ launch_node() {
         --mem-ctrl-backend-latency="$mem_ctrl_backend_latency" \
         --mem-ctrl-command-window="$mem_ctrl_command_window" \
         --link-delay-ns=0 \
-        --peer-ring="$ring" --peer-node="$node" \
+        --peer-ring="$node_ring" --peer-node="$peer_node" \
+        --peer-transport="$ub_transport" \
         --ub-port-count="$ub_port_count" \
         --peer-topology="$peer_topology" \
         --peer-port-map="$peer_port_map" \
@@ -1678,7 +1740,13 @@ echo "  model profile: $profile ($num_cpus x $cpu_mode at $cpu_freq)"
 echo "  cache: private $l1i_size I + $l1d_size D + $l2_size L2; shared $l3_size L3"
 echo "  memory: $mem_size modeled, Linux limited to $guest_mem_limit; $mem_channels x $mem_type, $mem_ranks rank/channel"
 echo "  resolved parameters: $run_root/run-manifest.txt"
-echo "  UB peer ring: $ring (${ub_port_count} physical port(s), ${peer_link_rate_gbps} Gbit/s per port, ${peer_latency_ns} ns propagation, ${peer_serialization_stages} serialization stage(s) per port)"
+if [[ "$ub_transport" == switch-adapter ]]; then
+    echo "  UB adapters: $ring0 and $ring1"
+    echo "  UB switch process: $run_root/ub-switch/gem5.log"
+else
+    echo "  UB peer ring: $ring"
+fi
+echo "  UB link model: ${ub_port_count} physical port(s), ${peer_link_rate_gbps} Gbit/s per port, ${peer_latency_ns} ns propagation, ${peer_serialization_stages} serialization stage(s) per port"
 echo "  UB topology: $peer_topology (source-to-destination port map: ${peer_port_map:-identity})"
 echo "  UB egress selection: $peer_port_selection"
 echo "  UB switch service delay: $peer_switch_delay"

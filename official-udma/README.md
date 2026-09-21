@@ -11,7 +11,7 @@ this track passes.
 | --- | --- |
 | gem5 | `c8affd15e10f596e6eb7b2dbc64163affc3876c0` (lab target) |
 | OLK 6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |
-| OpenURMA | `05fc6b2642c560cf42bdc4a47f0042154993dbba` (lab target) |
+| OpenURMA | `f5d501115108caa868d58454c43e5b0abb2d5193` (lab target) |
 | vendored UMDK | `34960cc2610cda1319e999f15dc19ea62a1dde91` (lab target) |
 
 The working trees contain the current laboratory changes.  They are inputs to

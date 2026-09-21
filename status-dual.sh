@@ -34,6 +34,7 @@ show_process() {
 show_process node0 "$run_root/node0/gem5.pid"
 show_process node1 "$run_root/node1/gem5.pid"
 show_process switch "$run_root/switch/gem5.pid"
+show_process ub-switch "$run_root/ub-switch/gem5.pid"
 show_process relay "$run_root/relay/relay.pid"
 
 for node in 0 1; do
@@ -48,4 +49,4 @@ for node in 0 1; do
 done
 
 echo "UARTs: node0 localhost:$uart0, node1 localhost:$uart1"
-echo "Logs:  $run_root/node{0,1}/gem5.log, system.terminal, switch/gem5.log, and relay/relay.log"
+echo "Logs:  $run_root/node{0,1}/gem5.log, system.terminal, switch/gem5.log, ub-switch/gem5.log, and relay/relay.log"

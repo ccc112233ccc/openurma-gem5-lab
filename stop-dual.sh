@@ -4,6 +4,7 @@ set -euo pipefail
 container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
 lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
+ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
 
 if ! docker inspect "$container" >/dev/null 2>&1; then
     echo "Container does not exist: $container" >&2
@@ -39,5 +40,6 @@ stop_one() {
 stop_one node0 "$run_root/node0/gem5.pid" "$run_root/node0"
 stop_one node1 "$run_root/node1/gem5.pid" "$run_root/node1"
 stop_one switch "$run_root/switch/gem5.pid" "$run_root/switch"
+stop_one ub-switch "$run_root/ub-switch/gem5.pid" "$ub_switch_binary"
 stop_one relay "$run_root/relay/relay.pid" "$lab/tools/ethernet_relay.py"
 echo "The container and any separate single-node gem5 session were left untouched."

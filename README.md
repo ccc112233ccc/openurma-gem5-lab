@@ -125,8 +125,11 @@ kill PID 1.
 ## Two independent interactive hosts
 
 `run-dual.sh` starts two separate gem5 processes.  Each process owns an OLK-6.6
-kernel, memory image, OpenURMA NIC and serial console. The OpenURMA NICs exchange
-timestamped UB packets over independent per-port queues in one mmap region. A host-relayed e1000 link carries
+kernel, memory image, OpenURMA NIC and serial console. By default a third
+`ub-switch-sim` process connects them through two point-to-point adapters. Each
+physical link has independent full-duplex per-port queues; the switch, rather
+than either endpoint, owns forwarding, port mapping, egress serialization and
+switch delay. A host-relayed e1000 link carries
 only the stock `urma_perftest` TCP handshake and resource exchange; it is kept
 outside the measured interval.
 
@@ -167,7 +170,7 @@ functional check:
 ```
 
 It runs one `AtomicSimpleCPU` per guest with the UDMA provider and the same
-400 Gbit/s-per-port direct UB link used by the detailed profiles. It keeps the official
+400 Gbit/s-per-port switched UB fabric used by the detailed profiles. It keeps the official
 kernel modules, UMDK libraries, `urma_admin`, and `urma_perftest`; only detailed
 CPU/cache timing is bypassed. Use it for driver bring-up, command validation,
 resource setup, and end-to-end traffic checks.
@@ -182,22 +185,21 @@ That profile still boots with `AtomicSimpleCPU`, switches to the four-core
 `ArmO3CPU`/cache/DDR model for the measured ROI, and switches back afterward.
 
 The older `udma400` profile remains as a fast `atomic_cache` diagnostic. All
-three UDMA profiles use 400 Gbit/s per UB port and one serialization stage for the direct
-link between the two simulated hosts. Their UDMA layout inputs are a 48-byte
+three UDMA profiles use 400 Gbit/s per UB port and one serialization stage on
+each host-to-switch link. Their UDMA layout inputs are a 48-byte
 SEND control area and 64-byte WQEBBs; direct WQE is disabled so the official
 provider uses its normal memory-backed SQ. The defaults contain no fitted
 device delays: switch, direct-WQE, SQ-fetch, per-WQEBB and synthetic
 payload-DMA service terms are all zero.
 
-To study the supplied two-node path through one L1 switch, select the explicit
-switch topology rather than fitting the direct-link defaults to its end-to-end
-numbers. Each hop owns a 400-Gbit/s serialization queue and the configured link
+The default topology is an explicit independent L1 switch rather than a
+direct-link timing approximation. Each hop owns a 400-Gbit/s serialization queue and the configured link
 propagation delay. The switch has independent output-port queues and an optional
 fixed forwarding delay:
 
 ```bash
 ./run-dual.sh \
-  --profile server --ub-port-count 2 \
+  --profile server --ub-transport switch-adapter --ub-port-count 2 \
   --peer-topology l1-switch --peer-port-map 0,1 \
   --peer-port-selection tp-context \
   --peer-switch-delay 0ns
@@ -213,11 +215,21 @@ the remote host. `direct` mode charges it once end to end.
 The exact resolved values are written to `run-dual/run-manifest.txt`, so a
 result never depends on an unreported preset.
 
+`--ub-transport direct-ring --peer-topology direct` retains the previous
+endpoint-to-endpoint transport for A/B regression. In the default
+`switch-adapter` mode, node 0 and node 1 no longer share one UB data ring:
+they map `/tmp/openurma-dual.node0.adapter` and
+`/tmp/openurma-dual.node1.adapter` respectively, while the switch maps both.
+The common 64-byte Adapter header supports versioned `DATA` and `SYNC` records.
+The current migration stage still keeps the dist-gem5 conservative barrier as
+a correctness guard; replacing that global guard with Adapter-local `SYNC`
+time grants is the next stage, after switched DATA is regression-tested.
+
 The default one-way UB propagation delay is 100 ns. It is also the positive
-lookahead: every ring DATA record carries an `arrival_tick`, and a receiver may
-not consume the record early. Arrival times are monotonic on each physical port;
+lookahead: every Adapter DATA record carries a `receive_tick`, and a receiver
+may not consume the record early. Arrival times are monotonic on each physical port;
 they need not be globally monotonic when several ports transmit concurrently.
-The cross-process transport gives every direction and physical port its own
+Every point-to-point Adapter gives each direction and physical port its own
 64-slot FIFO. Every record carries explicit source and destination port IDs.
 The receiver merges ready queue heads by virtual arrival time, so a delayed
 packet on one port cannot block an already-arrived packet on another port.
@@ -658,7 +670,7 @@ change the simulator/kernel ABI:
 | Component | Version or exact commit |
 | --- | --- |
 | gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `c8affd15e10f596e6eb7b2dbc64163affc3876c0` |
-| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `05fc6b2642c560cf42bdc4a47f0042154993dbba` |
+| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `f5d501115108caa868d58454c43e5b0abb2d5193` |
 | OpenClickNP | `c1c6acc58032a1894507d88659b3cca668b0e1a5` |
 | vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `34960cc2610cda1319e999f15dc19ea62a1dde91` |
 | openEuler OLK-6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |

@@ -1,0 +1,391 @@
+From f5d501115108caa868d58454c43e5b0abb2d5193 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Mon, 21 Sep 2026 09:54:50 +0800
+Subject: [PATCH] Add switch adapter boundary for UB traffic
+
+---
+ .../configs/single_node_fs_clean.py           |   5 +
+ .../gem5_scaffold/src/NICTopologySC.cc        | 124 ++++++++++--------
+ .../gem5_scaffold/src/NICTopologySC.hh        |   2 +
+ .../gem5_scaffold/src/NICTopologySC.py        |   4 +
+ .../gem5_scaffold/src/UbAdapterProtocol.hh    |  69 ++++++++++
+ 5 files changed, 146 insertions(+), 58 deletions(-)
+ create mode 100644 eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index e2da4c9..3e9d05c 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -461,6 +461,7 @@ def create(args):
+         # Cross-process two-node: this NIC bridges to a peer gem5 via a shared ring.
+         system.nic.peer_ring_path = args.peer_ring
+         system.nic.peer_node_id   = args.peer_node
++        system.nic.peer_transport = args.peer_transport
+         system.nic.peer_link_latency = args.peer_link_latency
+     system.loopback  = WireLoopback(link_delay_ns=args.link_delay_ns)
+ 
+@@ -766,6 +767,10 @@ def main():
+              "(real two-node: this gem5 + a peer gem5)")
+     parser.add_argument("--peer-node", type=int, default=-1,
+         help="This node's id (0 or 1) for the cross-process ring")
++    parser.add_argument("--peer-transport", default="direct-ring",
++        choices=("direct-ring", "switch-adapter"),
++        help="model the complete path in the endpoint or hand packets to an "
++             "independent UB switch simulator")
+     parser.add_argument("--peer-link-latency", default="100ns",
+         help="Minimum one-way UB peer-channel propagation delay; this is the "
+              "positive lookahead used to timestamp cross-process DATA")
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 7839082..0afd1ad 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: Apache-2.0
+ 
+ #include "NICTopologySC.hh"
++#include "UbAdapterProtocol.hh"
+ #include "UdmaSimAbi.hh"
+ 
+ #include "openclicknp/sc_runtime.hpp"
+@@ -3883,29 +3884,11 @@ NICTopologySC::find_recv(uint32_t dj, RecvT &out)
+ // source/destination port identity, the sender's virtual time, and the earliest
+ // legal receiver time rather than inheriting host scheduling time.
+ namespace {
+-constexpr uint32_t OU_RING_SLOTS = 64;
+-constexpr uint32_t OU_RING_SLOT = 8192;
+-constexpr uint32_t OU_RING_DATA = 1;
+-constexpr uint32_t OU_RING_MAX_PORTS = 16;
+-
+-struct alignas(64) OuRingIndex {
+-    uint64_t value;
+-    uint8_t pad[56];
+-};
+-
+-struct alignas(64) OuRingSlotHeader {
+-    uint32_t plen;
+-    uint32_t type;
+-    uint64_t tx_tick;
+-    uint64_t arrival_tick;
+-    uint64_t seq;
+-    uint16_t src_port;
+-    uint16_t dst_port;
+-    uint8_t pad[28];
+-};
+-
+-static_assert(sizeof(OuRingIndex) == 64, "peer-ring index must occupy one cache line");
+-static_assert(sizeof(OuRingSlotHeader) == 64, "peer-ring slot header must occupy one cache line");
++constexpr uint32_t OU_RING_SLOTS = openurma_adapter::RingSlots;
++constexpr uint32_t OU_RING_SLOT = openurma_adapter::SlotBytes;
++constexpr uint32_t OU_RING_DATA =
++    static_cast<uint32_t>(openurma_adapter::MessageType::Data);
++using OuRingSlotHeader = openurma_adapter::MessageHeader;
+ 
+ bool
+ ou_packet_trace_enabled()
+@@ -3928,9 +3911,7 @@ ou_decomp_trace_enabled()
+ }
+ }
+ 
+-struct NICTopologySC::PeerRing {
+-    struct Dir { OuRingIndex head, tail; } dir[2][OU_RING_MAX_PORTS];
+-};
++struct NICTopologySC::PeerRing : openurma_adapter::Ring {};
+ 
+ static_assert(sizeof(NICTopologySC::PeerRing) == 4096,
+               "peer-ring header must occupy 4 KiB");
+@@ -4059,7 +4040,7 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+         uint64_t selected_tail = 0;
+         const OuRingSlotHeader *selected_hdr = nullptr;
+         for (uint32_t port = 0; port < ub_port_count_; ++port) {
+-            PeerRing::Dir &d = ring_->dir[rx_dir_][port];
++            auto &d = ring_->direction[rx_dir_][port];
+             const uint64_t tail = __atomic_load_n(
+                 &d.tail.value, __ATOMIC_RELAXED);
+             const uint64_t head = __atomic_load_n(
+@@ -4068,10 +4049,10 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+                 continue;
+             const auto *hdr = reinterpret_cast<const OuRingSlotHeader *>(
+                 peer_ring_slot(rx_dir_, port, tail));
+-            if (hdr->arrival_tick > effective_now)
++            if (hdr->receive_tick > effective_now)
+                 continue;
+-            if (!selected_hdr || hdr->arrival_tick < selected_hdr->arrival_tick ||
+-                (hdr->arrival_tick == selected_hdr->arrival_tick &&
++            if (!selected_hdr || hdr->receive_tick < selected_hdr->receive_tick ||
++                (hdr->receive_tick == selected_hdr->receive_tick &&
+                  port < selected_port)) {
+                 selected_port = port;
+                 selected_tail = tail;
+@@ -4081,38 +4062,54 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+         if (!selected_hdr)
+             break;
+ 
+-        PeerRing::Dir &d = ring_->dir[rx_dir_][selected_port];
++        auto &d = ring_->direction[rx_dir_][selected_port];
+         uint8_t *s = peer_ring_slot(rx_dir_, selected_port, selected_tail);
+         const auto *hdr = reinterpret_cast<const OuRingSlotHeader *>(s);
++        if (hdr->type == static_cast<uint32_t>(
++                openurma_adapter::MessageType::Sync)) {
++            panic_if(hdr->payload_length != 0,
++                     "peer ring SYNC unexpectedly carries %u bytes",
++                     hdr->payload_length);
++            peer_sync_grant_ = std::max<gem5::Tick>(
++                peer_sync_grant_, hdr->receive_tick);
++            __atomic_store_n(&d.tail.value, selected_tail + 1,
++                             __ATOMIC_RELEASE);
++            continue;
++        }
+         panic_if(hdr->type != OU_RING_DATA,
+                  "peer ring port %u slot %llu has unknown type %u",
+                  selected_port, (unsigned long long)selected_tail, hdr->type);
+-        panic_if(hdr->plen < 40 || hdr->plen > OU_RING_SLOT - sizeof(*hdr),
++        panic_if(hdr->payload_length < 40 ||
++                     hdr->payload_length > OU_RING_SLOT - sizeof(*hdr),
+                  "peer ring port %u slot %llu has invalid length %u",
+-                 selected_port, (unsigned long long)selected_tail, hdr->plen);
+-        panic_if(hdr->src_port >= ub_port_count_ ||
+-                 hdr->dst_port != selected_port,
++                 selected_port, (unsigned long long)selected_tail,
++                 hdr->payload_length);
++        panic_if(hdr->protocol_version != openurma_adapter::Version,
++                 "peer ring protocol version %u is unsupported",
++                 hdr->protocol_version);
++        panic_if(hdr->source_port >= ub_port_count_ ||
++                 hdr->destination_port != selected_port,
+                  "peer ring port identity invalid: queue=%u src=%u dst=%u",
+-                 selected_port, hdr->src_port, hdr->dst_port);
+-        const uint32_t payload_bytes = hdr->plen - 40;
++                 selected_port, hdr->source_port, hdr->destination_port);
++        const uint32_t payload_bytes = hdr->payload_length - 40;
+         const gem5::Tick minimum_path = peer_path_ticks(payload_bytes);
+-        panic_if(hdr->arrival_tick <
+-                     checked_tick_sum(hdr->tx_tick, minimum_path),
++        panic_if(hdr->receive_tick <
++                     checked_tick_sum(hdr->send_tick, minimum_path),
+                  "peer ring port %u slot %llu violates configured causal path",
+                  selected_port, (unsigned long long)selected_tail);
+ 
+-        peer_apply(s + sizeof(*hdr), hdr->plen, selected_port);
++        peer_apply(s + sizeof(*hdr), hdr->payload_length, selected_port);
+         ++peer_port_rx_packets_[selected_port];
+         peer_port_rx_bytes_[selected_port] +=
+             static_cast<uint64_t>(payload_bytes) + peer_link_overhead_bytes_;
+         peer_last_rx_arrival_ = std::max(peer_last_rx_arrival_,
+-                                         hdr->arrival_tick);
++                                         hdr->receive_tick);
+         if (ou_packet_trace_enabled()) {
+-            std::cerr << "[NIC peer-rx ring] seq=" << hdr->seq
+-                      << " src_port=" << hdr->src_port
+-                      << " dst_port=" << hdr->dst_port
+-                      << " tx=" << hdr->tx_tick
+-                      << " arrival=" << hdr->arrival_tick
++            std::cerr << "[NIC peer-rx ring] seq=" << hdr->sequence
++                      << " src_port=" << hdr->source_port
++                      << " dst_port=" << hdr->destination_port
++                      << " tx=" << hdr->send_tick
++                      << " arrival=" << hdr->receive_tick
+                       << " consume=" << effective_now << "\n";
+         }
+         __atomic_store_n(&d.tail.value, selected_tail + 1,
+@@ -4134,7 +4131,7 @@ NICTopologySC::peer_ring_tx_available()
+         return OU_RING_SLOTS;
+     uint32_t available = OU_RING_SLOTS;
+     for (uint32_t port = 0; port < ub_port_count_; ++port) {
+-        PeerRing::Dir &d = ring_->dir[tx_dir_][port];
++        auto &d = ring_->direction[tx_dir_][port];
+         const uint64_t head = __atomic_load_n(
+             &d.head.value, __ATOMIC_RELAXED);
+         const uint64_t tail = __atomic_load_n(
+@@ -4231,7 +4228,11 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
+         peer_port_for_transport(tpn, op, dcna, rtoken);
+     panic_if(src_port >= ub_port_count_,
+              "no active physical-port route for TPN %u", tpn);
+-    const uint32_t dst_port = peer_port_map_[src_port];
++    // An adapter link terminates at the same numbered switch ingress. The
++    // independent switch owns the topology port map. The legacy direct ring
++    // retains endpoint-side mapping for reproducible old experiments.
++    const uint32_t dst_port = peer_transport_ == "switch-adapter" ?
++        src_port : peer_port_map_[src_port];
+     if (peer_port_stage_free_ticks_.size() != ub_port_count_) {
+         peer_port_stage_free_ticks_.assign(
+             ub_port_count_,
+@@ -4258,8 +4259,9 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
+     ++peer_port_packets_[src_port];
+     peer_port_bytes_[src_port] += wire_bytes;
+     arrival_tick = checked_tick_sum(arrival_tick, peer_link_latency_);
+-    arrival_tick = checked_tick_sum(arrival_tick, peer_switch_delay_);
+-    if (peer_l1_switch_) {
++    if (peer_transport_ != "switch-adapter")
++        arrival_tick = checked_tick_sum(arrival_tick, peer_switch_delay_);
++    if (peer_transport_ != "switch-adapter" && peer_l1_switch_) {
+         auto &egress_free_ticks =
+             peer_switch_egress_stage_free_ticks_[dst_port];
+         for (uint32_t stage = 0; stage < peer_serialization_stages_;
+@@ -4280,7 +4282,7 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
+                  plen, OU_RING_SLOT - sizeof(OuRingSlotHeader));
+         panic_if(peer_link_latency_ == 0,
+                  "cross-process peer channel requires positive lookahead");
+-        PeerRing::Dir &d = ring_->dir[tx_dir_][dst_port];
++        auto &d = ring_->direction[tx_dir_][dst_port];
+         const uint64_t head = __atomic_load_n(&d.head.value, __ATOMIC_RELAXED);
+         const uint64_t tail = __atomic_load_n(&d.tail.value, __ATOMIC_ACQUIRE);
+         panic_if(head - tail >= OU_RING_SLOTS,
+@@ -4289,18 +4291,19 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
+         uint8_t *s = peer_ring_slot(tx_dir_, dst_port, head);
+         auto *hdr = reinterpret_cast<OuRingSlotHeader *>(s);
+         std::memset(hdr, 0, sizeof(*hdr));
+-        hdr->plen = plen;
++        hdr->payload_length = plen;
+         hdr->type = OU_RING_DATA;
+-        hdr->tx_tick = tx_tick;
+-        hdr->arrival_tick = arrival_tick;
+-        hdr->seq = peer_tx_seq_++;
+-        hdr->src_port = src_port;
+-        hdr->dst_port = dst_port;
++        hdr->send_tick = tx_tick;
++        hdr->receive_tick = arrival_tick;
++        hdr->sequence = peer_tx_seq_++;
++        hdr->source_port = src_port;
++        hdr->destination_port = dst_port;
++        hdr->protocol_version = openurma_adapter::Version;
+         ou_build_pkt(s + sizeof(*hdr), op, dcna, rtoken, rva,
+                      len, imm, order, payload, tpn, source_jetty, source_eid);
+         __atomic_store_n(&d.head.value, head + 1, __ATOMIC_RELEASE);
+         if (ou_packet_trace_enabled()) {
+-            std::cerr << "[NIC peer-tx ring] seq=" << hdr->seq
++            std::cerr << "[NIC peer-tx ring] seq=" << hdr->sequence
+                       << " src_port=" << src_port
+                       << " dst_port=" << dst_port
+                       << " tpn=" << tpn
+@@ -5190,6 +5193,10 @@ gem5::NICTopologySCParams::create() const
+              "the modeled primary/port EIDs");
+     nic->udma_endpoint_eid_ = udma_endpoint_eid;
+     nic->peer_ring_path_ = peer_ring_path;
++    panic_if(peer_transport != "direct-ring" &&
++                 peer_transport != "switch-adapter",
++             "peer_transport must be 'direct-ring' or 'switch-adapter'");
++    nic->peer_transport_ = peer_transport;
+     nic->peer_link_latency_ = peer_link_latency;
+     nic->peer_link_ticks_per_byte_ = peer_link_rate;
+     panic_if(ub_port_count == 0 || ub_port_count > 16,
+@@ -5242,6 +5249,7 @@ gem5::NICTopologySCParams::create() const
+     nic->peer_switch_delay_ = peer_switch_delay;
+     nic->peer_link_overhead_bytes_ = peer_link_overhead_bytes;
+     std::cerr << "[NIC peer topology] mode=" << peer_topology
++              << " transport=" << peer_transport
+               << " port_selection=" << peer_port_selection
+               << " port_map=";
+     for (uint32_t port = 0; port < nic->peer_port_map_.size(); ++port) {
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index 2aed175..bd115fe 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -174,6 +174,7 @@ class NICTopologySC : public sc_core::sc_module
+     int         peer_node_id_ = -1;
+     uint32_t    udma_endpoint_eid_ = 0;
+     std::string peer_ring_path_;
++    std::string peer_transport_ = "direct-ring";
+     int         tx_dir_ = 0, rx_dir_ = 0;
+     gem5::Tick  peer_link_latency_ = 0;
+     // Network/MemoryBandwidth Params arrive as simulation ticks per byte.
+@@ -193,6 +194,7 @@ class NICTopologySC : public sc_core::sc_module
+     std::vector<uint64_t> peer_port_rx_packets_;
+     std::vector<uint64_t> peer_port_rx_bytes_;
+     gem5::Tick  peer_last_rx_arrival_ = 0;
++    gem5::Tick  peer_sync_grant_ = 0;
+     uint64_t    peer_tx_seq_ = 0;
+     void peer_ring_map();
+     uint8_t *peer_ring_slot(uint32_t direction, uint32_t port,
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.py b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+index 25be25e..d1275a2 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.py
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+@@ -62,6 +62,10 @@ class NICTopologySC(SystemC_ScModule):
+         "instances = real two-node). Empty = no cross-process ring.")
+     peer_node_id  = Param.Int(-1,
+         "This node's id (0 or 1) for the cross-process ring; -1 = disabled")
++    peer_transport = Param.String("direct-ring",
++        "Cross-process topology boundary: direct-ring models the complete "
++        "path in the endpoint; switch-adapter models only the endpoint-to-"
++        "switch link and delegates switching/egress timing to ub-switch-sim")
+     udma_endpoint_eid = Param.Unsigned(0x100,
+         "Management-plane compact EID returned by the official UDMA SEID "
+         "query. It must be unique from UBUS entity EIDs and between nodes")
+diff --git a/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh b/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh
+new file mode 100644
+index 0000000..16f59b4
+--- /dev/null
++++ b/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh
+@@ -0,0 +1,69 @@
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++namespace openurma_adapter {
++
++constexpr uint64_t Magic = 0x4f55554241445054ULL; // "OUUBADPT"
++constexpr uint32_t Version = 1;
++constexpr uint32_t RingSlots = 64;
++constexpr uint32_t SlotBytes = 8192;
++constexpr uint32_t MaxPorts = 16;
++
++enum class MessageType : uint32_t {
++    Data = 1,
++    Sync = 2,
++    LinkState = 3,
++};
++
++struct alignas(64) RingIndex {
++    uint64_t value;
++    uint8_t pad[56];
++};
++
++// The common 64-byte header is deliberately independent of gem5/SystemC.
++// DATA carries the existing 40-byte OpenURMA transaction followed by payload.
++// SYNC carries no payload and promises that the sender will not subsequently
++// publish a message with an earlier receive_tick on this FIFO channel.
++struct alignas(64) MessageHeader {
++    uint32_t payload_length;
++    uint32_t type;
++    uint64_t send_tick;
++    uint64_t receive_tick;
++    uint64_t sequence;
++    uint16_t source_port;
++    uint16_t destination_port;
++    uint16_t protocol_version;
++    uint16_t flags;
++    uint8_t reserved[24];
++};
++
++struct alignas(4096) Ring {
++    struct Direction {
++        RingIndex head;
++        RingIndex tail;
++    } direction[2][MaxPorts];
++};
++
++static_assert(sizeof(RingIndex) == 64);
++static_assert(sizeof(MessageHeader) == 64);
++static_assert(sizeof(Ring) == 4096);
++
++inline constexpr std::size_t
++mappedBytes(uint32_t ports)
++{
++    return sizeof(Ring) + 2ULL * ports * RingSlots * SlotBytes;
++}
++
++inline constexpr std::size_t
++slotOffset(uint32_t ports, uint32_t direction, uint32_t port,
++           uint64_t index)
++{
++    const std::size_t queue = static_cast<std::size_t>(direction) * ports + port;
++    return sizeof(Ring) +
++        (queue * RingSlots + index % RingSlots) * SlotBytes;
++}
++
++} // namespace openurma_adapter
+-- 
+2.50.1 (Apple Git-155)
+
