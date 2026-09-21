@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run commands concurrently on two gem5 UARTs and await fresh prompts."""
+"""Run commands concurrently on gem5 UARTs and await fresh prompts."""
 
 from __future__ import annotations
 
@@ -107,14 +107,14 @@ def run_one(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ports", type=int, nargs=2, required=True)
+    parser.add_argument("--ports", type=int, nargs="+", required=True)
     command_group = parser.add_mutually_exclusive_group(required=True)
     command_group.add_argument("--command")
     command_group.add_argument(
         "--commands",
-        nargs=2,
-        metavar=("NODE0_COMMAND", "NODE1_COMMAND"),
-        help="send different commands to node0 and node1",
+        nargs="+",
+        metavar="COMMAND",
+        help="send one corresponding command to each port",
     )
     parser.add_argument(
         "--stagger",
@@ -134,7 +134,13 @@ def main() -> int:
     args = parser.parse_args()
 
     results: dict[int, str] = {}
-    commands = args.commands or [args.command, args.command]
+    if args.commands is not None and len(args.commands) != len(args.ports):
+        parser.error("--commands must provide exactly one command per port")
+    commands = (
+        args.commands
+        if args.commands is not None
+        else [args.command] * len(args.ports)
+    )
     start_gate = threading.Barrier(len(args.ports))
     threads = [
         threading.Thread(

@@ -37,9 +37,21 @@ stop_one() {
     ' _ "$label" "$pidfile" "$expected"
 }
 
-stop_one node0 "$run_root/node0/gem5.pid" "$run_root/node0"
-stop_one node1 "$run_root/node1/gem5.pid" "$run_root/node1"
+node_count="$(docker exec "$container" awk -F= \
+    '$1 == "node_count" { print $2; exit }' \
+    "$run_root/run-manifest.txt" 2>/dev/null || true)"
+node_count=${node_count:-2}
+for ((node = 0; node < node_count; ++node)); do
+    stop_one "node$node" "$run_root/node$node/gem5.pid" "$run_root/node$node"
+done
 stop_one switch "$run_root/switch/gem5.pid" "$run_root/switch"
 stop_one ub-switch "$run_root/ub-switch/gem5.pid" "$ub_switch_binary"
-stop_one relay "$run_root/relay/relay.pid" "$lab/tools/ethernet_relay.py"
+if docker exec "$container" test -r "$run_root/relay/relay.pid"; then
+    stop_one relay "$run_root/relay/relay.pid" "$lab/tools/ethernet_relay.py"
+else
+    for ((pair = 0; pair < node_count / 2; ++pair)); do
+        stop_one "relay$pair" "$run_root/relay$pair/relay.pid" \
+            "$lab/tools/ethernet_relay.py"
+    done
+fi
 echo "The container and any separate single-node gem5 session were left untouched."

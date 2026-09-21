@@ -20,8 +20,8 @@ chmod 1777 /tmp
 
 exec </dev/console >/dev/console 2>&1
 
-# The same initramfs serves the standalone guest and both dual-node guests.
-# gem5 appends openurma_node=0/1 to the dual-node kernel command line.
+# The same initramfs serves the standalone guest and every multi-node guest.
+# gem5 appends a non-negative openurma_node=N to the kernel command line.
 OPENURMA_NODE=""
 OPENURMA_PROVIDER=legacy
 OPENURMA_CPU_SWITCH=""
@@ -30,8 +30,13 @@ OPENURMA_M5OPS_MODE=inst
 OPENURMA_M5OPS_BASE=""
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
-        openurma_node=0) OPENURMA_NODE=0 ;;
-        openurma_node=1) OPENURMA_NODE=1 ;;
+        openurma_node=*)
+            node_value=${arg#*=}
+            case "$node_value" in
+                ''|*[!0-9]*) ;;
+                *) OPENURMA_NODE=$node_value ;;
+            esac
+            ;;
         openurma_provider=legacy) OPENURMA_PROVIDER=legacy ;;
         openurma_provider=udma) OPENURMA_PROVIDER=udma ;;
         openurma_provider=official) OPENURMA_PROVIDER=official ;;
@@ -45,16 +50,16 @@ done
 export OPENURMA_NODE OPENURMA_PROVIDER OPENURMA_CPU_SWITCH OPENURMA_BENCH_CPU
 export OPENURMA_M5OPS_MODE OPENURMA_M5OPS_BASE
 case "$OPENURMA_NODE" in
-    0) hostname openurma-node0; eid_last_byte=1; guest_ip=10.0.0.1 ;;
-    1) hostname openurma-node1; eid_last_byte=2; guest_ip=10.0.0.2 ;;
-    *) hostname openurma-gem5;  eid_last_byte=1; guest_ip="" ;;
+    '') hostname openurma-gem5; eid_last_byte=1; guest_ip="" ;;
+    *)
+        hostname "openurma-node$OPENURMA_NODE"
+        eid_last_byte=$((OPENURMA_NODE % 2 + 1))
+        guest_ip="10.0.0.$eid_last_byte"
+        ;;
 esac
 if [ "$OPENURMA_PROVIDER" = official ]; then
-    case "$OPENURMA_NODE" in
-        0) eid_display=0000:0000:0000:0000:0000:0000:0000:0100 ;;
-        1) eid_display=0000:0000:0000:0000:0000:0000:0000:0101 ;;
-        *) eid_display=0000:0000:0000:0000:0000:0000:0000:0100 ;;
-    esac
+    eid_suffix=$(printf '%04x' "$((0x100 + ${OPENURMA_NODE:-0}))")
+    eid_display="0000:0000:0000:0000:0000:0000:0000:$eid_suffix"
 else
     eid_display="fe80::$eid_last_byte"
 fi

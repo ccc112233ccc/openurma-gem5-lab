@@ -1,6 +1,6 @@
-# OpenURMA + gem5 双节点全系统仿真实验室
+# OpenURMA + gem5 多节点全系统仿真实验室
 
-本仓库从公开源码开始，构建可交互的 ARM64 gem5 全系统环境。两个独立 guest
+本仓库从公开源码开始，构建可交互的 ARM64 gem5 全系统环境。两个或更多独立 guest
 运行 openEuler OLK 6.6、官方 `ubcore/uburma/ubagg` 驱动、官方 UMDK/UDMA
 provider、`urma_admin` 和 `urma_perftest`；缺失的 UDMA/UB 硬件行为由 gem5
 设备模型补齐。当前版本已验证设备发现、EID 与链路状态、Jetty/TP、SQ/RQ/CQ、
@@ -122,9 +122,9 @@ host terminal must be protected. Use `poweroff -f` to stop the guest. Exiting
 the shell intentionally starts a fresh shell so an accidental `exit` does not
 kill PID 1.
 
-## Two independent interactive hosts
+## Independent interactive hosts
 
-`run-dual.sh` starts two separate gem5 processes.  Each process owns an OLK-6.6
+`run-dual.sh` starts two separate gem5 processes by default. Each process owns an OLK-6.6
 kernel, memory image, OpenURMA NIC and serial console. By default a third
 `ub-switch-sim` process connects them through two point-to-point adapters. Each
 physical link has independent full-duplex per-port queues; the switch, rather
@@ -132,6 +132,26 @@ than either endpoint, owns forwarding, port mapping, egress serialization and
 switch delay. A host-relayed e1000 link carries
 only the stock `urma_perftest` TCP handshake and resource exchange; it is kept
 outside the measured interval.
+
+The same launcher supports an even number of guests from 2 through 8. The
+first scalable topology deliberately uses adjacent independent pairs
+(`0<->1`, `2<->3`, ...), all attached to one UB switch process:
+
+```bash
+./run-dual.sh --nodes 4 --profile fast --provider official \
+  --sync-mode adapter-local
+./sync-dual.sh
+./run-paired-latency.sh --samples 100 --size 128
+./attach-nodeN.sh 2
+```
+
+Every pair has an isolated TCP/OOB setup relay; UB DATA and SYNC records pass
+through the common switch. Adapter-local synchronization waits only for the
+paired peer, whereas `global-barrier` makes all gem5 instances participate in
+one dist-gem5 barrier. This stage is intended to measure synchronization
+scaling without confusing it with arbitrary-destination routing. General EID
+routing between every node is a later topology stage; `--nodes` does not yet
+turn the adjacent-pair experiment into all-to-all traffic.
 
 The detailed `server` profile is a reduced-core Arm server slice: four 3 GHz
 `ArmO3CPU` cores with an explicit 8-wide front/back end, 192-entry ROB,
@@ -221,10 +241,11 @@ endpoint-to-endpoint transport for A/B regression. In the default
 they map `/tmp/openurma-dual.node0.adapter` and
 `/tmp/openurma-dual.node1.adapter` respectively, while the switch maps both.
 The common 64-byte Adapter header supports versioned `DATA` and `SYNC` records.
-The default `adapter-local` synchronization mode therefore has exactly three
-timed simulator processes: gem5 node 0, the UB switch, and gem5 node 1. There
-is no dist-gem5 switch process. `--sync-mode global-barrier` retains the older
-global barrier as an explicit compatibility/reference mode.
+With the default two nodes, `adapter-local` therefore has exactly three timed
+simulator processes: gem5 node 0, the UB switch, and gem5 node 1. An N-node run
+has N gem5 processes plus the same switch process; there is no dist-gem5
+switch. `--sync-mode global-barrier` retains that extra global synchronization
+process as an explicit compatibility/reference mode.
 
 The default one-way UB propagation delay is 100 ns. It is also the positive
 lookahead: every Adapter DATA record carries a `receive_tick`, and a receiver
@@ -355,8 +376,12 @@ The fixed assignments are:
 
 | guest | UART | hostname | EID | Ethernet OOB |
 | --- | ---: | --- | --- | --- |
-| node0 | 3460 | `openurma-node0` | `fe80::1` | `10.0.0.1/24` |
-| node1 | 3470 | `openurma-node1` | `fe80::2` | `10.0.0.2/24` |
+| node0 | 3460 | `openurma-node0` | `...:0100` | `10.0.0.1/24` |
+| node1 | 3470 | `openurma-node1` | `...:0101` | `10.0.0.2/24` |
+
+For larger paired runs, UARTs continue at a stride of 10, EIDs continue from
+`...:0102`, and every even/odd pair reuses `10.0.0.1/10.0.0.2` inside its own
+isolated OOB relay.
 
 First prove that payload bytes cross the two independent guest memories.  Run
 the server first:
@@ -477,8 +502,11 @@ future conservative horizon, and re-schedules itself at that tick. Because the
 guests boot independently, each synchronized ROI uses phase-relative wire
 timestamps; the switch busy-polls only while both endpoints are in that ROI.
 In the measured two-node case this makes 128-byte runs slightly faster than the
-global barrier, while 4096-byte runs remain slightly slower. Larger-node
-scaling still needs to be measured rather than inferred from two nodes.
+global barrier, while 4096-byte runs remain slightly slower. A four-node run
+with two concurrent 128-byte pairs retained identical virtual latency results
+and widened the steady-state wall-time advantage from about 3.8% to about 6%.
+The raw transcripts and methodology are in
+[`results/sync-nnode-20260921/REPORT.md`](results/sync-nnode-20260921/REPORT.md).
 In iteration mode, the optional stats reset is immediately before the first
 post-warm-up timestamp and its dump immediately follows the timestamp closing
 the final reported delta, so the ROI block covers the same samples as the

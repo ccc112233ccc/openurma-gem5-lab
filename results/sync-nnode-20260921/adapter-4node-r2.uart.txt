@@ -1,0 +1,92 @@
+--- UART 3460 ---
+ou-lat-server --profile ctp-rm-send-imm-i128  100 128 22020
+; __ou_rc=$?; printf '\n__OPENURMA_RC_3460_120861830127912__=%d\n' "$__ou_rc"
+[    0.970015] ubase 00002: UDMA: udma ctrlq store tpid list tp_list_cnt = 1.
+[    0.970019] ubase 00002: UDMA: udma ctrlq store one tpid start. tpid 1
+[    0.970039] *************udma0 udma create active tp msg info(1) CONTEXT INFO *************
+[    0.970043] udma0 udma create active tp msg info(1) CONTEXT(byte   4): 01000001
+[    0.970047] udma0 udma create active tp msg info(1) CONTEXT(byte   8): 00000001
+[    0.970051] udma0 udma create active tp msg info(1) CONTEXT(byte  12): 00000000
+[    0.970056] udma0 udma create active tp msg info(1) CONTEXT(byte  16): 00000000
+[    0.970060] udma0 udma create active tp msg info(1) CONTEXT(byte  20): 6b8b4567
+[    0.970064] udma0 udma create active tp msg info(1) CONTEXT(byte  24): 00000000
+[    0.970069] **************************************************
+[    0.970532] ubase 00002: UDMA: udma deactivate tp ex tp_id = 1
+[    0.970539] LogTag_UBCORE|ubcore_find_remove_ex_tp_info:[196]|Failed to find ex_tp_info, tp_handle: 281474993487873.
+[    0.970602] ubase 00002: UDMA: jfr sleep time = 1000 us.
+profile=ctp-rm-send-imm-i128 role=server measured_samples=100 size_bytes=128 port=22020 roi_stats=0
+ bytes   iterations  t_min[us]  t_max[us]  t_median[us]  t_avg[us]  t_stdev[us]  99%[us]  99.9%[us]  99.99%[us]  99.999%[us]
+ # synchronized warm-up deltas excluded: 5; measured samples: 100
+ 128     100         1.05       1.07       1.05          1.06       0.01         1.07     1.07       1.07        1.07   
+
+__OPENURMA_RC_3460_120861830127912__=0
+(openurma-node0) ~ #
+--- UART 3470 ---
+ou-lat-client --profile ctp-rm-send-imm-i128  100 128 22020
+; __ou_rc=$?; printf '\n__OPENURMA_RC_3470_120861830165162__=%d\n' "$__ou_rc"
+[    0.884515] ubase 00002: UDMA: udma ctrlq store tpid list tp_list_cnt = 1.
+[    0.884519] ubase 00002: UDMA: udma ctrlq store one tpid start. tpid 1
+[    0.884539] *************udma0 udma create active tp msg info(1) CONTEXT INFO *************
+[    0.884543] udma0 udma create active tp msg info(1) CONTEXT(byte   4): 01000001
+[    0.884547] udma0 udma create active tp msg info(1) CONTEXT(byte   8): 00000001
+[    0.884551] udma0 udma create active tp msg info(1) CONTEXT(byte  12): 00000000
+[    0.884555] udma0 udma create active tp msg info(1) CONTEXT(byte  16): 00000000
+[    0.884560] udma0 udma create active tp msg info(1) CONTEXT(byte  20): 6b8b4567
+[    0.884564] udma0 udma create active tp msg info(1) CONTEXT(byte  24): 00000000
+[    0.884568] **************************************************
+[    0.884980] ubase 00002: UDMA: udma deactivate tp ex tp_id = 1
+[    0.884988] LogTag_UBCORE|ubcore_find_remove_ex_tp_info:[196]|Failed to find ex_tp_info, tp_handle: 281474993487873.
+[    0.885100] ubase 00002: UDMA: jfr sleep time = 1000 us.
+profile=ctp-rm-send-imm-i128 role=client measured_samples=100 size_bytes=128 port=22020 roi_stats=0
+ bytes   iterations  t_min[us]  t_max[us]  t_median[us]  t_avg[us]  t_stdev[us]  99%[us]  99.9%[us]  99.99%[us]  99.999%[us]
+ # synchronized warm-up deltas excluded: 5; measured samples: 100
+ 128     100         1.05       1.07       1.05          1.06       0.01         1.07     1.07       1.07        1.07   
+
+__OPENURMA_RC_3470_120861830165162__=0
+(openurma-node1) ~ #
+--- UART 3480 ---
+ou-lat-server --profile ctp-rm-send-imm-i128  100 128 22021;
+ __ou_rc=$?; printf '\n__OPENURMA_RC_3480_120861830368162__=%d\n' "$__ou_rc"
+[    1.549258] ubase 00002: UDMA: udma ctrlq store tpid list tp_list_cnt = 1.
+[    1.549262] ubase 00002: UDMA: udma ctrlq store one tpid start. tpid 1
+[    1.549282] *************udma0 udma create active tp msg info(1) CONTEXT INFO *************
+[    1.549286] udma0 udma create active tp msg info(1) CONTEXT(byte   4): 01000001
+[    1.549290] udma0 udma create active tp msg info(1) CONTEXT(byte   8): 00000001
+[    1.549295] udma0 udma create active tp msg info(1) CONTEXT(byte  12): 00000000
+[    1.549299] udma0 udma create active tp msg info(1) CONTEXT(byte  16): 00000000
+[    1.549303] udma0 udma create active tp msg info(1) CONTEXT(byte  20): 6b8b4567
+[    1.549307] udma0 udma create active tp msg info(1) CONTEXT(byte  24): 00000000
+[    1.549312] **************************************************
+[    1.549723] ubase 00002: UDMA: udma deactivate tp ex tp_id = 1
+[    1.549731] LogTag_UBCORE|ubcore_find_remove_ex_tp_info:[196]|Failed to find ex_tp_info, tp_handle: 281474993487873.
+[    1.549794] ubase 00002: UDMA: jfr sleep time = 1000 us.
+profile=ctp-rm-send-imm-i128 role=server measured_samples=100 size_bytes=128 port=22021 roi_stats=0
+ bytes   iterations  t_min[us]  t_max[us]  t_median[us]  t_avg[us]  t_stdev[us]  99%[us]  99.9%[us]  99.99%[us]  99.999%[us]
+ # synchronized warm-up deltas excluded: 5; measured samples: 100
+ 128     100         1.05       1.07       1.05          1.06       0.01         1.07     1.07       1.07        1.07   
+
+__OPENURMA_RC_3480_120861830368162__=0
+(openurma-gem5) ~ #
+--- UART 3490 ---
+ou-lat-client --profile ctp-rm-send-imm-i128  100 128 22021;
+ __ou_rc=$?; printf '\n__OPENURMA_RC_3490_120861830246078__=%d\n' "$__ou_rc"
+[    1.320523] ubase 00002: UDMA: udma ctrlq store tpid list tp_list_cnt = 1.
+[    1.320527] ubase 00002: UDMA: udma ctrlq store one tpid start. tpid 1
+[    1.320547] *************udma0 udma create active tp msg info(1) CONTEXT INFO *************
+[    1.320551] udma0 udma create active tp msg info(1) CONTEXT(byte   4): 01000001
+[    1.320556] udma0 udma create active tp msg info(1) CONTEXT(byte   8): 00000001
+[    1.320560] udma0 udma create active tp msg info(1) CONTEXT(byte  12): 00000000
+[    1.320564] udma0 udma create active tp msg info(1) CONTEXT(byte  16): 00000000
+[    1.320568] udma0 udma create active tp msg info(1) CONTEXT(byte  20): 6b8b4567
+[    1.320573] udma0 udma create active tp msg info(1) CONTEXT(byte  24): 00000000
+[    1.320577] **************************************************
+[    1.321224] ubase 00002: UDMA: udma deactivate tp ex tp_id = 1
+[    1.321232] LogTag_UBCORE|ubcore_find_remove_ex_tp_info:[196]|Failed to find ex_tp_info, tp_handle: 281474993487873.
+[    1.321295] ubase 00002: UDMA: jfr sleep time = 1000 us.
+profile=ctp-rm-send-imm-i128 role=client measured_samples=100 size_bytes=128 port=22021 roi_stats=0
+ bytes   iterations  t_min[us]  t_max[us]  t_median[us]  t_avg[us]  t_stdev[us]  99%[us]  99.9%[us]  99.99%[us]  99.999%[us]
+ # synchronized warm-up deltas excluded: 5; measured samples: 100
+ 128     100         1.05       1.07       1.05          1.06       0.01         1.07     1.07       1.07        1.07   
+
+__OPENURMA_RC_3490_120861830246078__=0
+(openurma-gem5) ~ #

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -121,7 +122,8 @@ uint64_t checkedAdd(uint64_t lhs, uint64_t rhs)
 }
 
 struct Switch {
-    Mapping link[2];
+    std::vector<std::unique_ptr<Mapping>> links;
+    std::vector<uint32_t> peer_map;
     uint32_t ports;
     uint64_t link_latency_ticks;
     uint64_t switch_delay_ticks;
@@ -133,20 +135,36 @@ struct Switch {
     std::vector<std::vector<uint64_t>> last_output_timestamp;
     uint64_t forwarded = 0;
     uint64_t bytes = 0;
-    uint64_t active_phase = 0;
+    std::vector<uint64_t> active_phase;
 
-    Switch(const std::string &a, const std::string &b, uint32_t p,
+    Switch(const std::vector<std::string> &paths,
+           std::vector<uint32_t> peers, uint32_t p,
            uint64_t latency, uint64_t delay, uint64_t rate,
            uint32_t overhead, std::vector<uint32_t> mapping,
            uint32_t stages)
-      : link{Mapping(a, p), Mapping(b, p)}, ports(p),
+      : peer_map(std::move(peers)), ports(p),
         link_latency_ticks(latency), switch_delay_ticks(delay),
         rate_gbps(rate), overhead_bytes(overhead),
         serialization_stages(stages), port_map(std::move(mapping)),
-        egress_free(2, std::vector<std::vector<uint64_t>>(
+        egress_free(paths.size(), std::vector<std::vector<uint64_t>>(
             p, std::vector<uint64_t>(stages))),
-        last_output_timestamp(2, std::vector<uint64_t>(p))
+        last_output_timestamp(paths.size(), std::vector<uint64_t>(p)),
+        active_phase(paths.size())
     {
+        if (paths.size() < 2 || paths.size() != peer_map.size())
+            throw std::runtime_error(
+                "ring path and peer-map counts must match and be at least two");
+        links.reserve(paths.size());
+        for (const auto &path : paths)
+            links.emplace_back(std::make_unique<Mapping>(path, p));
+        for (uint32_t source = 0; source < peer_map.size(); ++source) {
+            const uint32_t peer = peer_map[source];
+            if (peer >= peer_map.size() || peer == source ||
+                peer_map[peer] != source) {
+                throw std::runtime_error(
+                    "peer map must describe symmetric, non-self pairs");
+            }
+        }
         if (serialization_stages != 0 && rate_gbps == 0)
             throw std::runtime_error("serialization requires a positive line rate");
     }
@@ -163,8 +181,9 @@ struct Switch {
     {
         constexpr uint32_t EndpointToSwitch = 1;
         constexpr uint32_t SwitchToEndpoint = 0;
-        Mapping &input = link[source_link];
-        Mapping &output = link[1 - source_link];
+        Mapping &input = *links[source_link];
+        const uint32_t destination_link = peer_map[source_link];
+        Mapping &output = *links[destination_link];
         auto &in = input.ring->direction[EndpointToSwitch][source_port];
         const uint64_t tail = __atomic_load_n(&in.tail.value, __ATOMIC_RELAXED);
         const uint64_t head = __atomic_load_n(&in.head.value, __ATOMIC_ACQUIRE);
@@ -201,7 +220,7 @@ struct Switch {
             const uint64_t payload = source->payload_length - 40;
             uint64_t ready = checkedAdd(source->receive_tick, switch_delay_ticks);
             for (uint32_t stage = 0; stage < serialization_stages; ++stage) {
-                auto &free = egress_free[1 - source_link][destination_port][stage];
+                auto &free = egress_free[destination_link][destination_port][stage];
                 ready = std::max(ready, free);
                 ready = checkedAdd(ready,
                     serializationTicks(payload + overhead_bytes));
@@ -209,8 +228,8 @@ struct Switch {
             }
             destination->receive_tick = std::max(
                 checkedAdd(ready, link_latency_ticks),
-                last_output_timestamp[1 - source_link][destination_port]);
-            last_output_timestamp[1 - source_link][destination_port] =
+                last_output_timestamp[destination_link][destination_port]);
+            last_output_timestamp[destination_link][destination_port] =
                 destination->receive_tick;
             ++forwarded;
             bytes += payload;
@@ -221,11 +240,11 @@ struct Switch {
             for (uint32_t stage = 0; stage < serialization_stages; ++stage)
                 promise = std::max(
                     promise,
-                    egress_free[1 - source_link][destination_port][stage]);
+                    egress_free[destination_link][destination_port][stage]);
             destination->receive_tick = std::max(
                 checkedAdd(promise, link_latency_ticks),
-                last_output_timestamp[1 - source_link][destination_port]);
-            last_output_timestamp[1 - source_link][destination_port] =
+                last_output_timestamp[destination_link][destination_port]);
+            last_output_timestamp[destination_link][destination_port] =
                 destination->receive_tick;
         } else {
             throw std::runtime_error("unsupported adapter message type");
@@ -239,40 +258,43 @@ struct Switch {
 
     void run()
     {
-        std::cerr << "[UB_SWITCH] ready ports=" << ports
+        std::cerr << "[UB_SWITCH] ready endpoints=" << links.size()
+                  << " ports=" << ports
                   << " rate_gbps=" << rate_gbps
                   << " link_latency_ticks=" << link_latency_ticks
                   << " switch_delay_ticks=" << switch_delay_ticks << '\n';
         while (!stop_requested) {
             bool progress = false;
-            const uint64_t phase0 = __atomic_load_n(
-                &link[0].ring->local_sync_phase, __ATOMIC_ACQUIRE);
-            const uint64_t phase1 = __atomic_load_n(
-                &link[1].ring->local_sync_phase, __ATOMIC_ACQUIRE);
-            const bool synchronized_active =
-                phase0 == phase1 && (phase0 & 1) != 0;
-            if (synchronized_active && phase0 != active_phase) {
-                for (auto &side : egress_free)
-                    for (auto &port : side)
-                        std::fill(port.begin(), port.end(), 0);
-                for (auto &side : last_output_timestamp)
-                    std::fill(side.begin(), side.end(), 0);
-                active_phase = phase0;
-                progress = true;
+            std::vector<uint64_t> phases(links.size());
+            for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint)
+                phases[endpoint] = __atomic_load_n(
+                    &links[endpoint]->ring->local_sync_phase,
+                    __ATOMIC_ACQUIRE);
+            bool synchronized_active = false;
+            for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint) {
+                const uint32_t peer = peer_map[endpoint];
+                const uint64_t peer_phase = phases[peer];
+                if (__atomic_load_n(
+                        &links[endpoint]->ring->peer_sync_phase,
+                        __ATOMIC_RELAXED) != peer_phase) {
+                    __atomic_store_n(
+                        &links[endpoint]->ring->peer_sync_phase, peer_phase,
+                        __ATOMIC_RELEASE);
+                    progress = true;
+                }
+                const bool pair_active = phases[endpoint] == peer_phase &&
+                                         (phases[endpoint] & 1) != 0;
+                synchronized_active |= pair_active;
+                if (pair_active && active_phase[endpoint] != phases[endpoint]) {
+                    for (auto &stage : egress_free[endpoint])
+                        std::fill(stage.begin(), stage.end(), 0);
+                    std::fill(last_output_timestamp[endpoint].begin(),
+                              last_output_timestamp[endpoint].end(), 0);
+                    active_phase[endpoint] = phases[endpoint];
+                    progress = true;
+                }
             }
-            if (__atomic_load_n(&link[1].ring->peer_sync_phase,
-                                __ATOMIC_RELAXED) != phase0) {
-                __atomic_store_n(&link[1].ring->peer_sync_phase, phase0,
-                                 __ATOMIC_RELEASE);
-                progress = true;
-            }
-            if (__atomic_load_n(&link[0].ring->peer_sync_phase,
-                                __ATOMIC_RELAXED) != phase1) {
-                __atomic_store_n(&link[0].ring->peer_sync_phase, phase1,
-                                 __ATOMIC_RELEASE);
-                progress = true;
-            }
-            for (uint32_t side = 0; side < 2; ++side)
+            for (uint32_t side = 0; side < links.size(); ++side)
                 for (uint32_t port = 0; port < ports; ++port)
                     progress |= forwardOne(side, port);
             // SimBricks-style shared-memory adapters poll on a dedicated core
@@ -315,27 +337,64 @@ std::vector<uint32_t> parseMap(const std::string &text, uint32_t ports)
     return result;
 }
 
+std::vector<uint32_t> parsePeerMap(const std::string &text)
+{
+    if (text.empty())
+        throw std::runtime_error("peer map cannot be empty");
+    std::vector<uint32_t> result;
+    std::size_t begin = 0;
+    while (begin <= text.size()) {
+        const std::size_t end = text.find(',', begin);
+        const std::string token = text.substr(
+            begin, end == std::string::npos ? std::string::npos : end - begin);
+        result.push_back(static_cast<uint32_t>(
+            parseUnsigned(token.c_str(), "peer map")));
+        if (end == std::string::npos)
+            break;
+        begin = end + 1;
+    }
+    return result;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
-    if (argc != 10) {
+    const bool multi = argc >= 2 && std::string_view(argv[1]) == "--multi";
+    if ((!multi && argc != 10) || (multi && argc < 12)) {
         std::cerr << "usage: ub-switch-sim RING0 RING1 PORTS LINK_LATENCY "
                      "SWITCH_DELAY RATE_GBPS OVERHEAD_BYTES PORT_MAP "
-                     "SERIALIZATION_STAGES\n";
+                     "SERIALIZATION_STAGES\n"
+                     "   or: ub-switch-sim --multi PORTS LINK_LATENCY "
+                     "SWITCH_DELAY RATE_GBPS OVERHEAD_BYTES PORT_MAP "
+                     "SERIALIZATION_STAGES PEER_MAP RING...\n";
         return 2;
     }
     try {
-        const uint32_t ports = static_cast<uint32_t>(parseUnsigned(argv[3], "ports"));
+        const int base = multi ? 2 : 3;
+        const uint32_t ports = static_cast<uint32_t>(
+            parseUnsigned(argv[base], "ports"));
         if (ports == 0 || ports > oa::MaxPorts)
             throw std::runtime_error("ports must be in [1,16]");
-        Switch model(argv[1], argv[2], ports,
-            parseTimeTicks(argv[4], "link latency"),
-            parseTimeTicks(argv[5], "switch delay"),
-            parseUnsigned(argv[6], "rate"),
-            static_cast<uint32_t>(parseUnsigned(argv[7], "overhead")),
-            parseMap(argv[8], ports),
-            static_cast<uint32_t>(parseUnsigned(argv[9], "serialization stages")));
+        std::vector<std::string> paths;
+        std::vector<uint32_t> peers;
+        if (multi) {
+            peers = parsePeerMap(argv[9]);
+            for (int index = 10; index < argc; ++index)
+                paths.emplace_back(argv[index]);
+        } else {
+            paths = {argv[1], argv[2]};
+            peers = {1, 0};
+        }
+        Switch model(paths, std::move(peers), ports,
+            parseTimeTicks(argv[base + 1], "link latency"),
+            parseTimeTicks(argv[base + 2], "switch delay"),
+            parseUnsigned(argv[base + 3], "rate"),
+            static_cast<uint32_t>(
+                parseUnsigned(argv[base + 4], "overhead")),
+            parseMap(argv[base + 5], ports),
+            static_cast<uint32_t>(
+                parseUnsigned(argv[base + 6], "serialization stages")));
         std::signal(SIGINT, stopHandler);
         std::signal(SIGTERM, stopHandler);
         model.run();

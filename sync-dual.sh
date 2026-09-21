@@ -20,11 +20,25 @@ case "$sync_timeout" in
 esac
 (( sync_timeout > 0 )) || die "OPENURMA_SYNC_TIMEOUT must be positive"
 
+node_count="$(docker exec "$container" awk -F= \
+    '$1 == "node_count" { print $2; exit }' \
+    "$run_root/run-manifest.txt" 2>/dev/null || true)"
+node_count=${node_count:-2}
+[[ "$node_count" =~ ^[0-9]+$ ]] && (( node_count >= 2 )) ||
+    die "run manifest has an invalid node_count"
+uart_stride=$((uart1 - uart0))
+(( uart_stride > 0 )) || die "node1 UART must exceed node0 UART"
+uart_ports=()
+for ((node = 0; node < node_count; ++node)); do
+    uart_ports+=("$((uart0 + node * uart_stride))")
+done
+
 # A usable architected timer is part of the experiment contract.  Without it,
 # OLK falls back to a 250 Hz sched_clock and the 4 ms quantization dominates the
 # reported tail even though distributed causality is still correct.
-for node in node0 node1; do
-    terminal="$run_root/$node/system.terminal"
+for ((node = 0; node < node_count; ++node)); do
+    node_name="node$node"
+    terminal="$run_root/$node_name/system.terminal"
     timer_ready=0
     for _ in $(seq 1 "$((sync_timeout / 2 + 1))"); do
         if docker exec "$container" test -f "$terminal" && \
@@ -35,33 +49,33 @@ for node in node0 node1; do
         fi
         sleep 2
     done
-    (( timer_ready )) || die "$node did not expose a working architected timer within ${sync_timeout}s"
+    (( timer_ready )) || die "$node_name did not expose a working architected timer within ${sync_timeout}s"
     if ! docker exec "$container" grep -Eq \
         'arch_timer: .*timer\(s\) running at [0-9.]+MHz' "$terminal"; then
-        die "$node has no working architected timer; restart the dual run"
+        die "$node_name has no working architected timer; restart the run"
     fi
     if docker exec "$container" grep -Eq \
         'sched_clock: .* at 250 Hz|arch_timer: Unable to find' "$terminal"; then
-        die "$node fell back to the 250 Hz clock; this run is invalid"
+        die "$node_name fell back to the 250 Hz clock; this run is invalid"
     fi
-    echo "$node architected timer: OK"
+    echo "$node_name architected timer: OK"
 done
 
 if docker exec "$container" test -e "$marker"; then
-    echo "Dual-node measurement setup is already marked ready."
+    echo "$node_count-node measurement setup is already marked ready."
     exit 0
 fi
 
-echo "Configuring both guests' host-relayed OOB control interfaces..."
-echo "Both UARTs must be detached; use ~. at the start of a line first."
+echo "Configuring all guests' pair-relayed OOB control interfaces..."
+echo "All UARTs must be detached; use ~. at the start of a line first."
 docker exec "$container" python3 "$serial_tool" \
-    --ports "$uart0" "$uart1" --command /usr/local/bin/ou-net-up \
+    --ports "${uart_ports[@]}" --command /usr/local/bin/ou-net-up \
     --timeout "$sync_timeout"
 
 cpu_mode="$(docker exec "$container" awk -F= \
     '$1 == "cpu_mode" { print $2; exit }' "$run_root/run-manifest.txt" 2>/dev/null || true)"
 docker exec "$container" touch "$marker"
-echo "Both OOB IPv4 addresses are active."
+echo "All pair-local OOB IPv4 addresses are active."
 if [[ "$cpu_mode" == server_o3 ]]; then
     echo "The guests remain on their fast boot CPUs while idle."
     echo "Each synchronized send_lat run switches to ArmO3 only for its warm-up and measured loop, then switches back."

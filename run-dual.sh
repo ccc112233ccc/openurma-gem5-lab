@@ -7,10 +7,12 @@ usage() {
     cat <<'EOF'
 usage: run-dual.sh [OPTIONS]
 
-Start two synchronized OpenURMA full-system guests. Every timing-model knob
+Start an even number of synchronized OpenURMA full-system guests, connected as
+independent communication pairs through one UB switch. Every timing-model knob
 can also be supplied through the environment variable shown below.
 
 Profiles:
+  --nodes N                     OPENURMA_NODE_COUNT (default: 2; even, 2..8)
   --profile fast|server|udma400|legacy
                                 OPENURMA_DUAL_PROFILE (default: fast;
                                 fast is the AtomicSimpleCPU functional path)
@@ -168,6 +170,7 @@ EOF
 # has the same precedence. Empty strings mean "not supplied"; zero is valid for
 # knobs which explicitly support disabling a modeled cost.
 profile="${OPENURMA_DUAL_PROFILE:-fast}"
+node_count="${OPENURMA_NODE_COUNT:-2}"
 cli_cpu_mode=""
 cli_m5ops_base=""
 cli_cpu_freq=""
@@ -291,6 +294,8 @@ need_value() {
 
 while (( $# > 0 )); do
     case "$1" in
+        --nodes) need_value "$@"; node_count=$2; shift 2 ;;
+        --nodes=*) node_count=${1#*=}; shift ;;
         --profile) need_value "$@"; profile=$2; shift 2 ;;
         --profile=*) profile=${1#*=}; shift ;;
         --cpu|--cpu-mode) need_value "$@"; cli_cpu_mode=$2; shift 2 ;;
@@ -1073,9 +1078,37 @@ dist_port="${OPENURMA_DIST_PORT:-2200}"
 dist_link_speed="${OPENURMA_DIST_LINK_SPEED:-${peer_link_rate_gbps}Gbps}"
 oob_link_speed="${OPENURMA_OOB_LINK_SPEED:-100Gbps}"
 
-case "$uart0:$uart1:$dist_port:$ub_port_count:$peer_latency_ns:$sync_quantum_ns:$peer_link_rate_gbps:$peer_serialization_stages:$peer_link_overhead_bytes:$sq_control_bytes:$wqebb_bytes:$sq_sge_bytes:$direct_wqe_max_blocks:$payload_dma_rate_gbps:$dma_max_outstanding:$udma_iotlb_entries:$num_cpus:$o3_width:$o3_rob_entries:$o3_iq_entries:$o3_lq_entries:$o3_sq_entries:$o3_load_ports:$o3_store_ports:$o3_fetch_buffer_bytes:$o3_fetch_queue_entries:$o3_phys_int_regs:$o3_phys_float_regs:$o3_phys_vec_regs:$o3_phys_vec_pred_regs:$o3_phys_mat_regs:$cache_line_size:$last_cache_level:$l1i_assoc:$l1i_mshrs:$l1i_targets:$l1i_write_buffers:$l1d_assoc:$l1d_mshrs:$l1d_targets:$l1d_write_buffers:$l2_assoc:$l2_mshrs:$l2_targets:$l2_write_buffers:$l3_assoc:$l3_mshrs:$l3_targets:$l3_write_buffers:$fabric_width_bytes:$coherent_bus_frontend_latency:$coherent_bus_forward_latency:$coherent_bus_response_latency:$coherent_bus_header_latency:$io_bus_frontend_latency:$io_bus_forward_latency:$io_bus_response_latency:$io_bus_header_latency:$io_cache_assoc:$io_cache_mshrs:$io_cache_targets:$io_cache_write_buffers:$mem_channels:$mem_channels_intlv:$mem_channel_xor_low_bit:$mem_ranks:$mem_read_buffer_size:$mem_write_buffer_size:$mem_max_accesses_per_row:$mem_write_high_thresh:$mem_write_low_thresh:$mem_min_writes_per_switch:$mem_min_reads_per_switch" in
+uart_stride=$((uart1 - uart0))
+(( uart_stride > 0 )) || die "node1 UART must be greater than node0 UART"
+node_uart() {
+    if (( $1 == 0 )); then echo "$uart0";
+    elif (( $1 == 1 )); then echo "$uart1";
+    else echo "$((uart0 + $1 * uart_stride))"; fi
+}
+node_ring_path() {
+    if (( $1 == 0 )); then echo "$ring0";
+    elif (( $1 == 1 )); then echo "$ring1";
+    else echo "/tmp/openurma-dual.node$1.adapter"; fi
+}
+node_tap_path() {
+    if (( $1 == 0 )); then echo "$tap0";
+    elif (( $1 == 1 )); then echo "$tap1";
+    else echo "/tmp/openurma-dual.eth$1.sock"; fi
+}
+peer_map=""
+for ((node = 0; node < node_count; ++node)); do
+    (( node > 0 )) && peer_map+=,
+    peer_map+="$((node ^ 1))"
+done
+
+case "$node_count:$uart0:$uart1:$dist_port:$ub_port_count:$peer_latency_ns:$sync_quantum_ns:$peer_link_rate_gbps:$peer_serialization_stages:$peer_link_overhead_bytes:$sq_control_bytes:$wqebb_bytes:$sq_sge_bytes:$direct_wqe_max_blocks:$payload_dma_rate_gbps:$dma_max_outstanding:$udma_iotlb_entries:$num_cpus:$o3_width:$o3_rob_entries:$o3_iq_entries:$o3_lq_entries:$o3_sq_entries:$o3_load_ports:$o3_store_ports:$o3_fetch_buffer_bytes:$o3_fetch_queue_entries:$o3_phys_int_regs:$o3_phys_float_regs:$o3_phys_vec_regs:$o3_phys_vec_pred_regs:$o3_phys_mat_regs:$cache_line_size:$last_cache_level:$l1i_assoc:$l1i_mshrs:$l1i_targets:$l1i_write_buffers:$l1d_assoc:$l1d_mshrs:$l1d_targets:$l1d_write_buffers:$l2_assoc:$l2_mshrs:$l2_targets:$l2_write_buffers:$l3_assoc:$l3_mshrs:$l3_targets:$l3_write_buffers:$fabric_width_bytes:$coherent_bus_frontend_latency:$coherent_bus_forward_latency:$coherent_bus_response_latency:$coherent_bus_header_latency:$io_bus_frontend_latency:$io_bus_forward_latency:$io_bus_response_latency:$io_bus_header_latency:$io_cache_assoc:$io_cache_mshrs:$io_cache_targets:$io_cache_write_buffers:$mem_channels:$mem_channels_intlv:$mem_channel_xor_low_bit:$mem_ranks:$mem_read_buffer_size:$mem_write_buffer_size:$mem_max_accesses_per_row:$mem_write_high_thresh:$mem_write_low_thresh:$mem_min_writes_per_switch:$mem_min_reads_per_switch" in
     *[!0-9:]*) die "ports, nanosecond values, rates, stages, and byte counts must be decimal integers" ;;
 esac
+(( node_count >= 2 && node_count <= 8 && node_count % 2 == 0 )) ||
+    die "--nodes must be an even integer between 2 and 8"
+if (( node_count != 2 )) && [[ "$ub_transport" != switch-adapter ]]; then
+    die "more than two nodes currently require --ub-transport switch-adapter"
+fi
 case "$coherent_bus_snoop_response_latency:$memory_bus_frontend_latency:$memory_bus_forward_latency:$memory_bus_response_latency:$memory_bus_snoop_response_latency:$memory_bus_header_latency" in
     *[!0-9:]*) die "coherent and memory bus latencies must be decimal integers" ;;
 esac
@@ -1289,6 +1322,8 @@ peer_ring_bytes=$((8192 + 2 * ub_port_count * 64 * 8192))
 print_resolved_config() {
     cat <<EOF
 manifest_version=1
+node_count=$node_count
+pairing=adjacent_xor_1
 profile=$profile
 profile_revision=$profile_revision
 provider=$provider
@@ -1516,32 +1551,46 @@ pid_is_live() {
     ' _ "$1" "$2"
 }
 
-for node in node0 node1 switch; do
-    if pid_is_live "$run_root/$node/gem5.pid" "$run_root/$node"; then
-        die "$node is already running; use status-dual.sh or stop-dual.sh"
+for ((node = 0; node < node_count; ++node)); do
+    if pid_is_live "$run_root/node$node/gem5.pid" "$run_root/node$node"; then
+        die "node$node is already running; use status-dual.sh or stop-dual.sh"
     fi
 done
+if pid_is_live "$run_root/switch/gem5.pid" "$run_root/switch"; then
+    die "switch is already running; use status-dual.sh or stop-dual.sh"
+fi
 if pid_is_live "$run_root/ub-switch/gem5.pid" "$ub_switch_binary"; then
     die "UB switch is already running; use status-dual.sh or stop-dual.sh"
 fi
-if pid_is_live "$run_root/relay/relay.pid" "$lab/tools/ethernet_relay.py"; then
-    die "relay is already running; use status-dual.sh or stop-dual.sh"
-fi
+for ((pair = 0; pair < node_count / 2; ++pair)); do
+    if pid_is_live "$run_root/relay$pair/relay.pid" \
+            "$lab/tools/ethernet_relay.py"; then
+        die "relay$pair is already running; use status-dual.sh or stop-dual.sh"
+    fi
+done
 
 if docker exec "$container" test -d "$run_root"; then
     stamp=$(date +%Y%m%d-%H%M%S)
     docker exec "$container" mv "$run_root" "$run_root.previous-$stamp"
     echo "Archived the previous run as $run_root.previous-$stamp"
 fi
-docker exec "$container" mkdir -p "$run_root/node0" "$run_root/node1" \
-    "$run_root/switch" "$run_root/ub-switch" "$run_root/relay"
+run_directories=("$run_root/switch" "$run_root/ub-switch")
+ring_paths=()
+tap_paths=()
+for ((node = 0; node < node_count; ++node)); do
+    run_directories+=("$run_root/node$node" "$run_root/relay$((node / 2))")
+    ring_paths+=("$(node_ring_path "$node")")
+    tap_paths+=("$(node_tap_path "$node")")
+done
+docker exec "$container" mkdir -p "${run_directories[@]}"
 print_resolved_config | docker exec -i "$container" sh -c \
     'umask 022; tee "$1" >/dev/null' _ "$run_root/run-manifest.txt"
-docker exec "$container" rm -f "$ring" "$ring0" "$ring1" "$tap0" "$tap1"
+docker exec "$container" rm -f "$ring" "${ring_paths[@]}" "${tap_paths[@]}"
 # Must match the per-port trailing-slot ABI in NICTopologySC.cc.
 if [[ "$ub_transport" == switch-adapter ]]; then
-    docker exec "$container" truncate -s "$peer_ring_bytes" "$ring0"
-    docker exec "$container" truncate -s "$peer_ring_bytes" "$ring1"
+    for node_ring in "${ring_paths[@]}"; do
+        docker exec "$container" truncate -s "$peer_ring_bytes" "$node_ring"
+    done
     docker exec "$container" test -r "$ub_switch_source" ||
         die "missing UB switch source: $ub_switch_source"
     docker exec "$container" mkdir -p "$(dirname "$ub_switch_binary")"
@@ -1559,7 +1608,7 @@ if [[ "$sync_mode" == global-barrier ]]; then
         bash "$lab/tools/run-background.sh" \
         "$run_root/switch/gem5.pid" "$run_root/switch/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$run_root/switch" "$switch_config" \
-        --is-switch --dist-size=2 --dist-rank=0 \
+        --is-switch --dist-size="$node_count" --dist-rank=0 \
         --dist-server-port="$dist_port" --dist-sync-start=0t \
         --dist-sync-repeat="${sync_quantum_ns}ns" \
         --ethernet-linkdelay="${peer_latency_ns}ns" \
@@ -1579,10 +1628,11 @@ if [[ "$ub_transport" == switch-adapter ]]; then
     docker exec -d "$container" \
         bash "$lab/tools/run-background.sh" \
         "$run_root/ub-switch/gem5.pid" "$run_root/ub-switch/gem5.log" \
-        "$ub_switch_binary" "$ring0" "$ring1" "$ub_port_count" \
+        "$ub_switch_binary" --multi "$ub_port_count" \
         "${peer_latency_ns}ns" "$peer_switch_delay" \
         "$peer_link_rate_gbps" "$peer_link_overhead_bytes" \
-        "${peer_port_map:-}" "$peer_serialization_stages"
+        "${peer_port_map:-}" "$peer_serialization_stages" \
+        "$peer_map" "${ring_paths[@]}"
     for _ in $(seq 1 100); do
         if docker exec "$container" grep -q '\[UB_SWITCH\] ready' \
             "$run_root/ub-switch/gem5.log" 2>/dev/null; then
@@ -1604,7 +1654,7 @@ launch_node() {
     node_ring="$ring"
     peer_node="$node"
     if [[ "$ub_transport" == switch-adapter ]]; then
-        if [[ "$node" == 0 ]]; then node_ring="$ring0"; else node_ring="$ring1"; fi
+        node_ring=${ring_paths[$node]}
         # Each endpoint is side zero of its own point-to-point adapter link.
         peer_node=0
     fi
@@ -1614,7 +1664,7 @@ launch_node() {
         sync_args+=(--adapter-local-sync --dist-size=0)
         adapter_sync_env=1
     else
-        sync_args+=(--dist-rank="$node" --dist-size=2)
+        sync_args+=(--dist-rank="$node" --dist-size="$node_count")
         sync_args+=(--dist-server-name=127.0.0.1)
         sync_args+=(--dist-server-port="$actual_dist_port")
         sync_args+=(--dist-sync-start=0t)
@@ -1750,31 +1800,37 @@ launch_node() {
         --extra-cmdline="openurma_node=$node openurma_provider=$provider"
 }
 
-launch_node 0 "$uart0" 02:00:00:00:00:01 "$tap0"
-launch_node 1 "$uart1" 02:00:00:00:00:02 "$tap1"
+for ((node = 0; node < node_count; ++node)); do
+    printf -v node_mac '02:00:00:00:00:%02x' "$((node + 1))"
+    launch_node "$node" "$(node_uart "$node")" "$node_mac" \
+        "${tap_paths[$node]}"
+done
 
 # The TCP control plane is intentionally outside the fine-grained virtual-time
 # barrier. Perftest enters the conservative barrier collectively only after
 # this channel has completed its final pre-measurement handshake.
-docker exec -d "$container" \
-    bash "$lab/tools/run-background.sh" \
-    "$run_root/relay/relay.pid" "$run_root/relay/relay.log" \
-    python3 "$lab/tools/ethernet_relay.py" "unix:$tap0" "unix:$tap1"
+for ((pair = 0; pair < node_count / 2; ++pair)); do
+    first=$((pair * 2))
+    second=$((first + 1))
+    docker exec -d "$container" \
+        bash "$lab/tools/run-background.sh" \
+        "$run_root/relay$pair/relay.pid" "$run_root/relay$pair/relay.log" \
+        python3 "$lab/tools/ethernet_relay.py" \
+        "unix:${tap_paths[$first]}" "unix:${tap_paths[$second]}"
+done
 
-echo "Started two independent gem5 full-system guests:"
-if [[ "$provider" == official ]]; then
-    echo "  node0 UART: localhost:$uart0, EID ...:0100, OOB 10.0.0.1"
-    echo "  node1 UART: localhost:$uart1, EID ...:0101, OOB 10.0.0.2"
-else
-    echo "  node0 UART: localhost:$uart0, EID fe80::1, OOB 10.0.0.1"
-    echo "  node1 UART: localhost:$uart1, EID fe80::2, OOB 10.0.0.2"
-fi
+echo "Started $node_count independent gem5 full-system guests:"
+for ((node = 0; node < node_count; ++node)); do
+    printf '  node%d UART: localhost:%s, EID ...:%04x, OOB pair %d\n' \
+        "$node" "$(node_uart "$node")" "$((0x100 + node))" \
+        "$((node / 2))"
+done
 echo "  model profile: $profile ($num_cpus x $cpu_mode at $cpu_freq)"
 echo "  cache: private $l1i_size I + $l1d_size D + $l2_size L2; shared $l3_size L3"
 echo "  memory: $mem_size modeled, Linux limited to $guest_mem_limit; $mem_channels x $mem_type, $mem_ranks rank/channel"
 echo "  resolved parameters: $run_root/run-manifest.txt"
 if [[ "$ub_transport" == switch-adapter ]]; then
-    echo "  UB adapters: $ring0 and $ring1"
+    echo "  UB adapters: ${ring_paths[*]}"
     echo "  UB switch process: $run_root/ub-switch/gem5.log"
 else
     echo "  UB peer ring: $ring"
@@ -1788,11 +1844,9 @@ if [[ "$sync_mode" == adapter-local ]]; then
 else
     echo "  synchronization: dist-gem5 global barrier at localhost:$actual_dist_port (${sync_quantum_ns} ns quantum)"
 fi
-echo "  OOB relay: $tap0 <-> $tap1 (setup only)"
+echo "  OOB relays: adjacent pairs 0<->1, 2<->3, ... (setup only)"
 echo
-echo "After both shells are ready, detach any existing UART clients and run:"
+echo "After all shells are ready, detach any existing UART clients and run:"
 echo "  bash $lab_host/sync-dual.sh"
 echo
-echo "Attach from two host terminals:"
-echo "  bash $lab_host/attach-node0.sh"
-echo "  bash $lab_host/attach-node1.sh"
+echo "Attach node N with: bash $lab_host/attach-nodeN.sh N"

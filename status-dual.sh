@@ -31,13 +31,24 @@ show_process() {
     fi
 }
 
-show_process node0 "$run_root/node0/gem5.pid"
-show_process node1 "$run_root/node1/gem5.pid"
+node_count="$(docker exec "$container" awk -F= \
+    '$1 == "node_count" { print $2; exit }' \
+    "$run_root/run-manifest.txt" 2>/dev/null || true)"
+node_count=${node_count:-2}
+for ((node = 0; node < node_count; ++node)); do
+    show_process "node$node" "$run_root/node$node/gem5.pid"
+done
 show_process switch "$run_root/switch/gem5.pid"
 show_process ub-switch "$run_root/ub-switch/gem5.pid"
-show_process relay "$run_root/relay/relay.pid"
+if docker exec "$container" test -r "$run_root/relay/relay.pid"; then
+    show_process relay "$run_root/relay/relay.pid"
+else
+    for ((pair = 0; pair < node_count / 2; ++pair)); do
+        show_process "relay$pair" "$run_root/relay$pair/relay.pid"
+    done
+fi
 
-for node in 0 1; do
+for ((node = 0; node < node_count; ++node)); do
     transcript="$run_root/node$node/system.terminal"
     if docker exec "$container" test -r "$transcript"; then
         if docker exec "$container" grep -aq 'OpenURMA Tier-G interactive guest' "$transcript"; then
@@ -48,5 +59,8 @@ for node in 0 1; do
     fi
 done
 
-echo "UARTs: node0 localhost:$uart0, node1 localhost:$uart1"
-echo "Logs:  $run_root/node{0,1}/gem5.log, system.terminal, switch/gem5.log, ub-switch/gem5.log, and relay/relay.log"
+uart_stride=$((uart1 - uart0))
+for ((node = 0; node < node_count; ++node)); do
+    echo "node$node UART: localhost:$((uart0 + node * uart_stride))"
+done
+echo "Logs:  $run_root/nodeN/gem5.log, system.terminal, switch/gem5.log, ub-switch/gem5.log, and relayN/relay.log"
