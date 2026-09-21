@@ -467,12 +467,18 @@ the latency loop, then collectively disables synchronization before reporting.
 The same unmodified guest command selects the legacy dist-gem5 implementation
 when the launcher is run with `--sync-mode global-barrier`.
 
-A two-mode host-performance profile is retained in
-[`results/sync-ab-20260921/REPORT.md`](results/sync-ab-20260921/REPORT.md).
-For the current two-node implementation, Adapter-local preserves the modeled
-latency but is slower than the mature global barrier because it returns through
-Python for tens of thousands of short `m5.simulate()` slices. Treat it as the
-scalable process boundary, not yet as a speed optimization.
+The original Python-stepped comparison is retained in
+[`results/sync-ab-20260921/REPORT.md`](results/sync-ab-20260921/REPORT.md), and
+the replacement C++ event-queue implementation is profiled in
+[`results/sync-cpp-ab-20260921/REPORT.md`](results/sync-cpp-ab-20260921/REPORT.md).
+Adapter-local no longer returns through Python for each lookahead interval.
+The NIC's C++ event drains DATA/SYNC records, polls until the peer publishes a
+future conservative horizon, and re-schedules itself at that tick. Because the
+guests boot independently, each synchronized ROI uses phase-relative wire
+timestamps; the switch busy-polls only while both endpoints are in that ROI.
+In the measured two-node case this makes 128-byte runs slightly faster than the
+global barrier, while 4096-byte runs remain slightly slower. Larger-node
+scaling still needs to be measured rather than inferred from two nodes.
 In iteration mode, the optional stats reset is immediately before the first
 post-warm-up timestamp and its dump immediately follows the timestamp closing
 the final reported delta, so the ROI block covers the same samples as the
@@ -682,7 +688,7 @@ change the simulator/kernel ABI:
 | Component | Version or exact commit |
 | --- | --- |
 | gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `724651433c9bdee2c7f0484ab85b9620b0810993` |
-| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `7f4fa814f42c1fdc9d38effb40e9c0702a3eae1c` |
+| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `8260ffe97c5ec1bc23a948a3d32e6cbaadd25177` |
 | OpenClickNP | `c1c6acc58032a1894507d88659b3cca668b0e1a5` |
 | vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `34960cc2610cda1319e999f15dc19ea62a1dde91` |
 | openEuler OLK-6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |

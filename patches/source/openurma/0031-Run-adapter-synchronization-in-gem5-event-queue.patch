@@ -1,0 +1,399 @@
+From 8260ffe97c5ec1bc23a948a3d32e6cbaadd25177 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Mon, 21 Sep 2026 17:56:32 +0800
+Subject: [PATCH] Run adapter synchronization in gem5 event queue
+
+---
+ .../configs/single_node_fs_clean.py           |  63 +---------
+ .../gem5_scaffold/src/NICTopologySC.cc        | 113 +++++++++++++++---
+ .../gem5_scaffold/src/NICTopologySC.hh        |  22 ++--
+ .../gem5_scaffold/src/NICTopologySC.py        |   1 -
+ 4 files changed, 119 insertions(+), 80 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index 37da59d..613e487 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -1039,52 +1039,19 @@ def main():
+     # per-experiment (--restore-from) to skip the boot.
+     switched_to_o3 = False
+     adapter_sync_active = False
+-    adapter_wait_started = None
+-    adapter_profile = None
+     while True:
+-        if adapter_sync_active:
+-            adapter_profile["steps"] += 1
+-            safe_tick = root.system.nic.adapterSyncStep()
+-            now = m5.curTick()
+-            if safe_tick == 0:
+-                adapter_profile["wait_polls"] += 1
+-                if adapter_wait_started is None:
+-                    adapter_wait_started = time.monotonic()
+-                elif time.monotonic() - adapter_wait_started > 30:
+-                    raise RuntimeError(
+-                        "timed out waiting for an Adapter SYNC promise"
+-                    )
+-                time.sleep(0.00002)
+-                continue
+-            adapter_wait_started = None
+-            if safe_tick < now:
+-                raise RuntimeError(
+-                    f"Adapter safe tick {safe_tick} is behind current {now}"
+-                )
+-            if safe_tick == now:
+-                # adapterSyncStep() drains ready heads before inspecting the
+-                # next one. Repeat once to consume a same-tick FIFO group.
+-                adapter_profile["same_tick_steps"] += 1
+-                continue
+-            adapter_profile["simulate_slices"] += 1
+-            event = m5.simulate(safe_tick - now)
+-        else:
+-            event = (m5.simulate(kvm_max_run_slice_ticks)
+-                     if kvm_max_run_slice_ticks is not None else m5.simulate())
++        # Adapter-local synchronization is a C++ event in gem5's event queue,
++        # following SimBricks' adapter structure. Python sees only the two
++        # collective guest pseudo instructions that enter and leave an ROI.
++        event = (m5.simulate(kvm_max_run_slice_ticks)
++                 if kvm_max_run_slice_ticks is not None else m5.simulate())
+         cause = event.getCause()
+-        # A bounded simulate() call may leave its limit exit event pending when
+-        # the guest first exits through the Adapter OFF pseudo instruction.
+-        # The next unbounded call consumes that harmless stale event.  Keep the
+-        # full-system guest alive in both the active and just-disabled states.
+-        if args.adapter_local_sync and cause == "simulate() limit reached":
+-            continue
+         if kvm_max_run_slice_ticks is not None and \
+                 cause == "simulate() limit reached":
+             continue
+         print(f"[single_node_fs_clean] exited @ tick {m5.curTick()} because {cause}")
+         if cause == "adapter sync toggle" and args.adapter_local_sync:
+             requested_state = not adapter_sync_active
+-            adapter_wait_started = None
+             handshake_started = time.monotonic()
+             while not root.system.nic.adapterSyncToggle(requested_state):
+                 if time.monotonic() - handshake_started > 30:
+@@ -1093,26 +1060,6 @@ def main():
+                     )
+                 time.sleep(0.00002)
+             adapter_sync_active = requested_state
+-            if adapter_sync_active:
+-                adapter_profile = {
+-                    "steps": 0,
+-                    "wait_polls": 0,
+-                    "same_tick_steps": 0,
+-                    "simulate_slices": 0,
+-                    "host_started": time.monotonic(),
+-                    "tick_started": m5.curTick(),
+-                }
+-            else:
+-                host_elapsed = time.monotonic() - adapter_profile["host_started"]
+-                tick_elapsed = m5.curTick() - adapter_profile["tick_started"]
+-                print("[single_node_fs_clean] Adapter-local profile "
+-                      f"host_seconds={host_elapsed:.6f} "
+-                      f"virtual_ticks={tick_elapsed} "
+-                      f"steps={adapter_profile['steps']} "
+-                      f"wait_polls={adapter_profile['wait_polls']} "
+-                      f"same_tick_steps={adapter_profile['same_tick_steps']} "
+-                      f"simulate_slices={adapter_profile['simulate_slices']}")
+-                adapter_profile = None
+             print("[single_node_fs_clean] Adapter-local synchronization "
+                   f"{'enabled' if adapter_sync_active else 'disabled'} at "
+                   f"tick {m5.curTick()}")
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 43b40cf..ccbe917 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -1655,6 +1655,8 @@ NICTopologySC::NICTopologySC(sc_core::sc_module_name nm)
+                     gem5::InvalidPortID),
+     dma_port(std::string(name()) + ".dma", *this),
+     msi_port(std::string(name()) + ".msi", *this),
++    adapter_sync_event_([this] { process_adapter_sync_event(); },
++                        std::string(name()) + ".adapter_sync", false, 10),
+     _doorbell_drv("_doorbell_drv"),
+     _wire_rx_drv ("_wire_rx_drv"),
+     _cqe_tap     ("_cqe_tap"),
+@@ -4035,6 +4037,7 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+     if (!ring_) return;
+     const gem5::Tick effective_now = checked_tick_sum(
+         gem5::curTick(), delay.value());
++    const gem5::Tick effective_wire_now = adapter_wire_tick(effective_now);
+     while (true) {
+         uint32_t selected_port = ub_port_count_;
+         uint64_t selected_tail = 0;
+@@ -4049,7 +4052,7 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+                 continue;
+             const auto *hdr = reinterpret_cast<const OuRingSlotHeader *>(
+                 peer_ring_slot(rx_dir_, port, tail));
+-            if (hdr->receive_tick > effective_now)
++            if (hdr->receive_tick > effective_wire_now)
+                 continue;
+             if (!selected_hdr || hdr->receive_tick < selected_hdr->receive_tick ||
+                 (hdr->receive_tick == selected_hdr->receive_tick &&
+@@ -4102,8 +4105,8 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+         ++peer_port_rx_packets_[selected_port];
+         peer_port_rx_bytes_[selected_port] +=
+             static_cast<uint64_t>(payload_bytes) + peer_link_overhead_bytes_;
+-        peer_last_rx_arrival_ = std::max(peer_last_rx_arrival_,
+-                                         hdr->receive_tick);
++        peer_last_rx_arrival_ = std::max(
++            peer_last_rx_arrival_, adapter_local_tick(hdr->receive_tick));
+         if (ou_packet_trace_enabled()) {
+             std::cerr << "[NIC peer-rx ring] seq=" << hdr->sequence
+                       << " src_port=" << hdr->source_port
+@@ -4117,6 +4120,26 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+     }
+ }
+ 
++gem5::Tick
++NICTopologySC::adapter_wire_tick(gem5::Tick local_tick) const
++{
++    if (peer_transport_ != "switch-adapter" || !peer_sync_local_active_)
++        return local_tick;
++    panic_if(local_tick < adapter_sync_tick_started_,
++             "adapter local tick %llu precedes phase epoch %llu",
++             (unsigned long long)local_tick,
++             (unsigned long long)adapter_sync_tick_started_);
++    return local_tick - adapter_sync_tick_started_;
++}
++
++gem5::Tick
++NICTopologySC::adapter_local_tick(gem5::Tick wire_tick) const
++{
++    if (peer_transport_ != "switch-adapter" || !peer_sync_local_active_)
++        return wire_tick;
++    return checked_tick_sum(adapter_sync_tick_started_, wire_tick);
++}
++
+ bool
+ NICTopologySC::peer_ring_tx_full()
+ {
+@@ -4145,10 +4168,10 @@ NICTopologySC::peer_ring_tx_available()
+ }
+ 
+ uint64_t
+-NICTopologySC::adapterSyncStep()
++NICTopologySC::adapter_sync_step()
+ {
+     panic_if(peer_transport_ != "switch-adapter" || peer_node_id_ < 0,
+-             "adapterSyncStep requires a cross-process switch adapter");
++             "adapter_sync_step requires a cross-process switch adapter");
+     panic_if(peer_link_latency_ == 0,
+              "adapter local synchronization requires positive lookahead");
+     peer_ring_map();
+@@ -4156,6 +4179,7 @@ NICTopologySC::adapterSyncStep()
+     peer_ring_drain(delay);
+ 
+     const gem5::Tick now = gem5::curTick();
++    const gem5::Tick wire_now = adapter_wire_tick(now);
+     const uint64_t remote_phase = __atomic_load_n(
+         &ring_->peer_sync_phase, __ATOMIC_ACQUIRE);
+     if (remote_phase > peer_sync_phase_ && (remote_phase & 1) == 0) {
+@@ -4168,7 +4192,7 @@ NICTopologySC::adapterSyncStep()
+                   << " tick=" << now << "\n";
+         return gem5::MaxTick;
+     }
+-    if (peer_last_sync_sent_ != now) {
++    if (peer_last_sync_sent_ != wire_now) {
+         // Avoid publishing a partial multi-port promise: either every output
+         // FIFO has room for this virtual-time horizon or none is modified.
+         for (uint32_t port = 0; port < ub_port_count_; ++port) {
+@@ -4189,9 +4213,9 @@ NICTopologySC::adapterSyncStep()
+             std::memset(header, 0, sizeof(*header));
+             header->type = static_cast<uint32_t>(
+                 openurma_adapter::MessageType::Sync);
+-            header->send_tick = now;
++            header->send_tick = wire_now;
+             header->receive_tick = checked_tick_sum(
+-                now, peer_link_latency_);
++                wire_now, peer_link_latency_);
+             header->sequence = peer_tx_seq_++;
+             header->source_port = port;
+             header->destination_port = port;
+@@ -4199,7 +4223,7 @@ NICTopologySC::adapterSyncStep()
+             __atomic_store_n(&direction.head.value, head + 1,
+                              __ATOMIC_RELEASE);
+         }
+-        peer_last_sync_sent_ = now;
++        peer_last_sync_sent_ = wire_now;
+     }
+ 
+     gem5::Tick next = gem5::MaxTick;
+@@ -4216,13 +4240,48 @@ NICTopologySC::adapterSyncStep()
+         panic_if(header->protocol_version != openurma_adapter::Version,
+                  "adapter protocol version %u is unsupported",
+                  header->protocol_version);
+-        panic_if(header->receive_tick < now,
++        panic_if(header->receive_tick < wire_now,
+                  "adapter delivered stale timestamp %llu below current %llu",
+                  (unsigned long long)header->receive_tick,
+-                 (unsigned long long)now);
++                 (unsigned long long)wire_now);
+         next = std::min<gem5::Tick>(next, header->receive_tick);
+     }
+-    return next == gem5::MaxTick ? 0 : next;
++    return next == gem5::MaxTick ? 0 : adapter_local_tick(next);
++}
++
++void
++NICTopologySC::process_adapter_sync_event()
++{
++    // Follow the SimBricks gem5 adapter pattern: this callback is itself the
++    // conservative horizon in gem5's event queue. If the peer has not yet
++    // published a future timestamp, remain in C++ and poll the shared-memory
++    // FIFO instead of returning through Python and repeatedly re-entering
++    // m5.simulate(). Once a future promise exists, schedule this event at that
++    // exact tick; no ordinary gem5 event can run beyond it first.
++    while (peer_sync_local_active_) {
++        ++adapter_sync_steps_;
++        const gem5::Tick safe_tick = adapter_sync_step();
++        if (safe_tick == 0) {
++            ++adapter_sync_wait_polls_;
++            continue;
++        }
++        if (safe_tick == gem5::MaxTick) {
++            // The peer is frozen at its OFF pseudo instruction. Leave this
++            // event unscheduled so the local guest can run to the matching
++            // instruction; adapterSyncToggle(false) completes the handshake.
++            return;
++        }
++        if (safe_tick <= gem5::curTick()) {
++            // A promise for the tick currently being serviced is legal.  As
++            // in the SimBricks adapter, keep polling/consuming in C++ until
++            // the peer publishes a strictly future conservative horizon.
++            ++adapter_sync_wait_polls_;
++            continue;
++        }
++        ++adapter_sync_event_slices_;
++        gem5::curEventQueue()->schedule(&adapter_sync_event_, safe_tick);
++        return;
++    }
+ }
+ 
+ bool
+@@ -4232,17 +4291,43 @@ NICTopologySC::adapterSyncToggle(bool active)
+              "adapterSyncToggle requires a cross-process switch adapter");
+     peer_ring_map();
+     if (active != peer_sync_local_active_) {
++        if (adapter_sync_event_.scheduled())
++            gem5::curEventQueue()->deschedule(&adapter_sync_event_);
+         ++peer_sync_phase_;
+         panic_if(bool(peer_sync_phase_ & 1) != active,
+                  "adapter synchronization phase parity is inconsistent");
+         peer_sync_local_active_ = active;
+         peer_last_sync_sent_ = gem5::MaxTick;
++        if (active) {
++            adapter_sync_steps_ = 0;
++            adapter_sync_wait_polls_ = 0;
++            adapter_sync_event_slices_ = 0;
++            adapter_sync_host_started_ = std::chrono::steady_clock::now();
++            adapter_sync_tick_started_ = gem5::curTick();
++        }
+         __atomic_store_n(&ring_->local_sync_phase, peer_sync_phase_,
+                          __ATOMIC_RELEASE);
+     }
+     const uint64_t remote_phase = __atomic_load_n(
+         &ring_->peer_sync_phase, __ATOMIC_ACQUIRE);
+     if (remote_phase >= peer_sync_phase_) {
++        if (active && !adapter_sync_event_.scheduled()) {
++            gem5::curEventQueue()->schedule(
++                &adapter_sync_event_, gem5::curTick());
++        } else if (!active) {
++            const double host_seconds =
++                std::chrono::duration<double>(
++                    std::chrono::steady_clock::now() -
++                    adapter_sync_host_started_).count();
++            std::cerr << "[NIC adapter-sync-profile] host_seconds="
++                      << host_seconds
++                      << " virtual_ticks="
++                      << (gem5::curTick() - adapter_sync_tick_started_)
++                      << " steps=" << adapter_sync_steps_
++                      << " wait_polls=" << adapter_sync_wait_polls_
++                      << " event_slices=" << adapter_sync_event_slices_
++                      << "\n";
++        }
+         std::cerr << "[NIC adapter-sync] toggle active=" << active
+                   << " local_phase=" << peer_sync_phase_
+                   << " remote_phase=" << remote_phase
+@@ -4401,8 +4486,8 @@ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
+         std::memset(hdr, 0, sizeof(*hdr));
+         hdr->payload_length = plen;
+         hdr->type = OU_RING_DATA;
+-        hdr->send_tick = tx_tick;
+-        hdr->receive_tick = arrival_tick;
++        hdr->send_tick = adapter_wire_tick(tx_tick);
++        hdr->receive_tick = adapter_wire_tick(arrival_tick);
+         hdr->sequence = peer_tx_seq_++;
+         hdr->source_port = src_port;
+         hdr->destination_port = dst_port;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index b8c733f..cfb188e 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -35,11 +35,12 @@
+ 
+ #include "mem/port.hh"
+ #include "mem/request.hh"
++#include "sim/eventq.hh"
+ #include <utility>
+ #include <deque>
+ 
+ #include <array>
+-#include <deque>
++#include <chrono>
+ #include <tuple>
+ #include <memory>
+ 
+@@ -198,12 +199,22 @@ class NICTopologySC : public sc_core::sc_module
+     gem5::Tick  peer_last_sync_sent_ = gem5::MaxTick;
+     uint64_t    peer_sync_phase_ = 0;
+     bool        peer_sync_local_active_ = false;
++    gem5::EventFunctionWrapper adapter_sync_event_;
++    uint64_t    adapter_sync_steps_ = 0;
++    uint64_t    adapter_sync_wait_polls_ = 0;
++    uint64_t    adapter_sync_event_slices_ = 0;
++    std::chrono::steady_clock::time_point adapter_sync_host_started_;
++    gem5::Tick  adapter_sync_tick_started_ = 0;
+     uint64_t    peer_tx_seq_ = 0;
+     void peer_ring_map();
+     uint8_t *peer_ring_slot(uint32_t direction, uint32_t port,
+                             uint64_t index);
+     bool peer_ring_tx_full();
+     void peer_ring_drain(sc_core::sc_time &delay);
++    gem5::Tick adapter_wire_tick(gem5::Tick local_tick) const;
++    gem5::Tick adapter_local_tick(gem5::Tick wire_tick) const;
++    uint64_t adapter_sync_step();
++    void process_adapter_sync_event();
+     void peer_apply(const uint8_t *pkt, size_t pktlen,
+                     uint32_t ingress_port = UINT32_MAX);
+ 
+@@ -244,12 +255,9 @@ class NICTopologySC : public sc_core::sc_module
+     uint64_t dmaPendingRequests() const;
+     bool dmaBeginRoi();
+     bool dmaIdle();
+-    // Called between m5.simulate() slices by the SimBricks-style local
+-    // synchronization loop. It drains messages legal at curTick(), publishes
+-    // one null-message promise per physical link, and returns the earliest
+-    // inbound timestamp that bounds the next safe simulation slice. Zero
+-    // means the switch has not published a bound on every link yet.
+-    uint64_t adapterSyncStep();
++    // The guest toggle enters/leaves a C++ event-queue adapter. Python handles
++    // only this infrequent collective boundary; DATA/SYNC polling and virtual
++    // time progression stay inside gem5's event queue.
+     bool adapterSyncToggle(bool active);
+ 
+   private:
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.py b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+index 538f52f..ad5f992 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.py
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+@@ -34,7 +34,6 @@ class NICTopologySC(SystemC_ScModule):
+         PyBindMethod("dmaPendingRequests"),
+         PyBindMethod("dmaBeginRoi"),
+         PyBindMethod("dmaIdle"),
+-        PyBindMethod("adapterSyncStep"),
+         PyBindMethod("adapterSyncToggle"),
+     ]
+ 
+-- 
+2.50.1 (Apple Git-155)
+

@@ -133,6 +133,7 @@ struct Switch {
     std::vector<std::vector<uint64_t>> last_output_timestamp;
     uint64_t forwarded = 0;
     uint64_t bytes = 0;
+    uint64_t active_phase = 0;
 
     Switch(const std::string &a, const std::string &b, uint32_t p,
            uint64_t latency, uint64_t delay, uint64_t rate,
@@ -248,6 +249,17 @@ struct Switch {
                 &link[0].ring->local_sync_phase, __ATOMIC_ACQUIRE);
             const uint64_t phase1 = __atomic_load_n(
                 &link[1].ring->local_sync_phase, __ATOMIC_ACQUIRE);
+            const bool synchronized_active =
+                phase0 == phase1 && (phase0 & 1) != 0;
+            if (synchronized_active && phase0 != active_phase) {
+                for (auto &side : egress_free)
+                    for (auto &port : side)
+                        std::fill(port.begin(), port.end(), 0);
+                for (auto &side : last_output_timestamp)
+                    std::fill(side.begin(), side.end(), 0);
+                active_phase = phase0;
+                progress = true;
+            }
             if (__atomic_load_n(&link[1].ring->peer_sync_phase,
                                 __ATOMIC_RELAXED) != phase0) {
                 __atomic_store_n(&link[1].ring->peer_sync_phase, phase0,
@@ -263,7 +275,12 @@ struct Switch {
             for (uint32_t side = 0; side < 2; ++side)
                 for (uint32_t port = 0; port < ports; ++port)
                     progress |= forwardOne(side, port);
-            if (!progress)
+            // SimBricks-style shared-memory adapters poll on a dedicated core
+            // while synchronized.  A nominal 20-us sleep is commonly rounded
+            // to about 1 ms by Docker Desktop/macOS and dominates short ROIs.
+            // Outside a collective synchronized phase, sleep to avoid burning
+            // a host core while the full-system guests boot or sit at a shell.
+            if (!progress && !synchronized_active)
                 std::this_thread::sleep_for(std::chrono::microseconds(20));
         }
         std::cerr << "[UB_SWITCH_STATS] forwarded=" << forwarded
