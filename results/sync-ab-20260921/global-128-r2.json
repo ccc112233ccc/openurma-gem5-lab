@@ -1,0 +1,74 @@
+{
+  "gem5_roi_stats": {
+    "node0": {
+      "hostSeconds": 1.43,
+      "hostTickRate": 148830295,
+      "simInsts": 321564362,
+      "simTicks": 212284836
+    },
+    "node1": {
+      "hostSeconds": 1.35,
+      "hostTickRate": 157229625,
+      "simInsts": 312056686,
+      "simTicks": 212284836
+    }
+  },
+  "label": "global-128-r2",
+  "port": 21302,
+  "process_deltas": {
+    "dist_switch": {
+      "cpu_seconds": 0.15,
+      "majflt": 0,
+      "minflt": 0,
+      "nonvoluntary_ctxt_switches": 0,
+      "pid": 2992,
+      "read_bytes": 0,
+      "stime_ticks": 11,
+      "utime_ticks": 4,
+      "voluntary_ctxt_switches": 2797,
+      "write_bytes": 344
+    },
+    "node0": {
+      "cpu_seconds": 10.9,
+      "majflt": 0,
+      "minflt": 74,
+      "nonvoluntary_ctxt_switches": 2,
+      "pid": 3058,
+      "read_bytes": 0,
+      "stime_ticks": 14,
+      "utime_ticks": 1076,
+      "voluntary_ctxt_switches": 7503,
+      "write_bytes": 106211
+    },
+    "node1": {
+      "cpu_seconds": 10.75,
+      "majflt": 0,
+      "minflt": 75,
+      "nonvoluntary_ctxt_switches": 2,
+      "pid": 3067,
+      "read_bytes": 0,
+      "stime_ticks": 11,
+      "utime_ticks": 1064,
+      "voluntary_ctxt_switches": 7503,
+      "write_bytes": 106256
+    },
+    "ub_switch": {
+      "cpu_seconds": 0.09,
+      "majflt": 0,
+      "minflt": 0,
+      "nonvoluntary_ctxt_switches": 0,
+      "pid": 3037,
+      "read_bytes": 0,
+      "stime_ticks": 9,
+      "utime_ticks": 0,
+      "voluntary_ctxt_switches": 11765,
+      "write_bytes": 0
+    }
+  },
+  "result_tsv": "profile\tnode\tbytes\titerations\tt_min_us\tt_max_us\tt_median_us\tt_avg_us\tt_stdev_us\tp99_us\tp99_9_us\tp99_99_us\tp99_999_us\nctp-rm-send-imm-i128\tnode0\t128\t100\t1.05\t1.09\t1.05\t1.06\t0.01\t1.07\t1.09\t1.09\t1.09\nctp-rm-send-imm-i128\tnode1\t128\t100\t1.05\t1.11\t1.05\t1.06\t0.01\t1.07\t1.11\t1.11\t1.11\n",
+  "returncode": 0,
+  "samples": 100,
+  "size_bytes": 128,
+  "stderr": "",
+  "wall_seconds": 11.174153291009134
+}

@@ -1,0 +1,68 @@
+From 7f4fa814f42c1fdc9d38effb40e9c0702a3eae1c Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Mon, 21 Sep 2026 17:00:07 +0800
+Subject: [PATCH] Report adapter synchronization loop profile
+
+---
+ .../configs/single_node_fs_clean.py           | 25 +++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index df894a6..37da59d 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -1040,11 +1040,14 @@ def main():
+     switched_to_o3 = False
+     adapter_sync_active = False
+     adapter_wait_started = None
++    adapter_profile = None
+     while True:
+         if adapter_sync_active:
++            adapter_profile["steps"] += 1
+             safe_tick = root.system.nic.adapterSyncStep()
+             now = m5.curTick()
+             if safe_tick == 0:
++                adapter_profile["wait_polls"] += 1
+                 if adapter_wait_started is None:
+                     adapter_wait_started = time.monotonic()
+                 elif time.monotonic() - adapter_wait_started > 30:
+@@ -1061,7 +1064,9 @@ def main():
+             if safe_tick == now:
+                 # adapterSyncStep() drains ready heads before inspecting the
+                 # next one. Repeat once to consume a same-tick FIFO group.
++                adapter_profile["same_tick_steps"] += 1
+                 continue
++            adapter_profile["simulate_slices"] += 1
+             event = m5.simulate(safe_tick - now)
+         else:
+             event = (m5.simulate(kvm_max_run_slice_ticks)
+@@ -1088,6 +1093,26 @@ def main():
+                     )
+                 time.sleep(0.00002)
+             adapter_sync_active = requested_state
++            if adapter_sync_active:
++                adapter_profile = {
++                    "steps": 0,
++                    "wait_polls": 0,
++                    "same_tick_steps": 0,
++                    "simulate_slices": 0,
++                    "host_started": time.monotonic(),
++                    "tick_started": m5.curTick(),
++                }
++            else:
++                host_elapsed = time.monotonic() - adapter_profile["host_started"]
++                tick_elapsed = m5.curTick() - adapter_profile["tick_started"]
++                print("[single_node_fs_clean] Adapter-local profile "
++                      f"host_seconds={host_elapsed:.6f} "
++                      f"virtual_ticks={tick_elapsed} "
++                      f"steps={adapter_profile['steps']} "
++                      f"wait_polls={adapter_profile['wait_polls']} "
++                      f"same_tick_steps={adapter_profile['same_tick_steps']} "
++                      f"simulate_slices={adapter_profile['simulate_slices']}")
++                adapter_profile = None
+             print("[single_node_fs_clean] Adapter-local synchronization "
+                   f"{'enabled' if adapter_sync_active else 'disabled'} at "
+                   f"tick {m5.curTick()}")
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,62 @@
+{
+  "gem5_roi_stats": {
+    "node0": {
+      "hostSeconds": 15.93,
+      "hostTickRate": 13015169,
+      "simInsts": 397726335,
+      "simTicks": 207393732
+    },
+    "node1": {
+      "hostSeconds": 15.81,
+      "hostTickRate": 13118222,
+      "simInsts": 385545597,
+      "simTicks": 207393732
+    }
+  },
+  "label": "adapter-128-r4",
+  "port": 21204,
+  "process_deltas": {
+    "node0": {
+      "cpu_seconds": 14.27,
+      "majflt": 0,
+      "minflt": 137,
+      "nonvoluntary_ctxt_switches": 3,
+      "pid": 661,
+      "read_bytes": 0,
+      "stime_ticks": 150,
+      "utime_ticks": 1277,
+      "voluntary_ctxt_switches": 215106,
+      "write_bytes": 4528557
+    },
+    "node1": {
+      "cpu_seconds": 14.62,
+      "majflt": 0,
+      "minflt": 133,
+      "nonvoluntary_ctxt_switches": 2,
+      "pid": 670,
+      "read_bytes": 0,
+      "stime_ticks": 144,
+      "utime_ticks": 1318,
+      "voluntary_ctxt_switches": 215117,
+      "write_bytes": 4528553
+    },
+    "ub_switch": {
+      "cpu_seconds": 0.21,
+      "majflt": 0,
+      "minflt": 264,
+      "nonvoluntary_ctxt_switches": 0,
+      "pid": 640,
+      "read_bytes": 0,
+      "stime_ticks": 0,
+      "utime_ticks": 21,
+      "voluntary_ctxt_switches": 26095,
+      "write_bytes": 1060864
+    }
+  },
+  "result_tsv": "profile\tnode\tbytes\titerations\tt_min_us\tt_max_us\tt_median_us\tt_avg_us\tt_stdev_us\tp99_us\tp99_9_us\tp99_99_us\tp99_999_us\nctp-rm-send-imm-i128\tnode0\t128\t100\t1.03\t1.11\t1.03\t1.04\t0.01\t1.07\t1.11\t1.11\t1.11\nctp-rm-send-imm-i128\tnode1\t128\t100\t1.03\t1.11\t1.03\t1.04\t0.01\t1.07\t1.11\t1.11\t1.11\n",
+  "returncode": 0,
+  "samples": 100,
+  "size_bytes": 128,
+  "stderr": "",
+  "wall_seconds": 25.629703166996478
+}

@@ -1,0 +1,74 @@
+{
+  "gem5_roi_stats": {
+    "node0": {
+      "hostSeconds": 1.43,
+      "hostTickRate": 148840617,
+      "simInsts": 332481596,
+      "simTicks": 212437683
+    },
+    "node1": {
+      "hostSeconds": 1.34,
+      "hostTickRate": 157968196,
+      "simInsts": 322892499,
+      "simTicks": 212437683
+    }
+  },
+  "label": "global-128-r3",
+  "port": 21303,
+  "process_deltas": {
+    "dist_switch": {
+      "cpu_seconds": 0.17,
+      "majflt": 0,
+      "minflt": 0,
+      "nonvoluntary_ctxt_switches": 0,
+      "pid": 2992,
+      "read_bytes": 0,
+      "stime_ticks": 13,
+      "utime_ticks": 4,
+      "voluntary_ctxt_switches": 2802,
+      "write_bytes": 344
+    },
+    "node0": {
+      "cpu_seconds": 11.67,
+      "majflt": 0,
+      "minflt": 71,
+      "nonvoluntary_ctxt_switches": 1,
+      "pid": 3058,
+      "read_bytes": 0,
+      "stime_ticks": 15,
+      "utime_ticks": 1152,
+      "voluntary_ctxt_switches": 7506,
+      "write_bytes": 368375
+    },
+    "node1": {
+      "cpu_seconds": 11.43,
+      "majflt": 0,
+      "minflt": 72,
+      "nonvoluntary_ctxt_switches": 2,
+      "pid": 3067,
+      "read_bytes": 0,
+      "stime_ticks": 15,
+      "utime_ticks": 1128,
+      "voluntary_ctxt_switches": 7506,
+      "write_bytes": 372471
+    },
+    "ub_switch": {
+      "cpu_seconds": 0.1,
+      "majflt": 0,
+      "minflt": 130,
+      "nonvoluntary_ctxt_switches": 0,
+      "pid": 3037,
+      "read_bytes": 0,
+      "stime_ticks": 9,
+      "utime_ticks": 1,
+      "voluntary_ctxt_switches": 12458,
+      "write_bytes": 528384
+    }
+  },
+  "result_tsv": "profile\tnode\tbytes\titerations\tt_min_us\tt_max_us\tt_median_us\tt_avg_us\tt_stdev_us\tp99_us\tp99_9_us\tp99_99_us\tp99_999_us\nctp-rm-send-imm-i128\tnode0\t128\t100\t1.03\t1.13\t1.05\t1.06\t0.01\t1.09\t1.13\t1.13\t1.13\nctp-rm-send-imm-i128\tnode1\t128\t100\t1.05\t1.11\t1.05\t1.06\t0.01\t1.09\t1.11\t1.11\t1.11\n",
+  "returncode": 0,
+  "samples": 100,
+  "size_bytes": 128,
+  "stderr": "",
+  "wall_seconds": 11.834004042000743
+}

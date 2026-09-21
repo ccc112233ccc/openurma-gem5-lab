@@ -1,0 +1,74 @@
+{
+  "gem5_roi_stats": {
+    "node0": {
+      "hostSeconds": 1.05,
+      "hostTickRate": 223709148,
+      "simInsts": 365452347,
+      "simTicks": 234072027
+    },
+    "node1": {
+      "hostSeconds": 0.98,
+      "hostTickRate": 239183620,
+      "simInsts": 355620031,
+      "simTicks": 234072027
+    }
+  },
+  "label": "global-4096-r3",
+  "port": 21313,
+  "process_deltas": {
+    "dist_switch": {
+      "cpu_seconds": 0.13,
+      "majflt": 0,
+      "minflt": 0,
+      "nonvoluntary_ctxt_switches": 0,
+      "pid": 2992,
+      "read_bytes": 0,
+      "stime_ticks": 11,
+      "utime_ticks": 2,
+      "voluntary_ctxt_switches": 3032,
+      "write_bytes": 344
+    },
+    "node0": {
+      "cpu_seconds": 10.04,
+      "majflt": 0,
+      "minflt": 3,
+      "nonvoluntary_ctxt_switches": 2,
+      "pid": 3058,
+      "read_bytes": 0,
+      "stime_ticks": 10,
+      "utime_ticks": 994,
+      "voluntary_ctxt_switches": 7741,
+      "write_bytes": 106283
+    },
+    "node1": {
+      "cpu_seconds": 9.92,
+      "majflt": 0,
+      "minflt": 3,
+      "nonvoluntary_ctxt_switches": 2,
+      "pid": 3067,
+      "read_bytes": 0,
+      "stime_ticks": 9,
+      "utime_ticks": 983,
+      "voluntary_ctxt_switches": 7740,
+      "write_bytes": 106238
+    },
+    "ub_switch": {
+      "cpu_seconds": 0.06,
+      "majflt": 0,
+      "minflt": 0,
+      "nonvoluntary_ctxt_switches": 0,
+      "pid": 3037,
+      "read_bytes": 0,
+      "stime_ticks": 6,
+      "utime_ticks": 0,
+      "voluntary_ctxt_switches": 10723,
+      "write_bytes": 0
+    }
+  },
+  "result_tsv": "profile\tnode\tbytes\titerations\tt_min_us\tt_max_us\tt_median_us\tt_avg_us\tt_stdev_us\tp99_us\tp99_9_us\tp99_99_us\tp99_999_us\nctp-rm-send-imm-i128\tnode0\t4096\t100\t1.15\t1.25\t1.17\t1.17\t0.01\t1.17\t1.25\t1.25\t1.25\nctp-rm-send-imm-i128\tnode1\t4096\t100\t1.15\t1.25\t1.17\t1.17\t0.01\t1.17\t1.25\t1.25\t1.25\n",
+  "returncode": 0,
+  "samples": 100,
+  "size_bytes": 4096,
+  "stderr": "",
+  "wall_seconds": 10.058705917006591
+}

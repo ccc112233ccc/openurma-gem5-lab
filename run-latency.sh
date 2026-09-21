@@ -132,8 +132,12 @@ rows=$(awk -v profile="$profile" -v uart0="$uart0" -v uart1="$uart1" -v expected
     /^--- UART [0-9]+ ---$/ { uart=$3; next }
     $1 == expected && $1 ~ /^[0-9]+$/ && NF >= 11 {
         node=(uart == uart0 ? "node0" : (uart == uart1 ? "node1" : "unknown"))
-        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", \
-            profile, node, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+        row[node]=sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s", \
+            profile, node, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    }
+    END {
+        if ("node0" in row) print row["node0"]
+        if ("node1" in row) print row["node1"]
     }
 ' "$transcript")
 row_count=$(printf '%s\n' "$rows" | awk 'NF { count++ } END { print count + 0 }')
