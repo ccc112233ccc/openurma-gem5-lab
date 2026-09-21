@@ -14,7 +14,7 @@ import time
 PORTS = 1
 RING_SLOTS = 64
 SLOT_BYTES = 8192
-RING_HEADER = 4096
+RING_HEADER = 8192
 RING_BYTES = RING_HEADER + 2 * PORTS * RING_SLOTS * SLOT_BYTES
 MESSAGE = struct.Struct("<IIQQQHHHH24s")
 
@@ -51,10 +51,16 @@ def main() -> int:
             text=True,
         )
         try:
+            struct.pack_into("<Q", maps[0], 4096, 1)
+            deadline = time.monotonic() + 2
+            while struct.unpack_from("<Q", maps[1], 4104)[0] != 1:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("switch did not mirror sync phase")
+                time.sleep(0.001)
             payload = bytes(range(128))
             transaction = bytes(40) + payload
             header = MESSAGE.pack(
-                len(transaction), 1, 1000, 1100, 7, 0, 0, 1, 0, bytes(24)
+                len(transaction), 1, 1000, 1100, 7, 0, 0, 2, 0, bytes(24)
             )
             offset = slot_offset(1, 0, 0)
             maps[0][offset : offset + MESSAGE.size] = header
@@ -77,6 +83,24 @@ def main() -> int:
             assert maps[1][slot_offset(0, 0, 0) + MESSAGE.size:
                            slot_offset(0, 0, 0) + MESSAGE.size + len(transaction)] == transaction
             assert struct.unpack_from("<Q", maps[0], index_offset(1, 0, True))[0] == 1
+
+            # A null-message promise follows DATA on the same FIFO and may
+            # never move the output timestamp backwards behind queued data.
+            sync_offset = slot_offset(1, 0, 1)
+            maps[0][sync_offset : sync_offset + MESSAGE.size] = MESSAGE.pack(
+                0, 2, 1100, 1200, 8, 0, 0, 2, 0, bytes(24)
+            )
+            struct.pack_into("<Q", maps[0], index_offset(1, 0), 2)
+            deadline = time.monotonic() + 2
+            while struct.unpack_from("<Q", maps[1], index_offset(0, 0))[0] != 2:
+                if process.poll() is not None:
+                    raise RuntimeError(process.stderr.read())
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("switch did not forward SYNC")
+                time.sleep(0.001)
+            sync = MESSAGE.unpack_from(maps[1], slot_offset(0, 0, 1))
+            assert sync[0] == 0 and sync[1] == 2
+            assert sync[3] == 3810, sync
         finally:
             process.terminate()
             try:

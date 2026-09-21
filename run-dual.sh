@@ -130,6 +130,9 @@ UB link:
                                 (tp-context|legacy-hash; default: tp-context)
   --peer-latency-ns NS          OPENURMA_PEER_LATENCY_NS
   --sync-quantum-ns NS          OPENURMA_SYNC_QUANTUM_NS (default: lookahead)
+  --sync-mode MODE              OPENURMA_SYNC_MODE
+                                (global-barrier|adapter-local; default:
+                                adapter-local)
   --peer-link-rate-gbps N       OPENURMA_PEER_LINK_RATE_GBPS
   --peer-serialization-stages N OPENURMA_PEER_SERIALIZATION_STAGES
   --peer-switch-delay TIME      OPENURMA_PEER_SWITCH_DELAY
@@ -262,6 +265,7 @@ cli_peer_port_map=""
 cli_peer_port_selection=""
 cli_peer_latency_ns=""
 cli_sync_quantum_ns=""
+cli_sync_mode=""
 cli_peer_link_rate_gbps=""
 cli_peer_serialization_stages=""
 cli_peer_switch_delay=""
@@ -483,6 +487,8 @@ while (( $# > 0 )); do
         --peer-latency-ns=*) cli_peer_latency_ns=${1#*=}; shift ;;
         --sync-quantum-ns) need_value "$@"; cli_sync_quantum_ns=$2; shift 2 ;;
         --sync-quantum-ns=*) cli_sync_quantum_ns=${1#*=}; shift ;;
+        --sync-mode) need_value "$@"; cli_sync_mode=$2; shift 2 ;;
+        --sync-mode=*) cli_sync_mode=${1#*=}; shift ;;
         --peer-link-rate-gbps) need_value "$@"; cli_peer_link_rate_gbps=$2; shift 2 ;;
         --peer-link-rate-gbps=*) cli_peer_link_rate_gbps=${1#*=}; shift ;;
         --peer-serialization-stages) need_value "$@"; cli_peer_serialization_stages=$2; shift 2 ;;
@@ -855,6 +861,7 @@ peer_port_map="${OPENURMA_PEER_PORT_MAP:-$profile_peer_port_map}"
 peer_port_selection="${OPENURMA_PEER_PORT_SELECTION:-$profile_peer_port_selection}"
 peer_latency_ns="${OPENURMA_PEER_LATENCY_NS:-100}"
 sync_quantum_ns="${OPENURMA_SYNC_QUANTUM_NS:-$peer_latency_ns}"
+sync_mode="${OPENURMA_SYNC_MODE:-adapter-local}"
 peer_link_rate_gbps="${OPENURMA_PEER_LINK_RATE_GBPS:-$profile_peer_link_rate_gbps}"
 peer_serialization_stages="${OPENURMA_PEER_SERIALIZATION_STAGES:-$profile_peer_serialization_stages}"
 peer_switch_delay="${OPENURMA_PEER_SWITCH_DELAY:-$profile_peer_switch_delay}"
@@ -970,6 +977,7 @@ provider="${OPENURMA_PROVIDER:-$profile_provider}"
 [[ -n "$cli_peer_port_selection" ]] && peer_port_selection=$cli_peer_port_selection
 [[ -n "$cli_peer_latency_ns" ]] && peer_latency_ns=$cli_peer_latency_ns
 [[ -n "$cli_sync_quantum_ns" ]] && sync_quantum_ns=$cli_sync_quantum_ns
+[[ -n "$cli_sync_mode" ]] && sync_mode=$cli_sync_mode
 [[ -n "$cli_peer_link_rate_gbps" ]] && peer_link_rate_gbps=$cli_peer_link_rate_gbps
 [[ -n "$cli_peer_serialization_stages" ]] && peer_serialization_stages=$cli_peer_serialization_stages
 [[ -n "$cli_peer_switch_delay" ]] && peer_switch_delay=$cli_peer_switch_delay
@@ -1239,6 +1247,16 @@ case "$ub_transport" in
     direct-ring|switch-adapter) ;;
     *) die "UB transport must be direct-ring or switch-adapter" ;;
 esac
+case "$sync_mode" in
+    global-barrier|adapter-local) ;;
+    *) die "sync mode must be global-barrier or adapter-local" ;;
+esac
+if [[ "$sync_mode" == adapter-local ]]; then
+    [[ "$ub_transport" == switch-adapter ]] ||
+        die "adapter-local sync requires --ub-transport switch-adapter"
+    (( ub_port_count == 1 )) ||
+        die "adapter-local sync is currently validated only for one UB port"
+fi
 if [[ "$ub_transport" == switch-adapter && "$peer_topology" != l1-switch ]]; then
     die "switch-adapter requires --peer-topology l1-switch"
 fi
@@ -1263,10 +1281,10 @@ fi
 (( udma_iotlb_entries >= 0 )) || die "UDMA IOTLB entries must be non-negative"
 (( dma_max_outstanding > 0 )) || die "DMA max outstanding must be positive"
 
-# PeerRing has a fixed 4-KiB index header plus one 64 x 8-KiB queue for
+# AdapterRing has an 8-KiB index/control header plus one 64 x 8-KiB queue for
 # every direction and physical port. Keep this formula synchronized with
 # NICTopologySC::PeerRing and its slot-offset calculation.
-peer_ring_bytes=$((4096 + 2 * ub_port_count * 64 * 8192))
+peer_ring_bytes=$((8192 + 2 * ub_port_count * 64 * 8192))
 
 print_resolved_config() {
     cat <<EOF
@@ -1389,6 +1407,7 @@ memory_controller_backend_latency=$mem_ctrl_backend_latency
 memory_controller_command_window=$mem_ctrl_command_window
 peer_latency_ns=$peer_latency_ns
 sync_quantum_ns=$sync_quantum_ns
+sync_mode=$sync_mode
 ub_port_count=$ub_port_count
 ub_transport=$ub_transport
 peer_topology=$peer_topology
@@ -1532,27 +1551,29 @@ else
     docker exec "$container" truncate -s "$peer_ring_bytes" "$ring"
 fi
 
-# The stock dist-gem5 switch owns the synchronization protocol.  It starts
-# first and waits for both node connections, just like util/dist/gem5-dist.sh.
-docker exec -d "$container" \
-    bash "$lab/tools/run-background.sh" \
-    "$run_root/switch/gem5.pid" "$run_root/switch/gem5.log" \
-    "$gem5" --listener-mode=on --outdir="$run_root/switch" "$switch_config" \
-    --is-switch --dist-size=2 --dist-rank=0 \
-    --dist-server-port="$dist_port" --dist-sync-start=0t \
-    --dist-sync-repeat="${sync_quantum_ns}ns" \
-    --ethernet-linkdelay="${peer_latency_ns}ns" \
-    --ethernet-linkspeed="$dist_link_speed"
-
 actual_dist_port=""
-for _ in $(seq 1 100); do
-    actual_dist_port="$(docker exec "$container" sed -n \
-        's/.*tcp_iface listening on port \([0-9][0-9]*\).*/\1/p' \
-        "$run_root/switch/gem5.log" 2>/dev/null | tail -n 1)"
-    [[ -n "$actual_dist_port" ]] && break
-    sleep 0.1
-done
-[[ -n "$actual_dist_port" ]] || die "dist switch did not begin listening; see $run_root/switch/gem5.log"
+if [[ "$sync_mode" == global-barrier ]]; then
+    # Compatibility/reference mode: the stock dist-gem5 switch owns a global
+    # conservative barrier while UB DATA still traverses ub-switch-sim.
+    docker exec -d "$container" \
+        bash "$lab/tools/run-background.sh" \
+        "$run_root/switch/gem5.pid" "$run_root/switch/gem5.log" \
+        "$gem5" --listener-mode=on --outdir="$run_root/switch" "$switch_config" \
+        --is-switch --dist-size=2 --dist-rank=0 \
+        --dist-server-port="$dist_port" --dist-sync-start=0t \
+        --dist-sync-repeat="${sync_quantum_ns}ns" \
+        --ethernet-linkdelay="${peer_latency_ns}ns" \
+        --ethernet-linkspeed="$dist_link_speed"
+
+    for _ in $(seq 1 100); do
+        actual_dist_port="$(docker exec "$container" sed -n \
+            's/.*tcp_iface listening on port \([0-9][0-9]*\).*/\1/p' \
+            "$run_root/switch/gem5.log" 2>/dev/null | tail -n 1)"
+        [[ -n "$actual_dist_port" ]] && break
+        sleep 0.1
+    done
+    [[ -n "$actual_dist_port" ]] || die "dist switch did not begin listening; see $run_root/switch/gem5.log"
+fi
 
 if [[ "$ub_transport" == switch-adapter ]]; then
     docker exec -d "$container" \
@@ -1587,6 +1608,19 @@ launch_node() {
         # Each endpoint is side zero of its own point-to-point adapter link.
         peer_node=0
     fi
+    sync_args=()
+    adapter_sync_env=0
+    if [[ "$sync_mode" == adapter-local ]]; then
+        sync_args+=(--adapter-local-sync --dist-size=0)
+        adapter_sync_env=1
+    else
+        sync_args+=(--dist-rank="$node" --dist-size=2)
+        sync_args+=(--dist-server-name=127.0.0.1)
+        sync_args+=(--dist-server-port="$actual_dist_port")
+        sync_args+=(--dist-sync-start=0t)
+        sync_args+=(--dist-sync-repeat="${sync_quantum_ns}ns")
+        sync_args+=(--dist-sync-on-pseudo-op)
+    fi
     official_args=()
     if [[ "$provider" == official ]]; then
         official_args+=(--official-udma-discovery)
@@ -1596,6 +1630,7 @@ launch_node() {
         -e "M5_PATH=$m5_path" \
         -e "OPENURMA_PIPE_DATA=$pipe_data" \
         -e "OPENURMA_TRACE_PACKETS=$packet_trace" \
+        -e "OPENURMA_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
         "$container" \
         bash "$lab/tools/run-background.sh" "$out/gem5.pid" "$out/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$out" "$config" \
@@ -1708,9 +1743,7 @@ launch_node() {
         --udma-iotlb-entries="$udma_iotlb_entries" \
         --dma-max-outstanding="$dma_max_outstanding" \
         --dma-backend="$dma_backend" \
-        --dist-rank="$node" --dist-size=2 --dist-server-name=127.0.0.1 \
-        --dist-server-port="$actual_dist_port" --dist-sync-start=0t \
-        --dist-sync-repeat="${sync_quantum_ns}ns" --dist-sync-on-pseudo-op \
+        "${sync_args[@]}" \
         --eth-tap-socket="$tap" \
         --eth-link-speed="$oob_link_speed" --eth-link-delay="${peer_latency_ns}ns" \
         --terminal-port="$uart" --eth-mac="$mac" \
@@ -1750,7 +1783,11 @@ echo "  UB link model: ${ub_port_count} physical port(s), ${peer_link_rate_gbps}
 echo "  UB topology: $peer_topology (source-to-destination port map: ${peer_port_map:-identity})"
 echo "  UB egress selection: $peer_port_selection"
 echo "  UB switch service delay: $peer_switch_delay"
-echo "  dist-gem5 switch: localhost:$actual_dist_port (${sync_quantum_ns} ns quantum)"
+if [[ "$sync_mode" == adapter-local ]]; then
+    echo "  synchronization: pairwise Adapter DATA/SYNC (no dist-gem5 switch)"
+else
+    echo "  synchronization: dist-gem5 global barrier at localhost:$actual_dist_port (${sync_quantum_ns} ns quantum)"
+fi
 echo "  OOB relay: $tap0 <-> $tap1 (setup only)"
 echo
 echo "After both shells are ready, detach any existing UART clients and run:"

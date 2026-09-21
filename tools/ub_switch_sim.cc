@@ -130,6 +130,7 @@ struct Switch {
     uint32_t serialization_stages;
     std::vector<uint32_t> port_map;
     std::vector<std::vector<std::vector<uint64_t>>> egress_free;
+    std::vector<std::vector<uint64_t>> last_output_timestamp;
     uint64_t forwarded = 0;
     uint64_t bytes = 0;
 
@@ -142,7 +143,8 @@ struct Switch {
         rate_gbps(rate), overhead_bytes(overhead),
         serialization_stages(stages), port_map(std::move(mapping)),
         egress_free(2, std::vector<std::vector<uint64_t>>(
-            p, std::vector<uint64_t>(stages)))
+            p, std::vector<uint64_t>(stages))),
+        last_output_timestamp(2, std::vector<uint64_t>(p))
     {
         if (serialization_stages != 0 && rate_gbps == 0)
             throw std::runtime_error("serialization requires a positive line rate");
@@ -204,14 +206,26 @@ struct Switch {
                     serializationTicks(payload + overhead_bytes));
                 free = ready;
             }
-            destination->receive_tick = checkedAdd(ready, link_latency_ticks);
+            destination->receive_tick = std::max(
+                checkedAdd(ready, link_latency_ticks),
+                last_output_timestamp[1 - source_link][destination_port]);
+            last_output_timestamp[1 - source_link][destination_port] =
+                destination->receive_tick;
             ++forwarded;
             bytes += payload;
         } else if (type == oa::MessageType::Sync) {
             destination->payload_length = 0;
-            destination->receive_tick = checkedAdd(
-                source->receive_tick,
-                checkedAdd(switch_delay_ticks, link_latency_ticks));
+            uint64_t promise = checkedAdd(
+                source->receive_tick, switch_delay_ticks);
+            for (uint32_t stage = 0; stage < serialization_stages; ++stage)
+                promise = std::max(
+                    promise,
+                    egress_free[1 - source_link][destination_port][stage]);
+            destination->receive_tick = std::max(
+                checkedAdd(promise, link_latency_ticks),
+                last_output_timestamp[1 - source_link][destination_port]);
+            last_output_timestamp[1 - source_link][destination_port] =
+                destination->receive_tick;
         } else {
             throw std::runtime_error("unsupported adapter message type");
         }
@@ -230,6 +244,22 @@ struct Switch {
                   << " switch_delay_ticks=" << switch_delay_ticks << '\n';
         while (!stop_requested) {
             bool progress = false;
+            const uint64_t phase0 = __atomic_load_n(
+                &link[0].ring->local_sync_phase, __ATOMIC_ACQUIRE);
+            const uint64_t phase1 = __atomic_load_n(
+                &link[1].ring->local_sync_phase, __ATOMIC_ACQUIRE);
+            if (__atomic_load_n(&link[1].ring->peer_sync_phase,
+                                __ATOMIC_RELAXED) != phase0) {
+                __atomic_store_n(&link[1].ring->peer_sync_phase, phase0,
+                                 __ATOMIC_RELEASE);
+                progress = true;
+            }
+            if (__atomic_load_n(&link[0].ring->peer_sync_phase,
+                                __ATOMIC_RELAXED) != phase1) {
+                __atomic_store_n(&link[0].ring->peer_sync_phase, phase1,
+                                 __ATOMIC_RELEASE);
+                progress = true;
+            }
             for (uint32_t side = 0; side < 2; ++side)
                 for (uint32_t port = 0; port < ports; ++port)
                     progress |= forwardOne(side, port);

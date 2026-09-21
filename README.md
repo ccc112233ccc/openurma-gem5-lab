@@ -221,9 +221,10 @@ endpoint-to-endpoint transport for A/B regression. In the default
 they map `/tmp/openurma-dual.node0.adapter` and
 `/tmp/openurma-dual.node1.adapter` respectively, while the switch maps both.
 The common 64-byte Adapter header supports versioned `DATA` and `SYNC` records.
-The current migration stage still keeps the dist-gem5 conservative barrier as
-a correctness guard; replacing that global guard with Adapter-local `SYNC`
-time grants is the next stage, after switched DATA is regression-tested.
+The default `adapter-local` synchronization mode therefore has exactly three
+timed simulator processes: gem5 node 0, the UB switch, and gem5 node 1. There
+is no dist-gem5 switch process. `--sync-mode global-barrier` retains the older
+global barrier as an explicit compatibility/reference mode.
 
 The default one-way UB propagation delay is 100 ns. It is also the positive
 lookahead: every Adapter DATA record carries a `receive_tick`, and a receiver
@@ -233,13 +234,15 @@ Every point-to-point Adapter gives each direction and physical port its own
 64-slot FIFO. Every record carries explicit source and destination port IDs.
 The receiver merges ready queue heads by virtual arrival time, so a delayed
 packet on one port cannot block an already-arrived packet on another port.
-During the actual latency loop, gem5's distributed conservative barrier uses
-the largest causal quantum by default: `quantum = lookahead = 100 ns`. This is
-also stock `DistEtherLink`'s default relationship and avoids twice as many
-barriers as a 50 ns quantum. Both values remain independently configurable, and
-the launcher enforces `0 < quantum <= lookahead`. UMDK setup is left outside
-this fine-grained epoch because synchronizing seconds of process startup at
-nanosecond resolution is correct but needlessly slow.
+During the actual latency loop, each endpoint publishes a `SYNC` promise on the
+same per-port FIFO as `DATA`. The switch advances the promise through the same
+propagation and serialization state as traffic, so a receiver runs only to the
+earliest promised virtual tick. Monotonic ON/OFF generations collectively
+enter and leave this mode even when the two guests reach the ROI at different
+virtual times. UMDK setup is left outside this fine-grained epoch because
+synchronizing seconds of process startup at nanosecond resolution is correct
+but needlessly slow. In compatibility mode, the launcher still enforces
+`0 < --sync-quantum-ns <= lookahead` for the dist-gem5 barrier.
 
 Each simulated socket can advertise multiple physical UB ports without turning
 them into one wider link. For example, the current dual-port bring-up is:
@@ -459,8 +462,10 @@ Both wrappers set `OPENURMA_DIST_SYNC=1`; the patched perftest first performs a
 collective ON/OFF rendezvous before opening the TCP control connection. Thus a
 manually started server waits for the client in virtual time instead of racing
 ahead according to host wall time. After setup, perftest performs its last TCP
-readiness handshake, collectively enables dist-gem5 synchronization, runs the
-latency loop, then collectively disables synchronization before reporting.
+readiness handshake, collectively enables Adapter-local synchronization, runs
+the latency loop, then collectively disables synchronization before reporting.
+The same unmodified guest command selects the legacy dist-gem5 implementation
+when the launcher is run with `--sync-mode global-barrier`.
 In iteration mode, the optional stats reset is immediately before the first
 post-warm-up timestamp and its dump immediately follows the timestamp closing
 the final reported delta, so the ROI block covers the same samples as the
@@ -669,8 +674,8 @@ change the simulator/kernel ABI:
 
 | Component | Version or exact commit |
 | --- | --- |
-| gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `c8affd15e10f596e6eb7b2dbc64163affc3876c0` |
-| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `f5d501115108caa868d58454c43e5b0abb2d5193` |
+| gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `724651433c9bdee2c7f0484ab85b9620b0810993` |
+| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `a1f90138df62edbf3f2f4e3b95a9ebd357ad742d` |
 | OpenClickNP | `c1c6acc58032a1894507d88659b3cca668b0e1a5` |
 | vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `34960cc2610cda1319e999f15dc19ea62a1dde91` |
 | openEuler OLK-6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |

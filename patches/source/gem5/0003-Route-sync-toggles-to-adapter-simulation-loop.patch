@@ -1,0 +1,41 @@
+From 724651433c9bdee2c7f0484ab85b9620b0810993 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Mon, 21 Sep 2026 16:15:48 +0800
+Subject: [PATCH] Route sync toggles to adapter simulation loop
+
+---
+ src/sim/pseudo_inst.cc | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/sim/pseudo_inst.cc b/src/sim/pseudo_inst.cc
+index 084be5a41..a22c8e9d1 100644
+--- a/src/sim/pseudo_inst.cc
++++ b/src/sim/pseudo_inst.cc
+@@ -47,6 +47,7 @@
+ 
+ #include <array>
+ #include <cerrno>
++#include <cstdlib>
+ #include <fstream>
+ #include <string>
+ #include <vector>
+@@ -478,6 +479,16 @@ void
+ togglesync(ThreadContext *tc)
+ {
+     DPRINTF(PseudoInst, "pseudo_inst::togglesync()\n");
++    // A SimBricks-style adapter run has no DistIface object. Reuse the same
++    // guest-visible m5 operation as the existing perftest instrumentation,
++    // but return control to the Python simulation loop so it can enter/leave
++    // pairwise timestamp-bounded slices. Keeping this behind an explicit host
++    // environment flag preserves stock dist-gem5 behavior unchanged.
++    const char *adapter_sync = std::getenv("OPENURMA_ADAPTER_LOCAL_SYNC");
++    if (adapter_sync && *adapter_sync && *adapter_sync != '0') {
++        exitSimLoop("adapter sync toggle");
++        return;
++    }
+     DistIface::toggleSync(tc);
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+
