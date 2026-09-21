@@ -1569,10 +1569,25 @@ if pid_is_live "$run_root/oob-switch/relay.pid" \
     die "OOB switch is already running; use status-dual.sh or stop-dual.sh"
 fi
 
+case "$run_root" in
+    ""|/|.) die "unsafe run output directory: '$run_root'" ;;
+esac
 if docker exec "$container" test -d "$run_root"; then
-    stamp=$(date +%Y%m%d-%H%M%S)
-    docker exec "$container" mv "$run_root" "$run_root.previous-$stamp"
-    echo "Archived the previous run as $run_root.previous-$stamp"
+    # Completed run directories are reproducible output, not durable evidence.
+    # A benchmark that must be retained should use its --raw-output/result
+    # option before the next launch. Keeping only the active run prevents each
+    # restart from accumulating another full gem5 output tree.
+    # Remove only names owned by this launcher. Never recursively remove an
+    # arbitrary OPENURMA_DUAL_OUT root supplied by the caller.
+    stale_run_paths=(
+        "$run_root/switch" "$run_root/ub-switch" "$run_root/oob-switch"
+        "$run_root/node0" "$run_root/node1" "$run_root/node2"
+        "$run_root/node3" "$run_root/node4" "$run_root/node5"
+        "$run_root/node6" "$run_root/node7"
+        "$run_root/run-manifest.txt" "$run_root/sync.ready"
+    )
+    docker exec "$container" rm -rf -- "${stale_run_paths[@]}"
+    echo "Cleared inactive previous run output under: $run_root"
 fi
 run_directories=("$run_root/switch" "$run_root/ub-switch" "$run_root/oob-switch")
 ring_paths=()

@@ -89,8 +89,7 @@ complete multi-host fabric.
 
 ## Evidence
 
-- `adapter-4node*.uart.txt` and `global-4node*.uart.txt`: complete four-UART
-  transcripts.
-- `*.time.txt`: host wall-time captures.
-- `tools/test_ub_switch_sim.py`: legacy two-endpoint and isolated four-endpoint
-  DATA/SYNC protocol tests.
+- The complete UART and wall-time captures are recoverable from commit
+  `dc1c3ff`; the current tree retains the consolidated measurements above.
+- `tools/test_ub_switch_sim.py`: current multi-endpoint DATA/EID/SYNC protocol
+  regression test.

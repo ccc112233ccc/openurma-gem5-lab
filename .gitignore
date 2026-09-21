@@ -20,10 +20,7 @@
 /sweeps/
 /*.raw.txt
 
-# Generated presentation output.  Keep the editable plan and generator.
-/presentation/output/
-/presentation/.build/*
-!/presentation/.build/build_deck.mjs
+# Generated presentation output. Keep the current AICO plan and generator.
 /presentation-aico/output/
 /presentation-aico/.build/*
 !/presentation-aico/.build/build_deck.mjs

@@ -105,7 +105,8 @@ The highest-value next changes are:
    still scale better even though its present two-node constant overhead is
    worse.
 
-All JSON counters and dual-UART transcripts used for this report are retained
-in this directory. The 2000-sample Adapter endurance run took 559.495 seconds,
-which confirms that the short-run slowdown is sustained rather than a one-time
-startup artifact.
+The raw JSON counters and dual-UART transcripts were removed from the current
+tree after the values above were consolidated. They remain recoverable from
+commit `dc1c3ff` and earlier history. The 2000-sample Adapter endurance run took
+559.495 seconds, which confirms that the short-run slowdown is sustained rather
+than a one-time startup artifact.

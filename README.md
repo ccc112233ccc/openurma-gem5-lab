@@ -7,6 +7,11 @@ provider、`urma_admin` 和 `urma_perftest`；缺失的 UDMA/UB 硬件行为由 
 SEND/SEND_IMM、RMA READ/WRITE、双物理端口、TP 选路、L1 switch 拓扑和官方
 bonding 逻辑设备数据面。
 
+仓库只长期保存三类内容：构建与运行脚本、恢复精确源码版本所需的 patch/bundle、
+以及每个关键结论的一份精简报告。`gem5/`、`sources/`、`artifacts/`、`system/`
+和当前的 `run-dual/` 都是本地可再生工作目录，不提交 Git；重新启动实验时只保留
+最新一份 `run-dual/`。需要留档的测试应使用脚本的结果目录或 `--raw-output` 参数。
+
 ## 从零开始
 
 推荐环境是 Apple Silicon Mac + Docker Desktop；ARM64 Linux 主机同样可用。
@@ -660,11 +665,9 @@ Use 16384 samples for the supplied hardware comparison (or at least more than
 1022 when retaining the default JFR depth); the 100-sample default is intended
 only as a quick functional run.
 
-An older fitted experiment is retained under
-`sweeps/udma400-calibrated-final-n16384/` only as an archived regression
-artifact. It used a switched-path hardware curve to tune a different topology
-and is not a default, a physical-model validation, or the basis for current
-trend analysis.
+An older fitted experiment used a switched-path hardware curve to tune a
+different topology. It is preserved in Git history only; it is not a default,
+a physical-model validation, or the basis for current trend analysis.
 
 The 2026-09-14 stock-UDMA validation below is historical and predates the
 native timing-DMA, O3 server and IOTLB profile. In that older functional-DMA
