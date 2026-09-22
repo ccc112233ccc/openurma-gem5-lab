@@ -15,6 +15,7 @@ def run_one(
     command: str,
     timeout: float,
     start_delay: float,
+    prompt_kick_after: float | None,
     start_gate: threading.Barrier,
     results: dict[int, str],
 ) -> None:
@@ -30,10 +31,24 @@ def run_one(
             # ash owns the console are replayed later as a partial command.
             warm_deadline = deadline
             prompt_ready = False
+            prompt_kicked = False
+            connected_at = time.monotonic()
             while time.monotonic() < warm_deadline:
                 try:
                     data = sock.recv(65536)
                 except socket.timeout:
+                    if (
+                        prompt_kick_after is not None
+                        and not prompt_kicked
+                        and time.monotonic() - connected_at >= prompt_kick_after
+                    ):
+                        # Post-boot callers may connect while an idle shell has
+                        # no fresh bytes to replay.  A single newline asks ash
+                        # for a fresh prompt.  Boot/synchronization callers do
+                        # not enable this option, so the kernel boot stream is
+                        # never modified.
+                        sock.sendall(b"\n")
+                        prompt_kicked = True
                     continue
                 if not data:
                     break
@@ -127,6 +142,11 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument(
+        "--prompt-kick-after",
+        type=float,
+        help="after this many idle seconds, send one newline to an already-booted shell",
+    )
+    parser.add_argument(
         "--full-output",
         action="store_true",
         help="print the complete current-command transcript instead of its tail",
@@ -150,6 +170,7 @@ def main() -> int:
                 commands[index],
                 args.timeout,
                 args.stagger if index else 0.0,
+                args.prompt_kick_after,
                 start_gate,
                 results,
             ),

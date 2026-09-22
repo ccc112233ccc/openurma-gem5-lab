@@ -155,6 +155,8 @@ def main() -> int:
             struct.pack_into("<Q", maps[1], 4096, 1)
             deadline = time.monotonic() + 2
             while struct.unpack_from("<Q", maps[1], 4104)[0] != 1:
+                if process.poll() is not None:
+                    raise RuntimeError(process.stderr.read())
                 if time.monotonic() >= deadline:
                     raise RuntimeError("switch did not mirror sync phase")
                 time.sleep(0.001)

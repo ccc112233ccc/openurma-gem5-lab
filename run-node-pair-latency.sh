@@ -58,4 +58,4 @@ echo "Running node$client -> node$server: OOB=$server_ip, EID selected by offici
 exec docker exec "$container" python3 "$lab/tools/dual_serial_command.py" \
     --ports "$server_uart" "$client_uart" \
     --commands "$server_command" "$client_command" \
-    --timeout "$timeout" --full-output
+    --timeout "$timeout" --prompt-kick-after 1 --full-output

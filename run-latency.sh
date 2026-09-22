@@ -114,7 +114,7 @@ set +e
 docker exec "$container" python3 "$lab/tools/dual_serial_command.py" \
     --ports "$uart0" "$uart1" \
     --commands "$server_command" "$client_command" \
-    --stagger "$stagger" --timeout "$timeout" --full-output \
+    --stagger "$stagger" --timeout "$timeout" --prompt-kick-after 1 --full-output \
     >"$transcript" 2>&1
 command_rc=$?
 set -e

@@ -4,7 +4,6 @@ set -euo pipefail
 container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
 lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
-ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
 
 if ! docker inspect "$container" >/dev/null 2>&1; then
     echo "Container does not exist: $container" >&2
@@ -13,6 +12,15 @@ fi
 if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != true ]; then
     echo "Dual-node processes are already stopped with container $container."
     exit 0
+fi
+
+manifest="$run_root/run-manifest.txt"
+network_backend="$(docker exec "$container" awk -F= \
+    '$1 == "network_backend" { print $2; exit }' "$manifest" 2>/dev/null || true)"
+if [[ "$network_backend" == ns3ub-compat ]]; then
+    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-/workspace/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
+else
+    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
 fi
 
 stop_one() {

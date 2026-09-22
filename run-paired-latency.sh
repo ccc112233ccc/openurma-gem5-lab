@@ -103,7 +103,7 @@ trap 'rm -f "$transcript"' EXIT
 set +e
 docker exec "$container" python3 "$lab/tools/dual_serial_command.py" \
     --ports "${uart_ports[@]}" --commands "${commands[@]}" \
-    --timeout "$timeout" --full-output >"$transcript" 2>&1
+    --timeout "$timeout" --prompt-kick-after 1 --full-output >"$transcript" 2>&1
 command_rc=$?
 set -e
 [[ -z "$raw_output" ]] || { mkdir -p "$(dirname "$raw_output")"; cp "$transcript" "$raw_output"; }

@@ -138,6 +138,40 @@ switch delay. A host-relayed e1000 link carries
 only the stock `urma_perftest` TCP handshake and resource exchange; it is kept
 outside the measured interval.
 
+### ns-3-UB network-process bring-up
+
+The first ns-3-UB integration checkpoint can replace the built-in L1 switch
+process while preserving the current version-3 physical-port Adapter ABI.  The
+official guest software, UDMA queues, DMA and completion semantics remain in
+gem5; the independent ns-3 process executes the fabric events and keeps EID
+routing outside either endpoint.
+
+Clone `ns-3-UB` next to this repository, initialize its submodules, then build
+the Linux/aarch64 adapter in the existing OpenURMA container:
+
+```bash
+git clone https://gitcode.com/open-usim/ns-3-ub.git ../ns-3-ub
+git -C ../ns-3-ub submodule update --init --recursive
+OPENURMA_CONTAINER=openurma-repro-20260909 \
+  ./scripts/build-ns3ub-adapter.sh
+```
+
+Start two guests with the compatibility bridge:
+
+```bash
+OPENURMA_CONTAINER=openurma-repro-20260909 \
+  ./run-dual.sh --network-backend ns3ub-compat
+```
+
+`ns3ub-compat` is deliberately named as a transition mode.  It validates the
+process boundary, shared-memory ABI, EID routing and ns-3 event execution, but
+version 3 still charges host-port serialization and the ingress propagation
+term in gem5.  The next `ns3-adapter` protocol revision moves those physical
+terms into ns-3-UB and then replaces the compatibility forwarding core with
+native UB ports, switch queues, routing and flow control.  The ownership rules
+and delivery gates are documented in
+[`docs/ns3ub-network-boundary.md`](docs/ns3ub-network-boundary.md).
+
 The same launcher supports 2 through 8 guests. Every guest attaches to one
 shared UB switch and one shared learning Ethernet control network. The UB
 switch routes each DATA/SYNC record by destination EID, so communication is

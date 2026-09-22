@@ -122,6 +122,8 @@ CPU, cache, and memory:
   --mem-ctrl-command-window T   OPENURMA_MEM_CTRL_COMMAND_WINDOW
 
 UB link:
+  --network-backend MODE        OPENURMA_NETWORK_BACKEND
+                                (builtin|ns3ub-compat; default: builtin)
   --ub-transport MODE           OPENURMA_UB_TRANSPORT
                                 (switch-adapter|direct-ring; default:
                                 switch-adapter)
@@ -262,6 +264,7 @@ cli_mem_ctrl_frontend_latency=""
 cli_mem_ctrl_backend_latency=""
 cli_mem_ctrl_command_window=""
 cli_ub_port_count=""
+cli_network_backend=""
 cli_ub_transport=""
 cli_peer_topology=""
 cli_peer_port_map=""
@@ -480,6 +483,8 @@ while (( $# > 0 )); do
         --mem-ctrl-command-window=*) cli_mem_ctrl_command_window=${1#*=}; shift ;;
         --ub-port-count) need_value "$@"; cli_ub_port_count=$2; shift 2 ;;
         --ub-port-count=*) cli_ub_port_count=${1#*=}; shift ;;
+        --network-backend) need_value "$@"; cli_network_backend=$2; shift 2 ;;
+        --network-backend=*) cli_network_backend=${1#*=}; shift ;;
         --ub-transport) need_value "$@"; cli_ub_transport=$2; shift 2 ;;
         --ub-transport=*) cli_ub_transport=${1#*=}; shift ;;
         --peer-topology) need_value "$@"; cli_peer_topology=$2; shift 2 ;;
@@ -860,6 +865,7 @@ mem_ctrl_frontend_latency="${OPENURMA_MEM_CTRL_FRONTEND_LATENCY:-$profile_mem_ct
 mem_ctrl_backend_latency="${OPENURMA_MEM_CTRL_BACKEND_LATENCY:-$profile_mem_ctrl_backend_latency}"
 mem_ctrl_command_window="${OPENURMA_MEM_CTRL_COMMAND_WINDOW:-$profile_mem_ctrl_command_window}"
 ub_port_count="${OPENURMA_UB_PORT_COUNT:-$profile_ub_port_count}"
+network_backend="${OPENURMA_NETWORK_BACKEND:-builtin}"
 ub_transport="${OPENURMA_UB_TRANSPORT:-switch-adapter}"
 peer_topology="${OPENURMA_PEER_TOPOLOGY:-$profile_peer_topology}"
 peer_port_map="${OPENURMA_PEER_PORT_MAP:-$profile_peer_port_map}"
@@ -976,6 +982,7 @@ provider="${OPENURMA_PROVIDER:-$profile_provider}"
 [[ -n "$cli_mem_ctrl_backend_latency" ]] && mem_ctrl_backend_latency=$cli_mem_ctrl_backend_latency
 [[ -n "$cli_mem_ctrl_command_window" ]] && mem_ctrl_command_window=$cli_mem_ctrl_command_window
 [[ -n "$cli_ub_port_count" ]] && ub_port_count=$cli_ub_port_count
+[[ -n "$cli_network_backend" ]] && network_backend=$cli_network_backend
 [[ -n "$cli_ub_transport" ]] && ub_transport=$cli_ub_transport
 [[ -n "$cli_peer_topology" ]] && peer_topology=$cli_peer_topology
 [[ -n "$cli_peer_port_map" ]] && peer_port_map=$cli_peer_port_map
@@ -1063,7 +1070,13 @@ initrd="${OPENURMA_INITRD:-$default_initrd}"
 config="${OPENURMA_CONFIG:-$lab/configs/single_node_fs_openurma.py}"
 switch_config="${OPENURMA_SWITCH_CONFIG:-$lab/gem5/configs/dist/sw.py}"
 ub_switch_source="${OPENURMA_UB_SWITCH_SOURCE:-$lab/tools/ub_switch_sim.cc}"
-ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
+if [[ "$network_backend" == ns3ub-compat ]]; then
+    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-/workspace/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
+    ub_switch_ready_pattern='\[NS3_UB_ADAPTER\] ready'
+else
+    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
+    ub_switch_ready_pattern='\[UB_SWITCH\] ready'
+fi
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 ring="${OPENURMA_DUAL_RING:-/tmp/openurma-dual.peer-ring}"
 ring0="${OPENURMA_DUAL_RING0:-/tmp/openurma-dual.node0.adapter}"
@@ -1281,6 +1294,13 @@ case "$ub_transport" in
     direct-ring|switch-adapter) ;;
     *) die "UB transport must be direct-ring or switch-adapter" ;;
 esac
+case "$network_backend" in
+    builtin|ns3ub-compat) ;;
+    *) die "network backend must be builtin or ns3ub-compat" ;;
+esac
+if [[ "$network_backend" == ns3ub-compat && "$ub_transport" != switch-adapter ]]; then
+    die "ns3ub-compat requires --ub-transport switch-adapter"
+fi
 case "$sync_mode" in
     global-barrier|adapter-local) ;;
     *) die "sync mode must be global-barrier or adapter-local" ;;
@@ -1447,6 +1467,7 @@ sync_quantum_ns=$sync_quantum_ns
 sync_mode=$sync_mode
 ub_port_count=$ub_port_count
 ub_transport=$ub_transport
+network_backend=$network_backend
 peer_topology=$peer_topology
 peer_port_map=${peer_port_map:-identity}
 peer_port_selection=$peer_port_selection
@@ -1606,11 +1627,16 @@ if [[ "$ub_transport" == switch-adapter ]]; then
     for node_ring in "${ring_paths[@]}"; do
         docker exec "$container" truncate -s "$peer_ring_bytes" "$node_ring"
     done
-    docker exec "$container" test -r "$ub_switch_source" ||
-        die "missing UB switch source: $ub_switch_source"
-    docker exec "$container" mkdir -p "$(dirname "$ub_switch_binary")"
-    docker exec "$container" g++ -std=c++17 -O2 -pthread \
-        "$ub_switch_source" -o "$ub_switch_binary"
+    if [[ "$network_backend" == ns3ub-compat ]]; then
+        docker exec "$container" test -x "$ub_switch_binary" ||
+            die "missing ns-3-UB adapter binary: $ub_switch_binary; run scripts/build-ns3ub-adapter.sh"
+    else
+        docker exec "$container" test -r "$ub_switch_source" ||
+            die "missing UB switch source: $ub_switch_source"
+        docker exec "$container" mkdir -p "$(dirname "$ub_switch_binary")"
+        docker exec "$container" g++ -std=c++17 -O2 -pthread \
+            "$ub_switch_source" -o "$ub_switch_binary"
+    fi
 else
     docker exec "$container" truncate -s "$peer_ring_bytes" "$ring"
 fi
@@ -1649,13 +1675,13 @@ if [[ "$ub_transport" == switch-adapter ]]; then
         "${peer_port_map:-}" "$peer_serialization_stages" \
         "$endpoint_eids" "${ring_paths[@]}"
     for _ in $(seq 1 100); do
-        if docker exec "$container" grep -q '\[UB_SWITCH\] ready' \
+        if docker exec "$container" grep -q "$ub_switch_ready_pattern" \
             "$run_root/ub-switch/gem5.log" 2>/dev/null; then
             break
         fi
         sleep 0.05
     done
-    docker exec "$container" grep -q '\[UB_SWITCH\] ready' \
+    docker exec "$container" grep -q "$ub_switch_ready_pattern" \
         "$run_root/ub-switch/gem5.log" 2>/dev/null ||
         die "UB switch did not become ready; see $run_root/ub-switch/gem5.log"
 fi

@@ -70,7 +70,7 @@ echo "Configuring all guests on the shared OOB control network..."
 echo "All UARTs must be detached; use ~. at the start of a line first."
 docker exec "$container" python3 "$serial_tool" \
     --ports "${uart_ports[@]}" --command /usr/local/bin/ou-net-up \
-    --timeout "$sync_timeout"
+    --timeout "$sync_timeout" --prompt-kick-after 1
 
 cpu_mode="$(docker exec "$container" awk -F= \
     '$1 == "cpu_mode" { print $2; exit }' "$run_root/run-manifest.txt" 2>/dev/null || true)"
