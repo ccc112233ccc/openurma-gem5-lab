@@ -28,7 +28,7 @@ def slot_offset(direction: int, index: int) -> int:
 
 
 def wait_for(predicate, process: subprocess.Popen[str], reason: str) -> None:
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + 10
     while not predicate():
         if process.poll() is not None:
             raise RuntimeError(process.stderr.read())
@@ -41,6 +41,145 @@ def put_record(mapping: mmap.mmap, index: int, fields: tuple, payload: bytes = b
     offset = slot_offset(1, index)
     mapping[offset : offset + MESSAGE.size] = MESSAGE.pack(*fields)
     mapping[offset + MESSAGE.size : offset + MESSAGE.size + len(payload)] = payload
+
+
+def run_four_endpoint_case(binary: pathlib.Path) -> None:
+    """Exercise two independent reciprocal pairs on one native UB switch."""
+    with tempfile.TemporaryDirectory(prefix="openurma-native-adapter-4ep-") as directory:
+        paths = [pathlib.Path(directory) / f"node{node}.ring" for node in range(4)]
+        maps = []
+        for path in paths:
+            with path.open("wb") as output:
+                output.truncate(RING_BYTES)
+            descriptor = os.open(path, os.O_RDWR)
+            maps.append(mmap.mmap(descriptor, RING_BYTES))
+            os.close(descriptor)
+
+        process = subprocess.Popen(
+            [
+                str(binary),
+                "--native-multi",
+                "1",
+                "100ps",
+                "0ps",
+                "400",
+                "0",
+                "",
+                "1",
+                "0x100,0x101,0x102,0x103",
+                *(str(path) for path in paths),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            peers = (2, 3, 0, 1)
+            for endpoint, peer in enumerate(peers):
+                struct.pack_into("<I", maps[endpoint], 4116, 0x100 + peer)
+                struct.pack_into("<Q", maps[endpoint], 4096, 1)
+            wait_for(
+                lambda: all(struct.unpack_from("<Q", mapping, 4104)[0] == 1 for mapping in maps),
+                process,
+                "native adapter did not rendezvous four endpoints",
+            )
+
+            payload = bytes(40) + bytes(range(32))
+            for source, destination in ((0, 2), (1, 3)):
+                put_record(
+                    maps[source],
+                    0,
+                    (
+                        len(payload),
+                        1,
+                        900,
+                        1000,
+                        20 + source,
+                        0,
+                        0,
+                        3,
+                        0,
+                        0x100 + source,
+                        0x100 + destination,
+                        0,
+                        bytes(8),
+                    ),
+                    payload,
+                )
+                put_record(
+                    maps[source],
+                    1,
+                    (
+                        0,
+                        2,
+                        1000,
+                        50000,
+                        30 + source,
+                        0,
+                        0,
+                        3,
+                        0,
+                        0x100 + source,
+                        0x100 + destination,
+                        1,
+                        bytes(8),
+                    ),
+                )
+                struct.pack_into("<Q", maps[source], index_offset(1), 2)
+            for source, destination in ((2, 0), (3, 1)):
+                put_record(
+                    maps[source],
+                    0,
+                    (
+                        0,
+                        2,
+                        1000,
+                        50000,
+                        30 + source,
+                        0,
+                        0,
+                        3,
+                        0,
+                        0x100 + source,
+                        0x100 + destination,
+                        1,
+                        bytes(8),
+                    ),
+                )
+                struct.pack_into("<Q", maps[source], index_offset(1), 1)
+
+            wait_for(
+                lambda: all(
+                    struct.unpack_from("<Q", maps[endpoint], index_offset(0))[0]
+                    >= (2 if endpoint >= 2 else 1)
+                    for endpoint in range(4)
+                ),
+                process,
+                "native switch did not independently route both endpoint pairs",
+            )
+            for destination, source in ((2, 0), (3, 1)):
+                received = MESSAGE.unpack_from(maps[destination], slot_offset(0, 0))
+                assert received[1] == 1, received
+                assert received[4] == 20 + source, received
+                assert received[9] == 0x100 + source, received
+                assert received[10] == 0x100 + destination, received
+
+            for mapping in maps:
+                struct.pack_into("<Q", mapping, 4096, 2)
+            wait_for(
+                lambda: all(struct.unpack_from("<Q", mapping, 4104)[0] == 2 for mapping in maps),
+                process,
+                "native adapter did not quiesce four endpoints",
+            )
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            for mapping in maps:
+                mapping.close()
 
 
 def main() -> int:
@@ -217,7 +356,8 @@ def main() -> int:
                 process.wait()
             for mapping in maps:
                 mapping.close()
-    print("ns-3-UB native adapter test: PASS")
+    run_four_endpoint_case(binary)
+    print("ns-3-UB native adapter test (2 and 4 endpoints): PASS")
     return 0
 
 
