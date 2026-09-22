@@ -72,6 +72,7 @@ done | awk '\$2 == \"=>\" && \$3 ~ /^\\// { print \$3 }' | sort -u |
 while read -r dep; do
   cp -L \"\$dep\" '$container_artifact/lib/'\"\$(basename \"\$dep\")\"
 done
+strip --strip-unneeded \"\$binary\" \"\$libasio\"
 "
 
 install -m 0755 \
