@@ -1073,6 +1073,10 @@ switch_config="${OPENURMA_SWITCH_CONFIG:-$lab/gem5/configs/dist/sw.py}"
 ub_switch_source="${OPENURMA_UB_SWITCH_SOURCE:-$lab/tools/ub_switch_sim.cc}"
 if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
     ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-/workspace/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
+    if [[ -z "${OPENURMA_UB_SWITCH_BINARY:-}" && ! -x "$ub_switch_binary" && \
+          -x /tmp/ns3ub-native-build/scratch/ns3.44-ub-gem5-adapter ]]; then
+        ub_switch_binary=/tmp/ns3ub-native-build/scratch/ns3.44-ub-gem5-adapter
+    fi
     ub_switch_ready_pattern='\[NS3_UB_ADAPTER\] ready'
 else
     ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
