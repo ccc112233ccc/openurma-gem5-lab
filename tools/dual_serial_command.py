@@ -47,7 +47,7 @@ def run_one(
                         # for a fresh prompt.  Boot/synchronization callers do
                         # not enable this option, so the kernel boot stream is
                         # never modified.
-                        sock.sendall(b"\n")
+                        sock.sendall(b"\r")
                         prompt_kicked = True
                     continue
                 if not data:

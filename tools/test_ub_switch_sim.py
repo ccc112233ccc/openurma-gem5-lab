@@ -101,9 +101,9 @@ def run_four_endpoint_test(binary: pathlib.Path) -> None:
             # egress serialization + 100 egress propagation.
             assert received[3] == 3530, received
 
-            # Local phase counters need not match after endpoints have run
-            # different prior sessions. The switch acknowledges each side's
-            # own generation once the selected endpoints are reciprocal.
+            # Finish the first generation, then verify that an endpoint which
+            # enters the next generation early waits for its peer instead of
+            # mistaking the peer's preceding OFF phase for a completed run.
             struct.pack_into("<Q", maps[0], 4096, 2)
             struct.pack_into("<Q", maps[3], 4096, 2)
             wait_for(
@@ -112,6 +112,36 @@ def run_four_endpoint_test(binary: pathlib.Path) -> None:
                 process,
                 "four-endpoint switch did not acknowledge OFF",
             )
+            struct.pack_into("<Q", maps[0], 4096, 3)
+            wait_for(
+                lambda: struct.unpack_from("<Q", maps[0], 4104)[0] == 2,
+                process,
+                "early next-generation endpoint was not held at the boundary",
+            )
+            struct.pack_into("<Q", maps[3], 4096, 3)
+            wait_for(
+                lambda: struct.unpack_from("<Q", maps[0], 4104)[0] == 3 and
+                        struct.unpack_from("<Q", maps[3], 4104)[0] == 3,
+                process,
+                "second active generation did not rendezvous",
+            )
+            struct.pack_into("<Q", maps[0], 4096, 4)
+            wait_for(
+                lambda: struct.unpack_from("<Q", maps[3], 4104)[0] == 4,
+                process,
+                "active peer was not released toward the matching OFF boundary",
+            )
+            struct.pack_into("<Q", maps[3], 4096, 4)
+            wait_for(
+                lambda: struct.unpack_from("<Q", maps[0], 4104)[0] == 4 and
+                        struct.unpack_from("<Q", maps[3], 4104)[0] == 4,
+                process,
+                "second OFF generation did not rendezvous",
+            )
+
+            # Local counters may differ when endpoints select a new peer that
+            # has completed fewer prior sessions. Matching active parity is
+            # translated into each endpoint's local generation number.
             struct.pack_into("<I", maps[0], 4116, 0x102)
             struct.pack_into("<I", maps[2], 4116, 0x100)
             struct.pack_into("<Q", maps[0], 4096, 5)

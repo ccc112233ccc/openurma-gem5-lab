@@ -143,7 +143,8 @@ outside the measured interval.
 The first ns-3-UB integration checkpoint can replace the built-in L1 switch
 process while preserving the current version-3 physical-port Adapter ABI.  The
 official guest software, UDMA queues, DMA and completion semantics remain in
-gem5; the independent ns-3 process executes the fabric events and keeps EID
+gem5; the independent ns-3 process uses ns-3 packet/time primitives for the
+compatibility fabric and keeps EID
 routing outside either endpoint.
 
 Clone `ns-3-UB` next to this repository, initialize its submodules, then build
@@ -164,7 +165,7 @@ OPENURMA_CONTAINER=openurma-repro-20260909 \
 ```
 
 `ns3ub-compat` is deliberately named as a transition mode.  It validates the
-process boundary, shared-memory ABI, EID routing and ns-3 event execution, but
+process boundary, shared-memory ABI, EID routing and ns-3 integration, but
 version 3 still charges host-port serialization and the ingress propagation
 term in gem5.  The next `ns3-adapter` protocol revision moves those physical
 terms into ns-3-UB and then replaces the compatibility forwarding core with

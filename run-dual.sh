@@ -1574,9 +1574,31 @@ pid_is_live() {
     ' _ "$1" "$2"
 }
 
+find_process_with_argument() {
+    docker exec "$container" bash -c '
+        expected=$1
+        for cmdline in /proc/[0-9]*/cmdline; do
+            test -r "$cmdline" || continue
+            pid=${cmdline#/proc/}
+            pid=${pid%/cmdline}
+            test "$pid" = "$$" && continue
+            command=$(tr "\000" " " < "$cmdline")
+            if grep -Fq -- "$expected" <<<"$command"; then
+                printf "%s %s\n" "$pid" "$command"
+                exit 0
+            fi
+        done
+        exit 1
+    ' _ "$1"
+}
+
 for ((node = 0; node < node_count; ++node)); do
     if pid_is_live "$run_root/node$node/gem5.pid" "$run_root/node$node"; then
         die "node$node is already running; use status-dual.sh or stop-dual.sh"
+    fi
+    node_terminal_argument="--terminal-port=$(node_uart "$node")"
+    if conflict=$(find_process_with_argument "$node_terminal_argument"); then
+        die "node$node UART is occupied by an untracked process: $conflict"
     fi
 done
 if pid_is_live "$run_root/switch/gem5.pid" "$run_root/switch"; then
