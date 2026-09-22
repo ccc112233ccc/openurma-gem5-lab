@@ -33,6 +33,7 @@ e3f7c78e5500ecab3783e1a86d31133099cb8c12ef3b88c88e9c001e64689400  patches/source
 2863908a54f1510887a7bf619a3772d02070af4a031deaa141372034deab268e  patches/source/openurma/0030-Report-adapter-synchronization-loop-profile.patch
 0b2e04803364540dc5cf1d4ab0375b253cc4408b5d544d8c65f2ef37d87a1100  patches/source/openurma/0031-Run-adapter-synchronization-in-gem5-event-queue.patch
 f74ed334b96913ffdb2f7fdb83f6357284051aa4bf16625f45d5958546d99de7  patches/source/openurma/0032-Route-adapter-traffic-by-official-peer-EID.patch
+15c8796cb4d80e1837909c322e95be1b38881a6706c7b19e8846c775204d331d  patches/source/openurma/0033-Tag-adapter-sync-promises-with-generation.patch
 bb5182e9935fd993bcfd330b232920610c075540cdfe320ad002885fb22804c5  patches/source/umdk/0001-sim-add-deterministic-gem5-perftest-instrumentation.patch
 850fdf20c3541a5a4941476b246b0d80ab5c8f28853a1d3ba73caa3fedb5ac38  patches/source/umdk/0002-sim-synchronize-iteration-send-bandwidth-runs.patch
 f2ba4e59bd69cf738692aeef4e983ddc93ba0c3f0dc9b07e1c9771a25ebd06e6  patches/source/umdk/0003-Support-synchronized-bidirectional-RMA-bandwidth-tes.patch

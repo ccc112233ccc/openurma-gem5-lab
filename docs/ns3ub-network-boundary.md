@@ -2,9 +2,9 @@
 
 ## Scope
 
-The integration boundary is the external side of each modeled UDMA physical
-port.  Software-visible device behaviour remains in gem5.  Link and switched
-fabric behaviour belongs to the ns-3-UB process.
+The integration boundary is the cable-facing side of each modeled UDMA host
+port. Software-visible device and host-NIC behaviour remains in gem5. The
+switched fabric belongs to the ns-3-UB process.
 
 This rule is normative: a delay, queue, state machine, or fault is modeled by
 exactly one side of the boundary.
@@ -18,8 +18,11 @@ exactly one side of the boundary.
 | DMA, address translation, token checks and IOTLB | gem5 UDMA device |
 | TP activation and TP-to-physical-port selection | gem5 UDMA device |
 | Endpoint packetization/reassembly and RMA completion semantics | gem5 UDMA device |
-| Host-port serialization and propagation | ns-3-UB |
+| Host NIC egress queue, port selection and source-port serialization | gem5 UDMA device |
+| Host-to-switch Adapter lookahead | co-simulation boundary |
+| Switch ingress processing and VOQ admission | ns-3-UB |
 | Switch ingress/egress queues, arbitration and forwarding | ns-3-UB |
+| Switch egress-port serialization and switch-to-host propagation | ns-3-UB |
 | Fabric routing, flow control, congestion and link faults | ns-3-UB |
 
 The first integration phase transports the existing 40-byte modeled UDMA
@@ -53,12 +56,12 @@ source and destination port within that endpoint.  IP addresses remain part
 of the userspace resource-exchange control path and never route UB data in the
 fabric process.
 
-Version 3 currently presents `receive_tick` to the fabric after gem5 has
-charged host-port serialization and ingress-link propagation.  This is a
-compatibility mode for the first executable bridge only.  The production
-`ns3-adapter` mode must publish DATA at the NIC egress tick and move those two
-physical terms into ns-3-UB.  The old `switch-adapter` mode keeps its existing
-timing and remains the A/B reference.
+Version 3 presents `receive_tick` at the switch ingress after gem5 has charged
+the host NIC's source-port serialization and the positive Adapter lookahead.
+This makes the boundary timestamp directly usable as a native `UbSwitch`
+ingress event. The `ns3ub-compat` mode retains arithmetic switch/egress timing;
+`ns3ub-native` replaces that arithmetic with the production `UbSwitch`, VOQ,
+allocator, `UbPort`, and `UbLink` path.
 
 ## Virtual time
 
@@ -75,10 +78,12 @@ never used as simulated latency.
 
 1. `compatibility bridge`: consume the current version-3 ring, execute fabric
    events in an ns-3 process, and reproduce the existing switch timing test.
-2. `physical ownership`: add the gem5 `ns3-adapter` mode and move ingress-link
-   serialization/propagation out of gem5.
-3. `native fabric`: inject an ns-3-UB packet representation through external
-   endpoint ports and use native switch queues, routing and flow control.
+2. `native fabric`: translate the opaque endpoint carrier to an ns-3-UB frame
+   at switch ingress and use native switch queues, routing, egress ports, and
+   links. The first milestone disables flow control while validating the
+   lossless base path.
+3. `fabric features`: enable native flow control, congestion feedback, link
+   faults, and topology-driven routing without moving transaction semantics.
 4. `scale`: multiple physical ports, more than two hosts, MTP profiling and
    optional MPI partitioning inside ns-3-UB.
 

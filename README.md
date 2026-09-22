@@ -166,11 +166,21 @@ OPENURMA_CONTAINER=openurma-repro-20260909 \
 
 `ns3ub-compat` is deliberately named as a transition mode.  It validates the
 process boundary, shared-memory ABI, EID routing and ns-3 integration, but
-version 3 still charges host-port serialization and the ingress propagation
-term in gem5.  The next `ns3-adapter` protocol revision moves those physical
-terms into ns-3-UB and then replaces the compatibility forwarding core with
-native UB ports, switch queues, routing and flow control.  The ownership rules
-and delivery gates are documented in
+its forwarding core is still arithmetic. The native-switch milestone is
+available with:
+
+```bash
+OPENURMA_CONTAINER=openurma-repro-20260909 \
+  ./run-dual.sh --network-backend ns3ub-native
+```
+
+`ns3ub-native` keeps the official software, UDMA device behaviour, source NIC
+port and its serialization in gem5. At the switch-ingress timestamp it wraps
+the opaque endpoint carrier in native UB headers and runs it through the
+existing `UbSwitch` VOQ, allocator, egress `UbPort`, and `UbLink`. Flow control
+is intentionally disabled for this first lossless-path checkpoint; routing,
+queuing, switch-port serialization and egress propagation are no longer
+adapter arithmetic. The ownership rules and delivery gates are documented in
 [`docs/ns3ub-network-boundary.md`](docs/ns3ub-network-boundary.md).
 
 The same launcher supports 2 through 8 guests. Every guest attaches to one
@@ -766,7 +776,7 @@ change the simulator/kernel ABI:
 | Component | Version or exact commit |
 | --- | --- |
 | gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `724651433c9bdee2c7f0484ab85b9620b0810993` |
-| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `231b43387ec5e7b34430562f6def90d68b584b3c` |
+| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `a49521580a27d8a3f66588342581fd9d73cfb42a` |
 | OpenClickNP | `c1c6acc58032a1894507d88659b3cca668b0e1a5` |
 | vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `f84b90b8ddd8173b851334f55d332783d248bfc7` |
 | openEuler OLK-6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |

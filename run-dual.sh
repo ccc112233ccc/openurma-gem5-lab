@@ -123,7 +123,8 @@ CPU, cache, and memory:
 
 UB link:
   --network-backend MODE        OPENURMA_NETWORK_BACKEND
-                                (builtin|ns3ub-compat; default: builtin)
+                                (builtin|ns3ub-compat|ns3ub-native;
+                                default: builtin)
   --ub-transport MODE           OPENURMA_UB_TRANSPORT
                                 (switch-adapter|direct-ring; default:
                                 switch-adapter)
@@ -1070,7 +1071,7 @@ initrd="${OPENURMA_INITRD:-$default_initrd}"
 config="${OPENURMA_CONFIG:-$lab/configs/single_node_fs_openurma.py}"
 switch_config="${OPENURMA_SWITCH_CONFIG:-$lab/gem5/configs/dist/sw.py}"
 ub_switch_source="${OPENURMA_UB_SWITCH_SOURCE:-$lab/tools/ub_switch_sim.cc}"
-if [[ "$network_backend" == ns3ub-compat ]]; then
+if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
     ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-/workspace/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
     ub_switch_ready_pattern='\[NS3_UB_ADAPTER\] ready'
 else
@@ -1295,11 +1296,11 @@ case "$ub_transport" in
     *) die "UB transport must be direct-ring or switch-adapter" ;;
 esac
 case "$network_backend" in
-    builtin|ns3ub-compat) ;;
-    *) die "network backend must be builtin or ns3ub-compat" ;;
+    builtin|ns3ub-compat|ns3ub-native) ;;
+    *) die "network backend must be builtin, ns3ub-compat, or ns3ub-native" ;;
 esac
-if [[ "$network_backend" == ns3ub-compat && "$ub_transport" != switch-adapter ]]; then
-    die "ns3ub-compat requires --ub-transport switch-adapter"
+if [[ "$network_backend" != builtin && "$ub_transport" != switch-adapter ]]; then
+    die "$network_backend requires --ub-transport switch-adapter"
 fi
 case "$sync_mode" in
     global-barrier|adapter-local) ;;
@@ -1649,7 +1650,7 @@ if [[ "$ub_transport" == switch-adapter ]]; then
     for node_ring in "${ring_paths[@]}"; do
         docker exec "$container" truncate -s "$peer_ring_bytes" "$node_ring"
     done
-    if [[ "$network_backend" == ns3ub-compat ]]; then
+    if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
         docker exec "$container" test -x "$ub_switch_binary" ||
             die "missing ns-3-UB adapter binary: $ub_switch_binary; run scripts/build-ns3ub-adapter.sh"
     else
@@ -1688,10 +1689,14 @@ if [[ "$sync_mode" == global-barrier ]]; then
 fi
 
 if [[ "$ub_transport" == switch-adapter ]]; then
+    ub_switch_mode=--multi
+    if [[ "$network_backend" == ns3ub-native ]]; then
+        ub_switch_mode=--native-multi
+    fi
     docker exec -d "$container" \
         bash "$lab/tools/run-background.sh" \
         "$run_root/ub-switch/gem5.pid" "$run_root/ub-switch/gem5.log" \
-        "$ub_switch_binary" --multi "$ub_port_count" \
+        "$ub_switch_binary" "$ub_switch_mode" "$ub_port_count" \
         "${peer_latency_ns}ns" "$peer_switch_delay" \
         "$peer_link_rate_gbps" "$peer_link_overhead_bytes" \
         "${peer_port_map:-}" "$peer_serialization_stages" \

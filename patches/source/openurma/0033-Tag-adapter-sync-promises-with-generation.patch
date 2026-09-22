@@ -1,0 +1,42 @@
+From a49521580a27d8a3f66588342581fd9d73cfb42a Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Tue, 22 Sep 2026 14:39:48 +0800
+Subject: [PATCH] Tag adapter sync promises with generation
+
+---
+ eval/twonode/gem5_scaffold/src/NICTopologySC.cc     | 1 +
+ eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh | 6 +++++-
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 627c37d..5a17359 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -4249,6 +4249,7 @@ NICTopologySC::adapter_sync_step()
+             header->source_eid = udma_endpoint_eid_;
+             header->destination_eid = __atomic_load_n(
+                 &ring_->sync_destination_eid, __ATOMIC_ACQUIRE);
++            header->sync_phase = peer_sync_phase_;
+             __atomic_store_n(&direction.head.value, head + 1,
+                              __ATOMIC_RELEASE);
+         }
+diff --git a/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh b/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh
+index 739a587..2b529cc 100644
+--- a/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh
++++ b/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh
+@@ -42,7 +42,11 @@ struct alignas(64) MessageHeader {
+     // application, resolves destination_eid to an output adapter.
+     uint32_t source_eid;
+     uint32_t destination_eid;
+-    uint8_t reserved[16];
++    // SYNC generation. Zero is accepted only from legacy compatibility
++    // producers; native fabrics use it to discard promises left over from a
++    // preceding synchronized ROI whose wire-time epoch has already ended.
++    uint64_t sync_phase;
++    uint8_t reserved[8];
+ };
+ 
+ struct alignas(4096) Ring {
+-- 
+2.50.1 (Apple Git-155)
+
