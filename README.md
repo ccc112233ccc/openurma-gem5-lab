@@ -102,7 +102,8 @@ git -C ../Mooncake checkout 1a0c0a44214ff61a8a4b2e9d90dfb023dd4703ed
 生成物位于 `artifacts/mooncake-urma/`，并被加入
 `out/official-udma.cpio.gz`。重新启动 guest 后可以先用
 `transfer_engine_bench --help` 验证命令和依赖；双节点 READ/WRITE 命令会在
-完成持续虚拟时间接入后固化在这里。
+完成持续虚拟时间接入后固化在这里。当前原生 UB 资源创建的实测记录见
+[`docs/mooncake-urma-bringup.md`](docs/mooncake-urma-bringup.md)。
 
 ## Boot and attach
 
