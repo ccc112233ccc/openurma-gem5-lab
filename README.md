@@ -82,6 +82,28 @@ ou-lat-client --profile ctp-rm-send-imm-i128 20 128 21115
 OLK-6.6 是有意选择的：当前官方 UMDK 使用 TLV ioctl，旧 OLK-5.10 的
 `uburma` ABI 与之不匹配。构建脚本会拒绝混用版本。
 
+### Mooncake 原生 URMA benchmark
+
+将官方 Mooncake 仓库放在本实验仓库旁边，然后构建其原生
+`transfer_engine_bench --protocol=ub`。脚本不会修改 Mooncake 或 UMDK 源码；
+它使用与 guest 完全相同的 `urma_api.h`、`liburma.so` 和 ARM64 ABI，并记录两边
+的精确 Git revision。首次运行会构建固定依赖的 ARM64 builder 镜像：
+
+```bash
+git clone https://github.com/kvcache-ai/Mooncake.git ../Mooncake
+git -C ../Mooncake checkout 1a0c0a44214ff61a8a4b2e9d90dfb023dd4703ed
+./scripts/build-mooncake-urma.sh
+./scripts/package-mooncake-urma-initramfs.sh
+```
+
+默认锁定的 Mooncake revision 也记录在 `SOURCE_REVISIONS.md`；如需有意验证其他
+版本，可在构建时显式设置 `MOONCAKE_REVISION=<commit>`。
+
+生成物位于 `artifacts/mooncake-urma/`，并被加入
+`out/official-udma.cpio.gz`。重新启动 guest 后可以先用
+`transfer_engine_bench --help` 验证命令和依赖；双节点 READ/WRITE 命令会在
+完成持续虚拟时间接入后固化在这里。
+
 ## Boot and attach
 
 From a host terminal, start the simulator in the foreground. The launcher sets

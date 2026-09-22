@@ -18,6 +18,7 @@ BUSYBOX_ARM64="${BUSYBOX_ARM64:-}"
 OUT="${OUT:-$LAB_DIR/out/openurma-interactive.cpio.gz}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 EXTRA_BINS="${EXTRA_BINS:-}"
+EXTRA_LIBRARY_DIRS="${EXTRA_LIBRARY_DIRS:-}"
 EXTRA_MODULES="${EXTRA_MODULES:-}"
 STOCK_UDMA_PROVIDER="${STOCK_UDMA_PROVIDER:-}"
 UMMU_SHIM="${UMMU_SHIM:-}"
@@ -39,6 +40,9 @@ Optional environment:
   OUT            output .cpio.gz path
   CROSS_COMPILE  tool prefix (default: aarch64-linux-gnu-)
   EXTRA_BINS     space-separated extra ARM64 executables to place in /usr/bin
+  EXTRA_LIBRARY_DIRS
+                 space-separated directories searched for dependencies of
+                 EXTRA_BINS (for example a Mooncake build's libasio.so)
   EXTRA_MODULES  space-separated extra kernel modules to place in /lib/modules
   STOCK_UDMA_PROVIDER
                  stock liburma-udma.so to package alongside the legacy
@@ -391,6 +395,10 @@ SEARCH_DIRS=(
     /usr/lib/aarch64-linux-gnu
     /lib/aarch64-linux-gnu
 )
+for extra_lib_dir in $EXTRA_LIBRARY_DIRS; do
+    [[ -d "$extra_lib_dir" ]] || die "EXTRA_LIBRARY_DIRS entry not found: $extra_lib_dir"
+    SEARCH_DIRS+=("$extra_lib_dir")
+done
 if [[ -n "$UMMU_SHIM" ]]; then
     SEARCH_DIRS+=("$(dirname "$UMMU_SHIM")")
 fi
@@ -514,7 +522,15 @@ sha256_file() {
     if [[ -n "$UBAGG_PROVIDER" ]]; then
         printf ' ubagg_cli ou-ubagg-topology'
     fi
-    printf ' k_smoke k_dataplane twonode_write ou-dist-sync ou-cpu-switch ou-enable-sync ou-net-up ou-help ou-status ou-smoke ou-dataplane ou-peer-server ou-peer-client ou-lat-server ou-lat-client\n'
+    printf ' k_smoke k_dataplane twonode_write ou-dist-sync ou-cpu-switch ou-enable-sync ou-net-up ou-help ou-status ou-smoke ou-dataplane ou-peer-server ou-peer-client ou-lat-server ou-lat-client'
+    for extra in $EXTRA_BINS; do printf ' %s' "$(basename "$extra")"; done
+    printf '\n'
+    extra_index=0
+    for extra in $EXTRA_BINS; do
+        printf 'extra_bin_%u_path=%s\n' "$extra_index" "$extra"
+        printf 'extra_bin_%u_sha256=%s\n' "$extra_index" "$(sha256_file "$extra")"
+        extra_index=$((extra_index + 1))
+    done
     # These hashes bind the image to the mutable inputs most likely to change
     # during latency-model work. run-dual.sh compares them before boot, which
     # catches both an old image and a transiently truncated Docker bind mount.
