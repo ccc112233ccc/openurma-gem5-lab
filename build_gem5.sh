@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild the exact OpenURMA-enabled gem5 used by this lab.
-# Run this script inside the ARM64 Ubuntu build container, not on macOS.
+# Run this script on Linux, either natively or inside the Ubuntu build container.
 set -euo pipefail
 
 die() {
@@ -26,7 +26,7 @@ readonly OPENCLICKNP_COMMIT=c1c6acc58032a1894507d88659b3cca668b0e1a5
 readonly UMDK_COMMIT=f84b90b8ddd8173b851334f55d332783d248bfc7
 
 [[ "$(uname -s)" == Linux ]] ||
-    die "run this inside the ARM64 Linux build container"
+    die "run this on Linux (native Ubuntu or the build container)"
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 
 for tool in ar bash cmp g++ git install ln make mkdir readlink scons; do

@@ -14,29 +14,57 @@ bonding 逻辑设备数据面。
 
 ## 从零开始
 
-推荐环境是 Apple Silicon Mac + Docker Desktop；ARM64 Linux 主机同样可用。
-至少预留约 8 GiB 内存、80 GiB 磁盘空间。首次构建需要下载 gem5、OpenURMA、
+正式支持两种入口：ARM64 Ubuntu 22.04 原生运行，以及 Apple Silicon Mac 上的
+Docker Desktop。两者使用同一套源码获取、构建和校验脚本；Docker 只提供固定的
+Ubuntu 环境，不包含另一套实验实现。至少预留约 8 GiB 内存、80 GiB 磁盘空间。
+首次构建需要下载 gem5、OpenURMA、
 OpenClickNP、openEuler UMDK/UMMU/OLK 和 gem5 ARM 固件，并编译内核与 gem5，
 因此会花较长时间。后续执行是增量的。
+
+### ARM64 Ubuntu 22.04 原生模式
 
 ```bash
 git clone https://github.com/ccc112233ccc/openurma-gem5-lab.git
 cd openurma-gem5-lab
-./setup.sh --jobs 2
+./setup-native.sh --jobs 8
+./run-dual-native.sh --profile fast --provider official
+./status-dual-native.sh
+./sync-dual-native.sh
 ```
 
-`setup.sh` 完成以下工作并在每一步校验固定版本：
+连接两个串口：
+
+```bash
+./attach-node0-native.sh
+./attach-node1-native.sh
+```
+
+原生入口会安装 `docker/ubuntu-22.04-packages.txt` 中的依赖。已经配置好依赖时可用
+`./setup-native.sh --skip-deps`。停止实验使用 `./stop-dual-native.sh`；批量测试有
+对应的 `run-latency-native.sh`、`run-paired-latency-native.sh` 和
+`sweep-latency-native.sh`。
+
+### Docker 模式
+
+```bash
+git clone https://github.com/ccc112233ccc/openurma-gem5-lab.git
+cd openurma-gem5-lab
+./setup-docker.sh --jobs 2
+```
+
+原有 `./setup.sh` 保留为 `setup-docker.sh` 的兼容入口。Docker 包装层完成以下工作：
 
 1. 构建 Ubuntu 22.04 ARM64 工具容器；
-2. 拉取公开上游的精确基线，并从 `patches/source/` 恢复本实验的完整提交；
-3. 在 Docker 大小写敏感卷中拉取并编译 OLK，避免 macOS 文件名冲突；
-4. 编译带 OpenURMA 设备模型的 gem5、官方 UMDK/UDMA provider 和内核驱动；
-5. 生成带 BusyBox shell 的 initramfs，并核验 ELF 架构、内核 `vermagic` 和摘要。
+2. 为 macOS 上的 OLK 源码提供大小写敏感卷；
+3. 在容器里调用同一个 `setup-native.sh --skip-deps` 核心流程。
+
+核心流程随后拉取固定源码版本、恢复 `patches/source/` 中的实验提交，编译 gem5、
+OLK、官方 UMDK/UDMA provider 与驱动，并生成和校验 initramfs。
 
 只验证源码拉取和补丁恢复，不进行长时间编译：
 
 ```bash
-./setup.sh --sources-only
+./setup-docker.sh --sources-only
 ```
 
 完整构建成功后，以快速 CPU 模式启动官方完整驱动栈双节点：
@@ -94,6 +122,13 @@ git clone https://github.com/kvcache-ai/Mooncake.git ../Mooncake
 git -C ../Mooncake checkout 1a0c0a44214ff61a8a4b2e9d90dfb023dd4703ed
 ./scripts/build-mooncake-urma.sh
 ./scripts/package-mooncake-urma-initramfs.sh
+```
+
+上面是 Docker 默认入口；ARM64 Ubuntu 原生环境使用同一构建核心：
+
+```bash
+OPENURMA_EXECUTION_MODE=native ./scripts/build-mooncake-urma.sh
+OPENURMA_EXECUTION_MODE=native ./scripts/package-mooncake-urma-initramfs.sh
 ```
 
 默认锁定的 Mooncake revision 也记录在 `SOURCE_REVISIONS.md`；如需有意验证其他

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Build the exact OLK-6.6 kernel/URMA modules used by OpenURMA Tier-G.
 #
-# Run this inside the Linux ARM64 build container.  KSRC must live on a
-# case-sensitive filesystem: a normal macOS bind mount corrupts Linux kernel
+# Run this on ARM64 Linux, either natively or inside the build container. KSRC
+# must live on a case-sensitive filesystem: a normal macOS bind mount corrupts Linux kernel
 # paths that differ only by case (for example xt_MARK.h vs xt_mark.h).
 set -euo pipefail
 
-KSRC="${KSRC:-/opt/openurma-gem5-lab/oe66}"
-OPENURMA_ROOT="${OPENURMA_ROOT:-/workspace/openurma-gem5-lab/sources/OpenURMA}"
-ARTIFACT_DIR="${ARTIFACT_DIR:-/workspace/openurma-gem5-lab/artifacts/kernel}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LAB_DIR="${OPENURMA_LAB_ROOT:-$SCRIPT_DIR}"
+KSRC="${KSRC:-$LAB_DIR/oe66}"
+OPENURMA_ROOT="${OPENURMA_ROOT:-$LAB_DIR/sources/OpenURMA}"
+ARTIFACT_DIR="${ARTIFACT_DIR:-$LAB_DIR/artifacts/kernel}"
 JOBS="${JOBS:-$(nproc)}"
 ARCH="${ARCH:-arm64}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
@@ -17,7 +19,7 @@ EXPECTED_KERNEL_COMMIT="5078a3a23a1e1825ec136485173ec98668cdd640"
 KMOD_DIR="$OPENURMA_ROOT/integration/umdk/kmod"
 LINKAGE_H="$KSRC/arch/arm64/include/asm/linkage.h"
 ASSEMBLER_H="$KSRC/arch/arm64/include/asm/assembler.h"
-BTI_PATCH="${BTI_PATCH:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patches/olk66-gem5-bti.patch}"
+BTI_PATCH="${BTI_PATCH:-$SCRIPT_DIR/patches/olk66-gem5-bti.patch}"
 
 fail() {
     echo "[olk66] ERROR: $*" >&2

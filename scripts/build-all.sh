@@ -2,10 +2,11 @@
 # Build every artifact required by run-dual.sh from the fetched source trees.
 set -euo pipefail
 
-lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+lab="${OPENURMA_LAB_ROOT:-$(cd "$script_dir/.." && pwd)}"
 openurma="$lab/sources/OpenURMA"
 openclicknp="$lab/sources/OpenClickNP"
-kernel_root="${KSRC:-/opt/openurma-gem5-lab/oe66}"
+kernel_root="${KSRC:-$lab/oe66}"
 jobs="${JOBS:-2}"
 
 export OPENURMA_LAB_ROOT="$lab"

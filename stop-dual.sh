@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/runtime.sh
+source "$script_dir/scripts/runtime.sh"
+container="$OPENURMA_CONTAINER"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 
-if ! docker inspect "$container" >/dev/null 2>&1; then
-    echo "Container does not exist: $container" >&2
-    exit 2
-fi
-if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != true ]; then
-    echo "Dual-node processes are already stopped with container $container."
-    exit 0
+if [[ "$OPENURMA_EXECUTION_MODE" == docker ]]; then
+    if ! docker inspect "$container" >/dev/null 2>&1; then
+        echo "Container does not exist: $container" >&2
+        exit 2
+    fi
+    if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != true ]; then
+        echo "Dual-node processes are already stopped with container $container."
+        exit 0
+    fi
+else
+    ou_runtime_validate
 fi
 
 manifest="$run_root/run-manifest.txt"
-network_backend="$(docker exec "$container" awk -F= \
+network_backend="$(ou_exec awk -F= \
     '$1 == "network_backend" { print $2; exit }' "$manifest" 2>/dev/null || true)"
 if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
-    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-/workspace/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
+    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$(dirname "$lab")/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
 else
     ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
 fi
@@ -27,7 +34,7 @@ stop_one() {
     label=$1
     pidfile=$2
     expected=$3
-    docker exec "$container" bash -c '
+    ou_exec bash -c '
         label=$1
         pidfile=$2
         expected=$3
@@ -45,7 +52,7 @@ stop_one() {
     ' _ "$label" "$pidfile" "$expected"
 }
 
-node_count="$(docker exec "$container" awk -F= \
+node_count="$(ou_exec awk -F= \
     '$1 == "node_count" { print $2; exit }' \
     "$run_root/run-manifest.txt" 2>/dev/null || true)"
 node_count=${node_count:-2}
@@ -54,10 +61,10 @@ for ((node = 0; node < node_count; ++node)); do
 done
 stop_one switch "$run_root/switch/gem5.pid" "$run_root/switch"
 stop_one ub-switch "$run_root/ub-switch/gem5.pid" "$ub_switch_binary"
-if docker exec "$container" test -r "$run_root/oob-switch/relay.pid"; then
+if ou_exec test -r "$run_root/oob-switch/relay.pid"; then
     stop_one oob-switch "$run_root/oob-switch/relay.pid" \
         "$lab/tools/ethernet_relay.py"
-elif docker exec "$container" test -r "$run_root/relay/relay.pid"; then
+elif ou_exec test -r "$run_root/relay/relay.pid"; then
     stop_one relay "$run_root/relay/relay.pid" "$lab/tools/ethernet_relay.py"
 else
     for ((pair = 0; pair < node_count / 2; ++pair)); do
@@ -65,4 +72,4 @@ else
             "$lab/tools/ethernet_relay.py"
     done
 fi
-echo "The container and any separate single-node gem5 session were left untouched."
+echo "The runtime environment and any separate single-node gem5 session were left untouched."

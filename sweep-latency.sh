@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/runtime.sh
+source "$script_dir/scripts/runtime.sh"
+
 die() { echo "sweep-latency.sh: $*" >&2; exit 2; }
 
 usage() {
@@ -27,9 +31,8 @@ OPENURMA_ROI_STATS, OPENURMA_LAT_TIMEOUT, and OPENURMA_LAT_STAGGER.
 EOF
 }
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+container="$OPENURMA_CONTAINER"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 profile="${OPENURMA_LAT_PROFILE:-ctp-rm-send-imm-i128}"
 samples="${OPENURMA_SWEEP_SAMPLES:-100}"
@@ -113,8 +116,9 @@ printf '%s\n' $'profile\tnode\tbytes\titerations\tt_min_us\tt_max_us\tt_median_u
     printf 'client_stagger_seconds=%s\n' "$stagger"
 } >"$output_dir/sweep-manifest.txt"
 
-if docker exec "$container" test -r "$run_root/run-manifest.txt"; then
-    docker exec "$container" cat "$run_root/run-manifest.txt" >"$output_dir/model-manifest.txt"
+ou_runtime_start
+if ou_exec test -r "$run_root/run-manifest.txt"; then
+    ou_exec cat "$run_root/run-manifest.txt" >"$output_dir/model-manifest.txt"
 else
     printf '%s\n' "model manifest unavailable: $run_root/run-manifest.txt" >"$output_dir/model-manifest.txt"
 fi
@@ -125,13 +129,13 @@ roi_arg=(--no-roi-stats)
 (( roi_stats == 0 )) || roi_arg=(--roi-stats)
 
 stats_block_count() {
-    docker exec "$container" awk "/Begin Simulation Statistics/ { count++ } END { print count + 0 }" "$1"
+    ou_exec awk "/Begin Simulation Statistics/ { count++ } END { print count + 0 }" "$1"
 }
 
 extract_stats_block() {
     local stats_path=$1
     local wanted=$2
-    docker exec "$container" awk -v wanted="$wanted" '
+    ou_exec awk -v wanted="$wanted" '
         /Begin Simulation Statistics/ {
             block++
             capture = (block == wanted)

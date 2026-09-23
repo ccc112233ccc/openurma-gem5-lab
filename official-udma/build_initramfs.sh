@@ -2,7 +2,7 @@
 set -euo pipefail
 
 lab_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-kernel_root="${KSRC:-/opt/openurma-gem5-lab/oe66}"
+kernel_root="${KSRC:-$lab_root/oe66}"
 arm_build="${ARM_BUILD:-$lab_root/artifacts/umdk-build}"
 busybox="${BUSYBOX_ARM64:-/bin/busybox}"
 output="${OUT:-$lab_root/out/official-udma.cpio.gz}"

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/runtime.sh
+source "$script_dir/scripts/runtime.sh"
+
 die() { echo "run-dual.sh: $*" >&2; exit 2; }
 
 usage() {
@@ -1057,8 +1061,8 @@ else
 fi
 
 lab_host="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+container="$OPENURMA_CONTAINER"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
 gem5="${OPENURMA_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
 m5_path="${OPENURMA_M5_PATH:-$lab/system}"
 kernel="${OPENURMA_KERNEL:-$lab/artifacts/kernel/vmlinux}"
@@ -1072,7 +1076,8 @@ config="${OPENURMA_CONFIG:-$lab/configs/single_node_fs_openurma.py}"
 switch_config="${OPENURMA_SWITCH_CONFIG:-$lab/gem5/configs/dist/sw.py}"
 ub_switch_source="${OPENURMA_UB_SWITCH_SOURCE:-$lab/tools/ub_switch_sim.cc}"
 if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
-    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-/workspace/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
+    ns3ub_root="${OPENURMA_NS3UB_ROOT:-$(dirname "$lab")/ns-3-ub}"
+    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-gem5-adapter}"
     if [[ -z "${OPENURMA_UB_SWITCH_BINARY:-}" && ! -x "$ub_switch_binary" && \
           -x /tmp/ns3ub-native-build/scratch/ns3.44-ub-gem5-adapter ]]; then
         ub_switch_binary=/tmp/ns3ub-native-build/scratch/ns3.44-ub-gem5-adapter
@@ -1348,6 +1353,7 @@ peer_ring_bytes=$((8192 + 2 * ub_port_count * 64 * 8192))
 print_resolved_config() {
     cat <<EOF
 manifest_version=1
+execution_mode=$OPENURMA_EXECUTION_MODE
 node_count=$node_count
 routing=dynamic_eid
 endpoint_eids=$endpoint_eids
@@ -1511,11 +1517,11 @@ if (( print_config )); then
     exit 0
 fi
 
-docker start "$container" >/dev/null
+ou_runtime_start
 
 for path in "$gem5" "$kernel" "$initrd" "$config" "$switch_config" \
             "$lab/tools/run-background.sh"; do
-    docker exec "$container" test -f "$path" || die "missing in container: $path"
+    ou_exec test -f "$path" || die "missing in runtime environment: $path"
 done
 
 # The default image records both its own digest and the exact paths/digests of
@@ -1523,10 +1529,10 @@ done
 # Custom initramfs paths remain the caller's own contract.
 if [[ "$initrd" == "$lab/out/openurma-interactive.cpio.gz" ]]; then
     image_manifest="${initrd%.cpio.gz}.manifest.txt"
-    docker exec "$container" test -r "$image_manifest" ||
+    ou_exec test -r "$image_manifest" ||
         die "missing default initramfs manifest: $image_manifest"
     image_manifest_value() {
-        docker exec "$container" awk -F= -v key="$1" \
+        ou_exec awk -F= -v key="$1" \
             '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$image_manifest"
     }
     verify_image_hash() {
@@ -1535,7 +1541,7 @@ if [[ "$initrd" == "$lab/out/openurma-interactive.cpio.gz" ]]; then
         expected_hash=$(image_manifest_value "$hash_key")
         [[ -n "$expected_hash" ]] ||
             die "initramfs manifest lacks $hash_key; rebuild it first"
-        actual_hash=$(docker exec "$container" sha256sum "$image_input" | awk '{print $1}')
+        actual_hash=$(ou_exec sha256sum "$image_input" | awk '{print $1}')
         [[ "$actual_hash" == "$expected_hash" ]] ||
             die "hash mismatch for $image_input; rebuild the initramfs first"
     }
@@ -1557,18 +1563,18 @@ if [[ "$initrd" == "$lab/out/openurma-interactive.cpio.gz" ]]; then
         image_input=$(image_manifest_value "${image_component}_path")
         [[ -n "$image_input" ]] ||
             die "initramfs manifest lacks ${image_component}_path; rebuild it first"
-        docker exec "$container" test -e "$image_input" ||
+        ou_exec test -e "$image_input" ||
             die "recorded initramfs input is missing: $image_input"
         verify_image_hash "${image_component}_sha256" "$image_input"
     done
 fi
 for resource in boot.arm64 boot.arm; do
-    docker exec "$container" test -f "$m5_path/binaries/$resource" ||
+    ou_exec test -f "$m5_path/binaries/$resource" ||
         die "missing gem5 ARM resource: $m5_path/binaries/$resource"
 done
 
 pid_is_live() {
-    docker exec "$container" bash -c '
+    ou_exec bash -c '
         pidfile=$1
         expected=$2
         test -r "$pidfile" || exit 1
@@ -1580,7 +1586,7 @@ pid_is_live() {
 }
 
 find_process_with_argument() {
-    docker exec "$container" bash -c '
+    ou_exec bash -c '
         expected=$1
         for cmdline in /proc/[0-9]*/cmdline; do
             test -r "$cmdline" || continue
@@ -1620,7 +1626,7 @@ fi
 case "$run_root" in
     ""|/|.) die "unsafe run output directory: '$run_root'" ;;
 esac
-if docker exec "$container" test -d "$run_root"; then
+if ou_exec test -d "$run_root"; then
     # Completed run directories are reproducible output, not durable evidence.
     # A benchmark that must be retained should use its --raw-output/result
     # option before the next launch. Keeping only the active run prevents each
@@ -1634,7 +1640,7 @@ if docker exec "$container" test -d "$run_root"; then
         "$run_root/node6" "$run_root/node7"
         "$run_root/run-manifest.txt" "$run_root/sync.ready"
     )
-    docker exec "$container" rm -rf -- "${stale_run_paths[@]}"
+    ou_exec rm -rf -- "${stale_run_paths[@]}"
     echo "Cleared inactive previous run output under: $run_root"
 fi
 run_directories=("$run_root/switch" "$run_root/ub-switch" "$run_root/oob-switch")
@@ -1645,34 +1651,34 @@ for ((node = 0; node < node_count; ++node)); do
     ring_paths+=("$(node_ring_path "$node")")
     tap_paths+=("$(node_tap_path "$node")")
 done
-docker exec "$container" mkdir -p "${run_directories[@]}"
-print_resolved_config | docker exec -i "$container" sh -c \
+ou_exec mkdir -p "${run_directories[@]}"
+print_resolved_config | ou_exec_i sh -c \
     'umask 022; tee "$1" >/dev/null' _ "$run_root/run-manifest.txt"
-docker exec "$container" rm -f "$ring" "${ring_paths[@]}" "${tap_paths[@]}"
+ou_exec rm -f "$ring" "${ring_paths[@]}" "${tap_paths[@]}"
 # Must match the per-port trailing-slot ABI in NICTopologySC.cc.
 if [[ "$ub_transport" == switch-adapter ]]; then
     for node_ring in "${ring_paths[@]}"; do
-        docker exec "$container" truncate -s "$peer_ring_bytes" "$node_ring"
+        ou_exec truncate -s "$peer_ring_bytes" "$node_ring"
     done
     if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
-        docker exec "$container" test -x "$ub_switch_binary" ||
+        ou_exec test -x "$ub_switch_binary" ||
             die "missing ns-3-UB adapter binary: $ub_switch_binary; run scripts/build-ns3ub-adapter.sh"
     else
-        docker exec "$container" test -r "$ub_switch_source" ||
+        ou_exec test -r "$ub_switch_source" ||
             die "missing UB switch source: $ub_switch_source"
-        docker exec "$container" mkdir -p "$(dirname "$ub_switch_binary")"
-        docker exec "$container" g++ -std=c++17 -O2 -pthread \
+        ou_exec mkdir -p "$(dirname "$ub_switch_binary")"
+        ou_exec g++ -std=c++17 -O2 -pthread \
             "$ub_switch_source" -o "$ub_switch_binary"
     fi
 else
-    docker exec "$container" truncate -s "$peer_ring_bytes" "$ring"
+    ou_exec truncate -s "$peer_ring_bytes" "$ring"
 fi
 
 actual_dist_port=""
 if [[ "$sync_mode" == global-barrier ]]; then
     # Compatibility/reference mode: the stock dist-gem5 switch owns a global
     # conservative barrier while UB DATA still traverses ub-switch-sim.
-    docker exec -d "$container" \
+    ou_exec_detached \
         bash "$lab/tools/run-background.sh" \
         "$run_root/switch/gem5.pid" "$run_root/switch/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$run_root/switch" "$switch_config" \
@@ -1683,7 +1689,7 @@ if [[ "$sync_mode" == global-barrier ]]; then
         --ethernet-linkspeed="$dist_link_speed"
 
     for _ in $(seq 1 100); do
-        actual_dist_port="$(docker exec "$container" sed -n \
+        actual_dist_port="$(ou_exec sed -n \
             's/.*tcp_iface listening on port \([0-9][0-9]*\).*/\1/p' \
             "$run_root/switch/gem5.log" 2>/dev/null | tail -n 1)"
         [[ -n "$actual_dist_port" ]] && break
@@ -1697,7 +1703,7 @@ if [[ "$ub_transport" == switch-adapter ]]; then
     if [[ "$network_backend" == ns3ub-native ]]; then
         ub_switch_mode=--native-multi
     fi
-    docker exec -d "$container" \
+    ou_exec_detached \
         bash "$lab/tools/run-background.sh" \
         "$run_root/ub-switch/gem5.pid" "$run_root/ub-switch/gem5.log" \
         "$ub_switch_binary" "$ub_switch_mode" "$ub_port_count" \
@@ -1706,13 +1712,13 @@ if [[ "$ub_transport" == switch-adapter ]]; then
         "${peer_port_map:-}" "$peer_serialization_stages" \
         "$endpoint_eids" "${ring_paths[@]}"
     for _ in $(seq 1 100); do
-        if docker exec "$container" grep -q "$ub_switch_ready_pattern" \
+        if ou_exec grep -q "$ub_switch_ready_pattern" \
             "$run_root/ub-switch/gem5.log" 2>/dev/null; then
             break
         fi
         sleep 0.05
     done
-    docker exec "$container" grep -q "$ub_switch_ready_pattern" \
+    ou_exec grep -q "$ub_switch_ready_pattern" \
         "$run_root/ub-switch/gem5.log" 2>/dev/null ||
         die "UB switch did not become ready; see $run_root/ub-switch/gem5.log"
 fi
@@ -1748,12 +1754,12 @@ launch_node() {
         official_args+=(--official-udma-discovery)
         official_args+=(--udma-endpoint-eid="$((0x100 + node))")
     fi
-    docker exec -d \
-        -e "M5_PATH=$m5_path" \
-        -e "OPENURMA_PIPE_DATA=$pipe_data" \
-        -e "OPENURMA_TRACE_PACKETS=$packet_trace" \
-        -e "OPENURMA_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
-        "$container" \
+    ou_exec_detached_env \
+        "M5_PATH=$m5_path" \
+        "OPENURMA_PIPE_DATA=$pipe_data" \
+        "OPENURMA_TRACE_PACKETS=$packet_trace" \
+        "OPENURMA_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
+        -- \
         bash "$lab/tools/run-background.sh" "$out/gem5.pid" "$out/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$out" "$config" \
         "${official_args[@]}" \
@@ -1885,7 +1891,7 @@ oob_endpoints=()
 for tap in "${tap_paths[@]}"; do
     oob_endpoints+=("unix:$tap")
 done
-docker exec -d "$container" \
+ou_exec_detached \
     bash "$lab/tools/run-background.sh" \
     "$run_root/oob-switch/relay.pid" "$run_root/oob-switch/relay.log" \
     python3 "$lab/tools/ethernet_relay.py" "${oob_endpoints[@]}"

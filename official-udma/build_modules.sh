@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-kernel_root="${KSRC:-/opt/openurma-gem5-lab/oe66}"
-fragment="${FRAGMENT:-/workspace/openurma-gem5-lab/official-udma/kernel.fragment}"
+lab_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+kernel_root="${KSRC:-$lab_root/oe66}"
+fragment="${FRAGMENT:-$lab_root/official-udma/kernel.fragment}"
 arch="${ARCH:-arm64}"
 cross_compile="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 jobs="${JOBS:-8}"
-lab_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ub_v2m_bridge="$lab_root/official-udma/ub_v2m_bridge"
 
 [[ -d "$kernel_root" ]] || {

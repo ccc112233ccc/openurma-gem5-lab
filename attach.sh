@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-m5term="${OPENURMA_M5TERM:-/workspace/openurma-gem5-lab/gem5/util/term/m5term}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/runtime.sh
+source "$script_dir/scripts/runtime.sh"
+container="$OPENURMA_CONTAINER"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
+m5term="${OPENURMA_M5TERM:-$lab/gem5/util/term/m5term}"
 port="${OPENURMA_M5TERM_PORT:-3456}"
 takeover="${OPENURMA_ATTACH_TAKEOVER:-1}"
 
@@ -16,10 +20,10 @@ esac
 
 export DOCKER_CLI_HINTS=false
 
-docker start "$container" >/dev/null
-if ! docker exec "$container" test -x "$m5term"; then
+ou_runtime_start
+if ! ou_exec test -x "$m5term"; then
     echo "m5term is not built at $m5term" >&2
-    echo "Build it with: docker exec $container make -C /workspace/openurma-gem5-lab/gem5/util/term" >&2
+    echo "Build it with: make -C $lab/gem5/util/term" >&2
     exit 2
 fi
 
@@ -29,7 +33,7 @@ fi
 # node's console.  Set OPENURMA_ATTACH_TAKEOVER=0 to protect an intentional
 # attachment in another host terminal.
 existing_pids=$(
-    docker exec "$container" ps -eo pid=,args= |
+    ou_exec ps -eo pid=,args= |
         awk -v wanted="$m5term localhost $port" '
             {
                 pid = $1
@@ -53,13 +57,13 @@ if [ -n "$existing_pids" ]; then
         case "$pid" in
             ''|*[!0-9]*) continue ;;
         esac
-        docker exec "$container" kill -TERM "$pid" 2>/dev/null || true
+        ou_exec kill -TERM "$pid" 2>/dev/null || true
     done
 
     for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         still_running=0
         for pid in $existing_pids; do
-            if docker exec "$container" kill -0 "$pid" 2>/dev/null; then
+            if ou_exec kill -0 "$pid" 2>/dev/null; then
                 still_running=1
             fi
         done
@@ -70,4 +74,8 @@ fi
 
 echo "Connecting to the gem5 PL011 console on localhost:$port"
 echo "Type ~. to detach without stopping the simulated machine."
-exec docker exec -it "$container" "$m5term" localhost "$port"
+if [[ "$OPENURMA_EXECUTION_MODE" == docker ]]; then
+    exec docker exec -it "$container" "$m5term" localhost "$port"
+else
+    exec "$m5term" localhost "$port"
+fi

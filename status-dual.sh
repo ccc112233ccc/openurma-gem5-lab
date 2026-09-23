@@ -1,37 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/runtime.sh
+source "$script_dir/scripts/runtime.sh"
+container="$OPENURMA_CONTAINER"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"
 uart1="${OPENURMA_DUAL_UART1:-3470}"
 
-if ! docker inspect "$container" >/dev/null 2>&1; then
-    echo "Container does not exist: $container" >&2
-    exit 2
-fi
-if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != true ]; then
-    echo "Container is stopped: $container"
-    exit 1
+if [[ "$OPENURMA_EXECUTION_MODE" == docker ]]; then
+    if ! docker inspect "$container" >/dev/null 2>&1; then
+        echo "Container does not exist: $container" >&2
+        exit 2
+    fi
+    if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != true ]; then
+        echo "Container is stopped: $container"
+        exit 1
+    fi
+else
+    ou_runtime_validate
 fi
 
 show_process() {
     label=$1
     pidfile=$2
-    if ! docker exec "$container" test -r "$pidfile"; then
+    if ! ou_exec test -r "$pidfile"; then
         printf '%-8s %s\n' "$label" "not started"
         return
     fi
-    pid=$(docker exec "$container" sed -n '1p' "$pidfile")
-    if [[ "$pid" =~ ^[0-9]+$ ]] && docker exec "$container" kill -0 "$pid" 2>/dev/null; then
-        printf '%-8s running (container pid %s)\n' "$label" "$pid"
+    pid=$(ou_exec sed -n '1p' "$pidfile")
+    if [[ "$pid" =~ ^[0-9]+$ ]] && ou_exec kill -0 "$pid" 2>/dev/null; then
+        printf '%-8s running (%s pid %s)\n' "$label" "$OPENURMA_EXECUTION_MODE" "$pid"
     else
         printf '%-8s stopped (stale pid %s)\n' "$label" "$pid"
     fi
 }
 
-node_count="$(docker exec "$container" awk -F= \
+node_count="$(ou_exec awk -F= \
     '$1 == "node_count" { print $2; exit }' \
     "$run_root/run-manifest.txt" 2>/dev/null || true)"
 node_count=${node_count:-2}
@@ -40,9 +47,9 @@ for ((node = 0; node < node_count; ++node)); do
 done
 show_process switch "$run_root/switch/gem5.pid"
 show_process ub-switch "$run_root/ub-switch/gem5.pid"
-if docker exec "$container" test -r "$run_root/oob-switch/relay.pid"; then
+if ou_exec test -r "$run_root/oob-switch/relay.pid"; then
     show_process oob-switch "$run_root/oob-switch/relay.pid"
-elif docker exec "$container" test -r "$run_root/relay/relay.pid"; then
+elif ou_exec test -r "$run_root/relay/relay.pid"; then
     show_process relay "$run_root/relay/relay.pid"
 else
     for ((pair = 0; pair < node_count / 2; ++pair)); do
@@ -52,8 +59,8 @@ fi
 
 for ((node = 0; node < node_count; ++node)); do
     transcript="$run_root/node$node/system.terminal"
-    if docker exec "$container" test -r "$transcript"; then
-        if docker exec "$container" grep -aq 'OpenURMA Tier-G interactive guest' "$transcript"; then
+    if ou_exec test -r "$transcript"; then
+        if ou_exec grep -aq 'OpenURMA Tier-G interactive guest' "$transcript"; then
             echo "node$node   guest shell ready"
         else
             echo "node$node   booting (see $transcript)"

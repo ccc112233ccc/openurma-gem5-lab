@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/runtime.sh
+source "$script_dir/scripts/runtime.sh"
+container="$OPENURMA_CONTAINER"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"
 uart1="${OPENURMA_DUAL_UART1:-3470}"
@@ -20,7 +23,8 @@ case "$sync_timeout" in
 esac
 (( sync_timeout > 0 )) || die "OPENURMA_SYNC_TIMEOUT must be positive"
 
-node_count="$(docker exec "$container" awk -F= \
+ou_runtime_start
+node_count="$(ou_exec awk -F= \
     '$1 == "node_count" { print $2; exit }' \
     "$run_root/run-manifest.txt" 2>/dev/null || true)"
 node_count=${node_count:-2}
@@ -41,8 +45,8 @@ for ((node = 0; node < node_count; ++node)); do
     terminal="$run_root/$node_name/system.terminal"
     timer_ready=0
     for _ in $(seq 1 "$((sync_timeout / 2 + 1))"); do
-        if docker exec "$container" test -f "$terminal" && \
-                docker exec "$container" grep -Eq \
+        if ou_exec test -f "$terminal" && \
+                ou_exec grep -Eq \
                 'arch_timer: .*timer\(s\) running at [0-9.]+MHz' "$terminal"; then
             timer_ready=1
             break
@@ -50,31 +54,31 @@ for ((node = 0; node < node_count; ++node)); do
         sleep 2
     done
     (( timer_ready )) || die "$node_name did not expose a working architected timer within ${sync_timeout}s"
-    if ! docker exec "$container" grep -Eq \
+    if ! ou_exec grep -Eq \
         'arch_timer: .*timer\(s\) running at [0-9.]+MHz' "$terminal"; then
         die "$node_name has no working architected timer; restart the run"
     fi
-    if docker exec "$container" grep -Eq \
+    if ou_exec grep -Eq \
         'sched_clock: .* at 250 Hz|arch_timer: Unable to find' "$terminal"; then
         die "$node_name fell back to the 250 Hz clock; this run is invalid"
     fi
     echo "$node_name architected timer: OK"
 done
 
-if docker exec "$container" test -e "$marker"; then
+if ou_exec test -e "$marker"; then
     echo "$node_count-node measurement setup is already marked ready."
     exit 0
 fi
 
 echo "Configuring all guests on the shared OOB control network..."
 echo "All UARTs must be detached; use ~. at the start of a line first."
-docker exec "$container" python3 "$serial_tool" \
+ou_exec python3 "$serial_tool" \
     --ports "${uart_ports[@]}" --command /usr/local/bin/ou-net-up \
     --timeout "$sync_timeout" --prompt-kick-after 1
 
-cpu_mode="$(docker exec "$container" awk -F= \
+cpu_mode="$(ou_exec awk -F= \
     '$1 == "cpu_mode" { print $2; exit }' "$run_root/run-manifest.txt" 2>/dev/null || true)"
-docker exec "$container" touch "$marker"
+ou_exec touch "$marker"
 echo "All unique OOB IPv4 addresses are active."
 if [[ "$cpu_mode" == server_o3 ]]; then
     echo "The guests remain on their fast boot CPUs while idle."

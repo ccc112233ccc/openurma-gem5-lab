@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/runtime.sh
+source "$script_dir/scripts/runtime.sh"
+
 die() { echo "run-node-pair-latency.sh: $*" >&2; exit 2; }
 
 usage() {
@@ -22,8 +26,8 @@ client=$2
 samples=${3:-100}
 size=${4:-128}
 port=${5:-21115}
-container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+container="$OPENURMA_CONTAINER"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"
 uart1="${OPENURMA_DUAL_UART1:-3470}"
@@ -37,9 +41,10 @@ esac
 (( samples > 0 && size > 0 && size <= 8088 && port > 0 && port <= 65535 )) ||
     die "require samples>0, size=1..8088, and port=1..65535"
 
-docker exec "$container" test -e "$run_root/sync.ready" ||
+ou_runtime_start
+ou_exec test -e "$run_root/sync.ready" ||
     die "measurement setup is not ready; run sync-dual.sh first"
-node_count=$(docker exec "$container" awk -F= '$1 == "node_count" {print $2; exit}' \
+node_count=$(ou_exec awk -F= '$1 == "node_count" {print $2; exit}' \
     "$run_root/run-manifest.txt")
 [[ "$node_count" =~ ^[0-9]+$ ]] || die "invalid node count in run manifest"
 (( server < node_count && client < node_count )) ||
@@ -55,7 +60,7 @@ server_command="ou-lat-server --profile $profile $roi_arg $samples $size $port"
 client_command="ou-lat-client --profile $profile $roi_arg $samples $size $port $server_ip"
 
 echo "Running node$client -> node$server: OOB=$server_ip, EID selected by official TP setup"
-exec docker exec "$container" python3 "$lab/tools/dual_serial_command.py" \
+ou_exec python3 "$lab/tools/dual_serial_command.py" \
     --ports "$server_uart" "$client_uart" \
     --commands "$server_command" "$client_command" \
     --timeout "$timeout" --prompt-kick-after 1 --full-output

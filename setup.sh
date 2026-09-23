@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a self-contained ARM64 build/runtime container and reproduce the lab.
+# Docker wrapper around the same native Ubuntu setup used on bare metal.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -13,8 +13,9 @@ usage() {
     cat <<'EOF'
 Usage: ./setup.sh [--sources-only] [--jobs N]
 
-Build the ARM64 Ubuntu image, create the persistent container, fetch every
-pinned source revision, and build gem5 + OLK + official UMDK + initramfs.
+Build the ARM64 Ubuntu image, create the persistent container, then invoke
+setup-native.sh inside it. The native and Docker paths therefore share source,
+build, and validation logic.
 --sources-only stops after fetching and validating the source trees.
 EOF
 }
@@ -56,16 +57,15 @@ else
     [[ "$running" == true ]] || docker start "$container" >/dev/null
 fi
 
-echo "[setup] fetching pinned source trees"
-docker exec "$container" bash /workspace/openurma-gem5-lab/scripts/fetch-sources.sh
-
-if [[ "$sources_only" == 1 ]]; then
-    echo "[setup] source preparation passed"
-    exit 0
-fi
-
-echo "[setup] building the complete stack; the first build can take a long time"
-docker exec -e JOBS="$jobs" "$container" \
-    bash /workspace/openurma-gem5-lab/scripts/build-all.sh
+native_args=(--skip-deps --jobs "$jobs")
+(( sources_only == 0 )) || native_args+=(--sources-only)
+echo "[setup] invoking the shared native Ubuntu setup inside $container"
+docker exec \
+    -e OPENURMA_EXECUTION_MODE=native \
+    -e OPENURMA_LAB_ROOT=/workspace/openurma-gem5-lab \
+    -e KSRC=/opt/openurma-gem5-lab/oe66 \
+    -e JOBS="$jobs" \
+    "$container" bash /workspace/openurma-gem5-lab/setup-native.sh \
+    "${native_args[@]}"
 echo "[setup] PASS"
 echo "Start the official two-node stack with: ./run-dual.sh --profile fast --provider official"

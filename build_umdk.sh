@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Build the pinned openEuler UMDK userspace for the ARM64 gem5 guest.
 #
-# Run this script inside the ARM64 Linux build container.  The build tree is
+# Run this on ARM64 Linux, either natively or inside the build container. The build tree is
 # deliberately outside the UMDK source tree, so the pinned integration revision
 # remains clean and the result can be copied directly into the guest initramfs.
 set -euo pipefail
 
 PINNED_UMDK_SHA="f84b90b8ddd8173b851334f55d332783d248bfc7"
-UMDK_SRC="${UMDK_SRC:-/workspace/openurma-gem5-lab/sources/OpenURMA/integration/umdk/vendor/umdk}"
-BUILD_DIR="${UMDK_BUILD_DIR:-/workspace/openurma-gem5-lab/artifacts/umdk-build}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+LAB_DIR="${OPENURMA_LAB_ROOT:-$SCRIPT_DIR}"
+UMDK_SRC="${UMDK_SRC:-$LAB_DIR/sources/OpenURMA/integration/umdk/vendor/umdk}"
+BUILD_DIR="${UMDK_BUILD_DIR:-$LAB_DIR/artifacts/umdk-build}"
 JOBS="${JOBS:-2}"
 BUILD_STOCK_UDMA="${BUILD_STOCK_UDMA:-disable}"
 ALLOW_DIRTY_UMDK="${ALLOW_DIRTY_UMDK:-disable}"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 UMMU_DEPS="${UMMU_DEPS:-$SCRIPT_DIR/deps/ummu}"
 UMDK_INTEGRATION_DIR="${UMDK_INTEGRATION_DIR:-$(dirname -- "$(dirname -- "$UMDK_SRC")")}"
 UMMU_SHIM_SRC="${UMMU_SHIM_SRC:-$UMDK_INTEGRATION_DIR/ummu_shim}"
@@ -27,7 +28,7 @@ die() {
     exit 1
 }
 
-[[ "$(uname -s)" == "Linux" ]] || die "run this build inside the ARM64 Linux container"
+[[ "$(uname -s)" == "Linux" ]] || die "run this build on ARM64 Linux"
 [[ "$(uname -m)" == "aarch64" ]] || die "expected an aarch64 builder, got $(uname -m)"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 [[ "$BUILD_STOCK_UDMA" == "enable" || "$BUILD_STOCK_UDMA" == "disable" ]] || \

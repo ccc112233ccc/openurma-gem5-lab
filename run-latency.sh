@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/runtime.sh
+source "$script_dir/scripts/runtime.sh"
+
 die() { echo "run-latency.sh: $*" >&2; exit 2; }
 
 usage() {
@@ -29,8 +33,8 @@ OPENURMA_LAT_STAGGER.
 EOF
 }
 
-container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+container="$OPENURMA_CONTAINER"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"
 uart1="${OPENURMA_DUAL_UART1:-3470}"
@@ -98,7 +102,8 @@ case "$output_format" in human|tsv) ;; *) die "format must be human or tsv" ;; e
 [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "timeout must be a positive number"
 [[ "$stagger" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "stagger must be a non-negative number"
 
-docker exec "$container" test -e "$run_root/sync.ready" || {
+ou_runtime_start
+ou_exec test -e "$run_root/sync.ready" || {
     echo "dual-node measurement setup is not ready; run sync-dual.sh first" >&2
     exit 1
 }
@@ -111,7 +116,7 @@ transcript=$(mktemp "${TMPDIR:-/tmp}/openurma-latency.XXXXXX")
 trap 'rm -f "$transcript"' EXIT
 
 set +e
-docker exec "$container" python3 "$lab/tools/dual_serial_command.py" \
+ou_exec python3 "$lab/tools/dual_serial_command.py" \
     --ports "$uart0" "$uart1" \
     --commands "$server_command" "$client_command" \
     --stagger "$stagger" --timeout "$timeout" --prompt-kick-after 1 --full-output \

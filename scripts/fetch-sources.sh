@@ -2,9 +2,10 @@
 # Fetch public upstream baselines and overlay the exact lab commits from bundles.
 set -euo pipefail
 
-lab="${OPENURMA_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+lab="${OPENURMA_LAB_ROOT:-$(cd "$script_dir/.." && pwd)}"
 sources="$lab/sources"
-kernel_root="${KSRC:-/opt/openurma-gem5-lab/oe66}"
+kernel_root="${KSRC:-$lab/oe66}"
 
 readonly GEM5_URL=https://github.com/gem5/gem5.git
 readonly GEM5_BASE=b1a44b89c7bae73fae2dc547bc1f871452075b85
