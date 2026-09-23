@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic ABI/forwarding smoke test for ub-switch-sim."""
+"""Deterministic lifetime-sync/forwarding smoke test for ub-switch-sim."""
 
 import mmap
 import os
@@ -11,11 +11,12 @@ import tempfile
 import time
 
 
-PORTS = 1
 RING_SLOTS = 64
 SLOT_BYTES = 8192
 RING_HEADER = 8192
-RING_BYTES = RING_HEADER + 2 * PORTS * RING_SLOTS * SLOT_BYTES
+PROTOCOL_VERSION = 4
+DATA = 1
+SYNC = 2
 MESSAGE = struct.Struct("<IIQQQHHHHII16s")
 
 
@@ -23,19 +24,19 @@ def index_offset(direction: int, port: int, tail: bool = False) -> int:
     return ((direction * 16 + port) * 128) + (64 if tail else 0)
 
 
-def slot_offset(direction: int, port: int, index: int) -> int:
-    queue = direction * PORTS + port
+def slot_offset(ports: int, direction: int, port: int, index: int) -> int:
+    queue = direction * ports + port
     return RING_HEADER + (queue * RING_SLOTS + index % RING_SLOTS) * SLOT_BYTES
 
 
-def create_maps(directory: str, count: int) -> tuple[list[pathlib.Path], list[mmap.mmap]]:
+def create_maps(directory: str, count: int, ports: int) -> tuple[list[pathlib.Path], list[mmap.mmap]]:
     paths = [pathlib.Path(directory) / f"node{node}.ring" for node in range(count)]
     maps = []
     for path in paths:
         with path.open("wb") as output:
-            output.truncate(RING_BYTES)
+            output.truncate(RING_HEADER + 2 * ports * RING_SLOTS * SLOT_BYTES)
         descriptor = os.open(path, os.O_RDWR)
-        maps.append(mmap.mmap(descriptor, RING_BYTES))
+        maps.append(mmap.mmap(descriptor, 0))
         os.close(descriptor)
     return paths, maps
 
@@ -50,108 +51,105 @@ def wait_for(predicate, process: subprocess.Popen[str], reason: str) -> None:
         time.sleep(0.001)
 
 
-def run_four_endpoint_test(binary: pathlib.Path) -> None:
-    with tempfile.TemporaryDirectory(prefix="openurma-adapter-four-") as directory:
-        paths, maps = create_maps(directory, 4)
+def publish(mapping: mmap.mmap, ports: int, port: int,
+            receive_tick: int, sequence: int,
+            source_eid: int = 0, destination_eid: int = 0,
+            payload: bytes | None = None) -> None:
+    direction = 1
+    head = struct.unpack_from("<Q", mapping, index_offset(direction, port))[0]
+    body = b"" if payload is None else bytes(40) + payload
+    message_type = SYNC if payload is None else DATA
+    header = MESSAGE.pack(
+        len(body), message_type, max(0, receive_tick - 100), receive_tick,
+        sequence, port, port, PROTOCOL_VERSION, 0, source_eid,
+        destination_eid, bytes(16),
+    )
+    offset = slot_offset(ports, direction, port, head)
+    mapping[offset:offset + MESSAGE.size] = header
+    mapping[offset + MESSAGE.size:offset + MESSAGE.size + len(body)] = body
+    struct.pack_into("<Q", mapping, index_offset(direction, port), head + 1)
+
+
+def output_messages(mapping: mmap.mmap, ports: int, port: int) -> list[tuple]:
+    head = struct.unpack_from("<Q", mapping, index_offset(0, port))[0]
+    return [MESSAGE.unpack_from(mapping, slot_offset(ports, 0, port, index))
+            for index in range(head)]
+
+
+def run_case(binary: pathlib.Path, endpoints: int, ports: int, mode: str) -> None:
+    with tempfile.TemporaryDirectory(prefix=f"openurma-adapter-{endpoints}x{ports}-") as directory:
+        paths, maps = create_maps(directory, endpoints, ports)
+        eids = ",".join(hex(0x100 + endpoint) for endpoint in range(endpoints))
         process = subprocess.Popen(
-            [str(binary), "--multi", "1", "100t", "50t", "400", "0",
-             "", "1", "0x100,0x101,0x102,0x103",
-             *(str(path) for path in paths)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
+            [str(binary), mode, str(ports), "100t", "50t", "400", "0",
+             "", "1", eids, *(str(path) for path in paths)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )
         try:
-            # Endpoints 0 and 3 choose each other by EID. This deliberately
-            # crosses the old adjacent-pair topology.
-            struct.pack_into("<I", maps[0], 4116, 0x103)
-            struct.pack_into("<I", maps[3], 4116, 0x100)
-            struct.pack_into("<Q", maps[0], 4096, 1)
-            struct.pack_into("<Q", maps[3], 4096, 1)
+            # Endpoints publish their first link promise at simulation start.
+            # No EID, TP, workload, or reciprocal peer relation is needed.
+            for endpoint, mapping in enumerate(maps):
+                for port in range(ports):
+                    publish(mapping, ports, port, 100,
+                            endpoint * ports + port + 1)
             wait_for(
-                lambda: struct.unpack_from("<Q", maps[0], 4104)[0] == 1 and
-                        struct.unpack_from("<Q", maps[3], 4104)[0] == 1,
-                process,
-                "four-endpoint switch did not route sync phases by EID",
+                lambda: all(len(output_messages(mapping, ports, port)) >= 1
+                            for mapping in maps for port in range(ports)),
+                process, "switch virtual time did not advance on all-link grants",
             )
-            assert struct.unpack_from("<Q", maps[1], 4104)[0] == 0
-            assert struct.unpack_from("<Q", maps[2], 4104)[0] == 0
+            for mapping in maps:
+                for port in range(ports):
+                    first = output_messages(mapping, ports, port)[0]
+                    expected_first_grant = 200 if mode == "--multi" else 100
+                    assert first[1] == SYNC and first[3] == expected_first_grant, first
+                    assert first[5] == port and first[6] == port, first
+                    assert first[9] == 0 and first[10] == 0, first
 
-            payload = bytes(range(64))
-            transaction = bytes(40) + payload
-            header = MESSAGE.pack(
-                len(transaction), 1, 2000, 2100, 19, 0, 0, 3, 0,
-                0x100, 0x103, bytes(16)
-            )
-            offset = slot_offset(1, 0, 0)
-            maps[0][offset : offset + MESSAGE.size] = header
-            maps[0][offset + MESSAGE.size :
-                    offset + MESSAGE.size + len(transaction)] = transaction
-            struct.pack_into("<Q", maps[0], index_offset(1, 0), 1)
+            payload = bytes(range(128))
+            publish(maps[0], ports, 0, 300, 100, 0x100,
+                    0x100 + endpoints - 1, payload)
+            for endpoint, mapping in enumerate(maps):
+                for port in range(ports):
+                    if endpoint == 0 and port == 0:
+                        continue
+                    publish(mapping, ports, port, 300,
+                            100 + endpoint * ports + port)
+            if mode == "--native-multi":
+                # Native DATA remains an ns-3 event after switch ingress.
+                # Supply the next all-link promise so the fabric can advance
+                # far enough to execute its egress/link delivery event.
+                for endpoint, mapping in enumerate(maps):
+                    for port in range(ports):
+                        publish(mapping, ports, port, 10000,
+                                1000 + endpoint * ports + port)
+            destination = maps[-1]
             wait_for(
-                lambda: struct.unpack_from(
-                    "<Q", maps[3], index_offset(0, 0))[0] == 1,
-                process,
-                "four-endpoint switch did not route DATA by destination EID",
+                lambda: any(message[1] == DATA for message in
+                            output_messages(destination, ports, 0)),
+                process, "switch did not route causally-ready DATA by EID",
             )
-            assert struct.unpack_from("<Q", maps[1], index_offset(0, 0))[0] == 0
-            assert struct.unpack_from("<Q", maps[2], index_offset(0, 0))[0] == 0
-            received = MESSAGE.unpack_from(maps[3], slot_offset(0, 0, 0))
-            # 2100 ingress arrival + 50 switch + ceil(64*8000/400)
-            # egress serialization + 100 egress propagation.
-            assert received[3] == 3530, received
+            data_index, received = next(
+                (index, message) for index, message in
+                enumerate(output_messages(destination, ports, 0))
+                if message[1] == DATA
+            )
+            if mode == "--multi":
+                assert received[3] == 3010, received
+            else:
+                assert received[3] > 300, received
+            offset = slot_offset(ports, 0, 0, data_index) + MESSAGE.size + 40
+            assert destination[offset:offset + len(payload)] == payload
+            for mapping in maps[1:-1]:
+                assert not any(message[1] == DATA for message in
+                               output_messages(mapping, ports, 0))
 
-            # Finish the first generation, then verify that an endpoint which
-            # enters the next generation early waits for its peer instead of
-            # mistaking the peer's preceding OFF phase for a completed run.
-            struct.pack_into("<Q", maps[0], 4096, 2)
-            struct.pack_into("<Q", maps[3], 4096, 2)
             wait_for(
-                lambda: struct.unpack_from("<Q", maps[0], 4104)[0] == 2 and
-                        struct.unpack_from("<Q", maps[3], 4104)[0] == 2,
-                process,
-                "four-endpoint switch did not acknowledge OFF",
+                lambda: len(output_messages(destination, ports, 0)) >
+                        data_index + 1,
+                process, "switch did not publish post-DATA promise",
             )
-            struct.pack_into("<Q", maps[0], 4096, 3)
-            wait_for(
-                lambda: struct.unpack_from("<Q", maps[0], 4104)[0] == 2,
-                process,
-                "early next-generation endpoint was not held at the boundary",
-            )
-            struct.pack_into("<Q", maps[3], 4096, 3)
-            wait_for(
-                lambda: struct.unpack_from("<Q", maps[0], 4104)[0] == 3 and
-                        struct.unpack_from("<Q", maps[3], 4104)[0] == 3,
-                process,
-                "second active generation did not rendezvous",
-            )
-            struct.pack_into("<Q", maps[0], 4096, 4)
-            wait_for(
-                lambda: struct.unpack_from("<Q", maps[3], 4104)[0] == 4,
-                process,
-                "active peer was not released toward the matching OFF boundary",
-            )
-            struct.pack_into("<Q", maps[3], 4096, 4)
-            wait_for(
-                lambda: struct.unpack_from("<Q", maps[0], 4104)[0] == 4 and
-                        struct.unpack_from("<Q", maps[3], 4104)[0] == 4,
-                process,
-                "second OFF generation did not rendezvous",
-            )
-
-            # Local counters may differ when endpoints select a new peer that
-            # has completed fewer prior sessions. Matching active parity is
-            # translated into each endpoint's local generation number.
-            struct.pack_into("<I", maps[0], 4116, 0x102)
-            struct.pack_into("<I", maps[2], 4116, 0x100)
-            struct.pack_into("<Q", maps[0], 4096, 5)
-            struct.pack_into("<Q", maps[2], 4096, 1)
-            wait_for(
-                lambda: struct.unpack_from("<Q", maps[0], 4104)[0] == 5 and
-                        struct.unpack_from("<Q", maps[2], 4104)[0] == 1,
-                process,
-                "different local synchronization generations did not rendezvous",
-            )
+            after = output_messages(destination, ports, 0)[data_index + 1]
+            assert after[1] == SYNC and after[3] >= received[3], after
         finally:
             process.terminate()
             try:
@@ -164,89 +162,18 @@ def run_four_endpoint_test(binary: pathlib.Path) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print(f"usage: {sys.argv[0]} UB_SWITCH_BINARY", file=sys.stderr)
+    if len(sys.argv) not in (2, 3):
+        print(f"usage: {sys.argv[0]} UB_SWITCH_BINARY [--multi|--native-multi]",
+              file=sys.stderr)
         return 2
     binary = pathlib.Path(sys.argv[1]).resolve()
-    with tempfile.TemporaryDirectory(prefix="openurma-adapter-") as directory:
-        paths, maps = create_maps(directory, 2)
-
-        process = subprocess.Popen(
-            [str(binary), str(paths[0]), str(paths[1]), "1", "100t", "50t",
-             "400", "0", "", "1"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            struct.pack_into("<I", maps[0], 4116, 0x101)
-            struct.pack_into("<I", maps[1], 4116, 0x100)
-            struct.pack_into("<Q", maps[0], 4096, 1)
-            struct.pack_into("<Q", maps[1], 4096, 1)
-            deadline = time.monotonic() + 2
-            while struct.unpack_from("<Q", maps[1], 4104)[0] != 1:
-                if process.poll() is not None:
-                    raise RuntimeError(process.stderr.read())
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("switch did not mirror sync phase")
-                time.sleep(0.001)
-            payload = bytes(range(128))
-            transaction = bytes(40) + payload
-            header = MESSAGE.pack(
-                len(transaction), 1, 1000, 1100, 7, 0, 0, 3, 0,
-                0x100, 0x101, bytes(16)
-            )
-            offset = slot_offset(1, 0, 0)
-            maps[0][offset : offset + MESSAGE.size] = header
-            maps[0][offset + MESSAGE.size : offset + MESSAGE.size + len(transaction)] = transaction
-            struct.pack_into("<Q", maps[0], index_offset(1, 0), 1)
-
-            deadline = time.monotonic() + 2
-            while struct.unpack_from("<Q", maps[1], index_offset(0, 0))[0] != 1:
-                if process.poll() is not None:
-                    raise RuntimeError(process.stderr.read())
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("switch did not forward DATA")
-                time.sleep(0.001)
-
-            received = MESSAGE.unpack_from(maps[1], slot_offset(0, 0, 0))
-            # 1100 ingress arrival + 50 switch + ceil(128*8000/400)
-            # egress serialization + 100 egress propagation.
-            assert received[3] == 3810, received
-            assert received[4] == 7
-            assert maps[1][slot_offset(0, 0, 0) + MESSAGE.size:
-                           slot_offset(0, 0, 0) + MESSAGE.size + len(transaction)] == transaction
-            assert struct.unpack_from("<Q", maps[0], index_offset(1, 0, True))[0] == 1
-
-            # A null-message promise follows DATA on the same FIFO and may
-            # never move the output timestamp backwards behind queued data.
-            sync_offset = slot_offset(1, 0, 1)
-            maps[0][sync_offset : sync_offset + MESSAGE.size] = MESSAGE.pack(
-                0, 2, 1100, 1200, 8, 0, 0, 3, 0,
-                0x100, 0x101, bytes(16)
-            )
-            struct.pack_into("<Q", maps[0], index_offset(1, 0), 2)
-            deadline = time.monotonic() + 2
-            while struct.unpack_from("<Q", maps[1], index_offset(0, 0))[0] != 2:
-                if process.poll() is not None:
-                    raise RuntimeError(process.stderr.read())
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("switch did not forward SYNC")
-                time.sleep(0.001)
-            sync = MESSAGE.unpack_from(maps[1], slot_offset(0, 0, 1))
-            assert sync[0] == 0 and sync[1] == 2
-            assert sync[3] == 3810, sync
-        finally:
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            for mapping in maps:
-                mapping.close()
-    run_four_endpoint_test(binary)
-    print("ub-switch adapter smoke test: PASS")
+    mode = sys.argv[2] if len(sys.argv) == 3 else "--multi"
+    if mode not in ("--multi", "--native-multi"):
+        raise ValueError(f"unsupported switch mode: {mode}")
+    run_case(binary, 2, 1, mode)
+    run_case(binary, 4, 1, mode)
+    run_case(binary, 2, 2, mode)
+    print("ub-switch lifetime adapter synchronization smoke test: PASS")
     return 0
 
 

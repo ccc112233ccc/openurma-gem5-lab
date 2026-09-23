@@ -133,9 +133,13 @@ struct Switch {
     std::vector<uint32_t> port_map;
     std::vector<std::vector<std::vector<uint64_t>>> egress_free;
     std::vector<std::vector<uint64_t>> last_output_timestamp;
+    std::vector<std::vector<uint64_t>> last_sync_source_time;
+    std::vector<std::vector<uint64_t>> input_grant;
+    uint64_t virtual_time = 0;
+    bool virtual_time_started = false;
     uint64_t forwarded = 0;
     uint64_t bytes = 0;
-    std::vector<uint64_t> active_phase;
+    uint64_t sync_messages = 0;
 
     Switch(const std::vector<std::string> &paths,
            std::vector<uint32_t> eids, uint32_t p,
@@ -149,7 +153,9 @@ struct Switch {
         egress_free(paths.size(), std::vector<std::vector<uint64_t>>(
             p, std::vector<uint64_t>(stages))),
         last_output_timestamp(paths.size(), std::vector<uint64_t>(p)),
-        active_phase(paths.size())
+        last_sync_source_time(paths.size(),
+                              std::vector<uint64_t>(p, UINT64_MAX)),
+        input_grant(paths.size(), std::vector<uint64_t>(p))
     {
         if (paths.size() < 2 || paths.size() != endpoint_eids.size())
             throw std::runtime_error(
@@ -191,7 +197,7 @@ struct Switch {
         return (wire_bytes * 8000ULL + rate_gbps - 1) / rate_gbps;
     }
 
-    bool forwardOne(uint32_t source_link, uint32_t source_port)
+    bool consumeOne(uint32_t source_link, uint32_t source_port)
     {
         constexpr uint32_t EndpointToSwitch = 1;
         constexpr uint32_t SwitchToEndpoint = 0;
@@ -208,11 +214,26 @@ struct Switch {
             throw std::runtime_error("adapter protocol version mismatch");
         if (source->source_port != source_port)
             throw std::runtime_error("message published on wrong ingress port");
+        if (source->receive_tick > virtual_time)
+            return false;
+
+        const auto type = static_cast<oa::MessageType>(source->type);
+        input_grant[source_link][source_port] = std::max(
+            input_grant[source_link][source_port], source->receive_tick);
+        if (type == oa::MessageType::Sync) {
+            if (source->payload_length != 0 || source->source_eid != 0 ||
+                source->destination_eid != 0)
+                throw std::runtime_error(
+                    "link-local SYNC must not carry payload or EIDs");
+            __atomic_store_n(&in.tail.value, tail + 1, __ATOMIC_RELEASE);
+            return true;
+        }
+        if (type != oa::MessageType::Data)
+            throw std::runtime_error("unsupported adapter message type");
         if ((source->source_eid & 0xffffU) !=
             (endpoint_eids[source_link] & 0xffffU))
             throw std::runtime_error("message source EID does not match ingress endpoint");
-        const uint32_t destination_link =
-            routeEndpoint(source->destination_eid);
+        const uint32_t destination_link = routeEndpoint(source->destination_eid);
         if (destination_link == source_link)
             throw std::runtime_error("switch-adapter packet loops back to its source");
         Mapping &output = *links[destination_link];
@@ -229,50 +250,97 @@ struct Switch {
         *destination = *source;
         destination->destination_port = destination_port;
 
-        const auto type = static_cast<oa::MessageType>(source->type);
-        if (type == oa::MessageType::Data) {
-            if (source->payload_length < 40 ||
-                source->payload_length > oa::SlotBytes - sizeof(*source))
-                throw std::runtime_error("invalid DATA payload length");
-            std::memcpy(destination_slot + sizeof(*destination),
-                        reinterpret_cast<const uint8_t *>(source) + sizeof(*source),
-                        source->payload_length);
-            const uint64_t payload = source->payload_length - 40;
-            uint64_t ready = checkedAdd(source->receive_tick, switch_delay_ticks);
-            for (uint32_t stage = 0; stage < serialization_stages; ++stage) {
-                auto &free = egress_free[destination_link][destination_port][stage];
-                ready = std::max(ready, free);
-                ready = checkedAdd(ready,
-                    serializationTicks(payload + overhead_bytes));
-                free = ready;
-            }
-            destination->receive_tick = std::max(
-                checkedAdd(ready, link_latency_ticks),
-                last_output_timestamp[destination_link][destination_port]);
-            last_output_timestamp[destination_link][destination_port] =
-                destination->receive_tick;
-            ++forwarded;
-            bytes += payload;
-        } else if (type == oa::MessageType::Sync) {
-            destination->payload_length = 0;
-            uint64_t promise = checkedAdd(
-                source->receive_tick, switch_delay_ticks);
-            for (uint32_t stage = 0; stage < serialization_stages; ++stage)
-                promise = std::max(
-                    promise,
-                    egress_free[destination_link][destination_port][stage]);
-            destination->receive_tick = std::max(
-                checkedAdd(promise, link_latency_ticks),
-                last_output_timestamp[destination_link][destination_port]);
-            last_output_timestamp[destination_link][destination_port] =
-                destination->receive_tick;
-        } else {
-            throw std::runtime_error("unsupported adapter message type");
+        if (source->payload_length < 40 ||
+            source->payload_length > oa::SlotBytes - sizeof(*source))
+            throw std::runtime_error("invalid DATA payload length");
+        std::memcpy(destination_slot + sizeof(*destination),
+                    reinterpret_cast<const uint8_t *>(source) + sizeof(*source),
+                    source->payload_length);
+        const uint64_t payload = source->payload_length - 40;
+        uint64_t ready = checkedAdd(source->receive_tick, switch_delay_ticks);
+        for (uint32_t stage = 0; stage < serialization_stages; ++stage) {
+            auto &free = egress_free[destination_link][destination_port][stage];
+            ready = std::max(ready, free);
+            ready = checkedAdd(ready,
+                serializationTicks(payload + overhead_bytes));
+            free = ready;
         }
+        destination->receive_tick = std::max(
+            checkedAdd(ready, link_latency_ticks),
+            last_output_timestamp[destination_link][destination_port]);
+        last_output_timestamp[destination_link][destination_port] =
+            destination->receive_tick;
+        ++forwarded;
+        bytes += payload;
 
         std::atomic_thread_fence(std::memory_order_release);
         __atomic_store_n(&out.head.value, out_head + 1, __ATOMIC_RELEASE);
         __atomic_store_n(&in.tail.value, tail + 1, __ATOMIC_RELEASE);
+        return true;
+    }
+
+    uint64_t safeTime()
+    {
+        constexpr uint32_t EndpointToSwitch = 1;
+        uint64_t safe = UINT64_MAX;
+        for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint) {
+            for (uint32_t port = 0; port < ports; ++port) {
+                Mapping &input = *links[endpoint];
+                const auto &in = input.ring->direction[EndpointToSwitch][port];
+                const uint64_t tail = __atomic_load_n(
+                    &in.tail.value, __ATOMIC_RELAXED);
+                const uint64_t head = __atomic_load_n(
+                    &in.head.value, __ATOMIC_ACQUIRE);
+                uint64_t horizon = input_grant[endpoint][port];
+                if (tail != head) {
+                    const auto *message =
+                        reinterpret_cast<const oa::MessageHeader *>(
+                            input.slot(EndpointToSwitch, port, tail));
+                    if (message->protocol_version != oa::Version)
+                        throw std::runtime_error(
+                            "adapter protocol version mismatch");
+                    if (message->receive_tick < horizon)
+                        throw std::runtime_error(
+                            "input FIFO timestamp moved behind its promise");
+                    horizon = message->receive_tick;
+                }
+                safe = std::min(safe, horizon);
+            }
+        }
+        return safe;
+    }
+
+    bool publishSync(uint32_t endpoint, uint32_t port)
+    {
+        constexpr uint32_t SwitchToEndpoint = 0;
+        if (last_sync_source_time[endpoint][port] == virtual_time)
+            return false;
+        Mapping &output = *links[endpoint];
+        auto &out = output.ring->direction[SwitchToEndpoint][port];
+        const uint64_t head = __atomic_load_n(
+            &out.head.value, __ATOMIC_RELAXED);
+        const uint64_t tail = __atomic_load_n(
+            &out.tail.value, __ATOMIC_ACQUIRE);
+        if (head - tail >= oa::RingSlots)
+            return false;
+        uint8_t *slot = output.slot(SwitchToEndpoint, port, head);
+        auto *message = reinterpret_cast<oa::MessageHeader *>(slot);
+        std::memset(message, 0, sizeof(*message));
+        message->type = static_cast<uint32_t>(oa::MessageType::Sync);
+        message->send_tick = virtual_time;
+        message->receive_tick = std::max(
+            checkedAdd(virtual_time, link_latency_ticks),
+            last_output_timestamp[endpoint][port]);
+        message->sequence = ++sync_messages;
+        message->source_port = port;
+        message->destination_port = port;
+        message->protocol_version = oa::Version;
+        last_output_timestamp[endpoint][port] = message->receive_tick;
+        last_sync_source_time[endpoint][port] = virtual_time;
+        std::atomic_thread_fence(std::memory_order_release);
+        __atomic_store_n(&out.head.value, head + 1, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&output.ring->switch_sync_messages, 1,
+                           __ATOMIC_RELEASE);
         return true;
     }
 
@@ -285,69 +353,46 @@ struct Switch {
                   << " switch_delay_ticks=" << switch_delay_ticks << '\n';
         while (!stop_requested) {
             bool progress = false;
-            std::vector<uint64_t> phases(links.size());
-            for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint)
-                phases[endpoint] = __atomic_load_n(
-                    &links[endpoint]->ring->local_sync_phase,
-                    __ATOMIC_ACQUIRE);
-            bool synchronized_active = false;
-            for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint) {
-                const uint32_t target_eid = __atomic_load_n(
-                    &links[endpoint]->ring->sync_destination_eid,
-                    __ATOMIC_ACQUIRE);
-                if (target_eid == 0)
-                    continue;
-                const uint32_t peer = routeEndpoint(target_eid);
-                const uint64_t peer_phase = phases[peer];
-                const uint32_t reverse_eid = __atomic_load_n(
-                    &links[peer]->ring->sync_destination_eid,
-                    __ATOMIC_ACQUIRE);
-                const bool reciprocal = reverse_eid != 0 &&
-                    routeEndpoint(reverse_eid) == endpoint;
-                const bool local_active = (phases[endpoint] & 1) != 0;
-                const bool peer_active = (peer_phase & 1) != 0;
-                uint64_t acknowledged_phase = 0;
-                if (reciprocal && local_active == peer_active)
-                    acknowledged_phase = phases[endpoint];
-                else if (reciprocal && local_active && !peer_active)
-                    // Tell a still-active endpoint that its peer has reached
-                    // OFF. gem5 may then run to its own OFF pseudo-op without
-                    // waiting for another finite null-message horizon.
-                    acknowledged_phase = phases[endpoint] + 1;
-                if (__atomic_load_n(
-                        &links[endpoint]->ring->peer_sync_phase,
-                        __ATOMIC_RELAXED) != acknowledged_phase) {
-                    __atomic_store_n(
-                        &links[endpoint]->ring->peer_sync_phase,
-                        acknowledged_phase,
-                        __ATOMIC_RELEASE);
-                    progress = true;
-                }
-                const bool pair_active = reciprocal && local_active &&
-                                         peer_active;
-                synchronized_active |= pair_active;
-                if (pair_active && active_phase[endpoint] != phases[endpoint]) {
-                    for (auto &stage : egress_free[endpoint])
-                        std::fill(stage.begin(), stage.end(), 0);
-                    std::fill(last_output_timestamp[endpoint].begin(),
-                              last_output_timestamp[endpoint].end(), 0);
-                    active_phase[endpoint] = phases[endpoint];
-                    progress = true;
-                }
+            // Consume every event that is now causally executable. SYNC is
+            // terminated here and advances the input link's promise; DATA is
+            // routed only after its switch-arrival timestamp is reached.
+            bool consumed = false;
+            do {
+                consumed = false;
+                for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint)
+                    for (uint32_t port = 0; port < ports; ++port)
+                        consumed |= consumeOne(endpoint, port);
+                progress |= consumed;
+            } while (consumed);
+
+            // The switch is an independent conservative simulator. It may
+            // advance only to the minimum next-message/null-message timestamp
+            // across every physical ingress link.
+            const uint64_t safe = safeTime();
+            if (safe > virtual_time) {
+                virtual_time = safe;
+                virtual_time_started = true;
+                progress = true;
+                continue;
             }
-            for (uint32_t side = 0; side < links.size(); ++side)
-                for (uint32_t port = 0; port < ports; ++port)
-                    progress |= forwardOne(side, port);
-            // SimBricks-style shared-memory adapters poll on a dedicated core
-            // while synchronized.  A nominal 20-us sleep is commonly rounded
-            // to about 1 ms by Docker Desktop/macOS and dominates short ROIs.
-            // Outside a collective synchronized phase, sleep to avoid burning
-            // a host core while the full-system guests boot or sit at a shell.
-            if (!progress && !synchronized_active)
-                std::this_thread::sleep_for(std::chrono::microseconds(20));
+
+            // Advertise the switch's new safe time independently on every
+            // egress link.  This is link control, never an EID-routed packet.
+            if (virtual_time_started) {
+                for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint)
+                    for (uint32_t port = 0; port < ports; ++port)
+                        progress |= publishSync(endpoint, port);
+            }
+
+            // Like the SimBricks proxy, synchronized operation busy-polls its
+            // shared-memory queues; virtual time, not host sleep, gates work.
+            if (!progress)
+                std::this_thread::yield();
         }
         std::cerr << "[UB_SWITCH_STATS] forwarded=" << forwarded
-                  << " payload_bytes=" << bytes << '\n';
+                  << " payload_bytes=" << bytes
+                  << " sync_messages=" << sync_messages
+                  << " virtual_ticks=" << virtual_time << '\n';
     }
 };
 

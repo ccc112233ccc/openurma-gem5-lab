@@ -1,0 +1,36 @@
+From 54c9d7cc2c6c3cb3bc215716ba1e632df18d84e4 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Wed, 23 Sep 2026 17:11:30 +0800
+Subject: [PATCH] Ignore guest sync toggles in lifetime adapter mode
+
+---
+ src/sim/pseudo_inst.cc | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/src/sim/pseudo_inst.cc b/src/sim/pseudo_inst.cc
+index a22c8e9..a22e790 100644
+--- a/src/sim/pseudo_inst.cc
++++ b/src/sim/pseudo_inst.cc
+@@ -479,14 +479,13 @@ void
+ togglesync(ThreadContext *tc)
+ {
+     DPRINTF(PseudoInst, "pseudo_inst::togglesync()\n");
+-    // A SimBricks-style adapter run has no DistIface object. Reuse the same
+-    // guest-visible m5 operation as the existing perftest instrumentation,
+-    // but return control to the Python simulation loop so it can enter/leave
+-    // pairwise timestamp-bounded slices. Keeping this behind an explicit host
+-    // environment flag preserves stock dist-gem5 behavior unchanged.
++    // A SimBricks-style adapter is synchronized for the entire simulation and
++    // has no DistIface object. Older guest binaries still contain this
++    // perftest marker, so treat it as a compatibility no-op. It must neither
++    // exit to Python nor change adapter state. Stock dist-gem5 behavior is
++    // preserved when the explicit adapter environment flag is absent.
+     const char *adapter_sync = std::getenv("OPENURMA_ADAPTER_LOCAL_SYNC");
+     if (adapter_sync && *adapter_sync && *adapter_sync != '0') {
+-        exitSimLoop("adapter sync toggle");
+         return;
+     }
+     DistIface::toggleSync(tc);
+-- 
+2.50.1 (Apple Git-155)
+

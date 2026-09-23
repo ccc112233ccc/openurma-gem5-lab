@@ -26,13 +26,11 @@ The launcher checks `/dev/kvm`, host architecture, and gem5's generated
 is restricted to one vCPU because multi-vCPU host event queues have not been
 validated with distributed UB synchronization.
 
-The dual-node KVM profile uses a 1-ms idle peer-ring poll. The ordinary 10-ns
-UDMA fallback poll creates a SystemC event even when the ring is empty, forcing
-`ArmV8KvmCPU` to exit 100,000 times per virtual millisecond during boot. Once
-adapter-local synchronization is active, its lookahead event drains incoming
-DATA at the promised timestamp and wakes the UDMA worker immediately; the
-1-ms value is only the unsynchronized idle fallback. Timing and Atomic profiles
-retain the original 10-ns poll.
+The adapter synchronizer is active from tick zero and exclusively drains the
+cross-process peer ring, waking the UDMA worker when DATA arrives. Therefore an
+empty peer ring no longer creates a second 10-ns (or 1-ms) periodic DMA-worker
+event. `OPENURMA_UDMA_POLL_INTERVAL` remains only for guest-level RNR retry and
+for transports that do not use the synchronized switch adapter.
 
 ## Timer topology
 

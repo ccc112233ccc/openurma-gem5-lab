@@ -367,8 +367,9 @@ endpoint-to-endpoint transport for A/B regression. In the default
 `switch-adapter` mode, node 0 and node 1 no longer share one UB data ring:
 they map `/tmp/openurma-dual.node0.adapter` and
 `/tmp/openurma-dual.node1.adapter` respectively, while the switch maps both.
-The common 64-byte Adapter header supports versioned `DATA` and `SYNC` records
-and carries source and destination EIDs.
+The common 64-byte Adapter header supports versioned `DATA` and `SYNC` records.
+`DATA` carries source/destination EIDs for switch routing; `SYNC` is link-local
+control and deliberately carries neither EID nor TP/application identity.
 With the default two nodes, `adapter-local` therefore has exactly three timed
 simulator processes: gem5 node 0, the UB switch, and gem5 node 1. An N-node run
 has N gem5 processes plus the same switch process; there is no dist-gem5
@@ -383,14 +384,13 @@ Every point-to-point Adapter gives each direction and physical port its own
 64-slot FIFO. Every record carries explicit source and destination port IDs.
 The receiver merges ready queue heads by virtual arrival time, so a delayed
 packet on one port cannot block an already-arrived packet on another port.
-During the actual latency loop, each endpoint publishes a `SYNC` promise on the
-same per-port FIFO as `DATA`. The switch advances the promise through the same
-propagation and serialization state as traffic, so a receiver runs only to the
-earliest promised virtual tick. Monotonic ON/OFF generations collectively
-enter and leave this mode even when the two guests reach the ROI at different
-virtual times. UMDK setup is left outside this fine-grained epoch because
-synchronizing seconds of process startup at nanosecond resolution is correct
-but needlessly slow. In compatibility mode, the launcher still enforces
+From tick zero, each endpoint publishes `SYNC` null-message promises on the
+same per-port FIFO as `DATA`. The switch is an independent virtual-time
+participant: it advances only to the minimum promise across every physical
+ingress link, processes causally ready DATA, then publishes a promise on every
+egress link. Synchronization is therefore independent of UMDK, EIDs, TPs,
+benchmark processes and ROI markers, and the same rule applies to two or many
+nodes/ports. In compatibility mode, the launcher still enforces
 `0 < --sync-quantum-ns <= lookahead` for the dist-gem5 barrier.
 
 Each simulated socket can advertise multiple physical UB ports without turning
@@ -612,25 +612,22 @@ size instead of accidentally selecting the final whole-run block. Pass sizes
 positionally or with `--sizes`; the helper refuses to overwrite a non-empty
 result directory.
 
-Both wrappers set `OPENURMA_DIST_SYNC=1`; the patched perftest first performs a
-normal TCP/resource exchange and TP creation while fine-grained synchronization
-is off. After setup supplies the peer EID, perftest performs its last TCP
-readiness handshake, collectively enables EID-scoped Adapter synchronization,
-runs the latency loop, then collectively disables synchronization before
-reporting. Starting the server first is safe because it blocks in the official
-TCP accept path rather than advancing the measured virtual-time epoch.
-The same unmodified guest command selects the legacy dist-gem5 implementation
-when the launcher is run with `--sync-mode global-barrier`.
+Both wrappers still set `OPENURMA_DIST_SYNC=1` for compatibility with the
+patched perftest. In `adapter-local` mode those guest toggle operations are
+no-ops: synchronization has already been active since simulator startup and is
+independent of TCP setup, peer EIDs and the measured loop. The same guest
+command selects the legacy dist-gem5 implementation when the launcher is run
+with `--sync-mode global-barrier`.
 
 The original Python-stepped comparison is retained in
 [`results/sync-ab-20260921/REPORT.md`](results/sync-ab-20260921/REPORT.md), and
 the replacement C++ event-queue implementation is profiled in
 [`results/sync-cpp-ab-20260921/REPORT.md`](results/sync-cpp-ab-20260921/REPORT.md).
-Adapter-local no longer returns through Python for each lookahead interval.
-The NIC's C++ event drains DATA/SYNC records, polls until the peer publishes a
-future conservative horizon, and re-schedules itself at that tick. Because the
-guests boot independently, each synchronized ROI uses phase-relative wire
-timestamps; the switch busy-polls only while both endpoints are in that ROI.
+Adapter-local does not return through Python for each lookahead interval. The
+NIC's C++ event drains DATA/SYNC records, polls until the adjacent switch
+publishes a future conservative horizon, and re-schedules itself at that tick.
+Wire timestamps use the global gem5 tick from startup through shutdown, and the
+switch continuously participates in conservative time progression.
 In the measured two-node case this makes 128-byte runs slightly faster than the
 global barrier, while 4096-byte runs remain slightly slower. A four-node run
 with two concurrent 128-byte pairs retained identical virtual latency results
@@ -846,8 +843,8 @@ change the simulator/kernel ABI:
 
 | Component | Version or exact commit |
 | --- | --- |
-| gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `724651433c9bdee2c7f0484ab85b9620b0810993` |
-| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `a49521580a27d8a3f66588342581fd9d73cfb42a` |
+| gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `54c9d7cc2c6c3cb3bc215716ba1e632df18d84e4` |
+| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `0381d0b61a17c3614446b13a4e0d842045d69c01` |
 | OpenClickNP | `c1c6acc58032a1894507d88659b3cca668b0e1a5` |
 | vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `f84b90b8ddd8173b851334f55d332783d248bfc7` |
 | openEuler OLK-6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |

@@ -9,10 +9,10 @@ kernel_root="${KSRC:-$lab/oe66}"
 
 readonly GEM5_URL=https://github.com/gem5/gem5.git
 readonly GEM5_BASE=b1a44b89c7bae73fae2dc547bc1f871452075b85
-readonly GEM5_TARGET=724651433c9bdee2c7f0484ab85b9620b0810993
+readonly GEM5_TARGET=54c9d7cc2c6c3cb3bc215716ba1e632df18d84e4
 readonly OPENURMA_URL=https://github.com/bojieli/OpenURMA.git
 readonly OPENURMA_BASE=0ae5dce300154d761f97095864bda0cf2546b265
-readonly OPENURMA_TARGET=a49521580a27d8a3f66588342581fd9d73cfb42a
+readonly OPENURMA_TARGET=0381d0b61a17c3614446b13a4e0d842045d69c01
 readonly UMDK_URL=https://gitee.com/openeuler/umdk.git
 readonly UMDK_BASE=4eab3e4ad170b06bfe5d5c1014341e81edb9bf58
 readonly UMDK_TARGET=f84b90b8ddd8173b851334f55d332783d248bfc7

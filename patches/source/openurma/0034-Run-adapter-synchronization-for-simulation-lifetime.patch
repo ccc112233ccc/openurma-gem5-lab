@@ -1,0 +1,443 @@
+From 0381d0b61a17c3614446b13a4e0d842045d69c01 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Wed, 23 Sep 2026 17:08:19 +0800
+Subject: [PATCH] Run adapter synchronization for simulation lifetime
+
+---
+ .../configs/single_node_fs_clean.py           |  33 ++--
+ .../gem5_scaffold/src/NICTopologySC.cc        | 164 +++++-------------
+ .../gem5_scaffold/src/NICTopologySC.hh        |  13 +-
+ .../gem5_scaffold/src/NICTopologySC.py        |   2 +-
+ .../gem5_scaffold/src/UbAdapterProtocol.hh    |  23 ++-
+ 5 files changed, 69 insertions(+), 166 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index 613e487..5d25fd7 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -773,8 +773,8 @@ def main():
+         help="model the complete path in the endpoint or hand packets to an "
+              "independent UB switch simulator")
+     parser.add_argument("--adapter-local-sync", action="store_true",
+-        help="bound m5.simulate slices with pairwise Adapter SYNC promises; "
+-             "currently validated for one physical UB port")
++        help="run lifetime-scoped conservative synchronization between each "
++             "gem5 adapter and the independent switch")
+     parser.add_argument("--peer-link-latency", default="100ns",
+         help="Minimum one-way UB peer-channel propagation delay; this is the "
+              "positive lookahead used to timestamp cross-process DATA")
+@@ -863,9 +863,6 @@ def main():
+         if args.dist_size != 0:
+             parser.error("--adapter-local-sync cannot be combined with the "
+                          "global dist-gem5 barrier")
+-        if args.ub_port_count != 1:
+-            parser.error("the first adapter-local-sync implementation is "
+-                         "restricted to one UB port")
+     if args.m5ops_base != VEXPRESS_GEM5_V1_M5OPS_BASE:
+         parser.error("VExpress_GEM5_V1 reserves its m5ops MMIO range at "
+                      "0x10010000; another address requires another platform "
+@@ -1018,6 +1015,11 @@ def main():
+         m5.instantiate(args.restore_from)
+     else:
+         m5.instantiate()
++    if args.adapter_local_sync:
++        # As in SimBricks, the adapter is a permanent part of the simulated
++        # machine.  Start its conservative event at tick zero; guest commands,
++        # EIDs, TPs and benchmark ROI markers do not control synchronization.
++        root.system.nic.adapterSyncStart()
+     kvm_max_run_slice_ticks = None
+     if args.cpu in ("kvm", "kvm_server_o3"):
+         try:
+@@ -1038,11 +1040,10 @@ def main():
+     # outdir and continue. This lets us snapshot after the stack loads, then restore
+     # per-experiment (--restore-from) to skip the boot.
+     switched_to_o3 = False
+-    adapter_sync_active = False
+     while True:
+-        # Adapter-local synchronization is a C++ event in gem5's event queue,
+-        # following SimBricks' adapter structure. Python sees only the two
+-        # collective guest pseudo instructions that enter and leave an ROI.
++        # Adapter synchronization runs continuously in the C++ event queue.
++        # Old guest images may still contain dist-toggle-sync instrumentation;
++        # it is a compatibility no-op and never changes the adapter state.
+         event = (m5.simulate(kvm_max_run_slice_ticks)
+                  if kvm_max_run_slice_ticks is not None else m5.simulate())
+         cause = event.getCause()
+@@ -1051,18 +1052,8 @@ def main():
+             continue
+         print(f"[single_node_fs_clean] exited @ tick {m5.curTick()} because {cause}")
+         if cause == "adapter sync toggle" and args.adapter_local_sync:
+-            requested_state = not adapter_sync_active
+-            handshake_started = time.monotonic()
+-            while not root.system.nic.adapterSyncToggle(requested_state):
+-                if time.monotonic() - handshake_started > 30:
+-                    raise RuntimeError(
+-                        "timed out waiting for the peer Adapter sync toggle"
+-                    )
+-                time.sleep(0.00002)
+-            adapter_sync_active = requested_state
+-            print("[single_node_fs_clean] Adapter-local synchronization "
+-                  f"{'enabled' if adapter_sync_active else 'disabled'} at "
+-                  f"tick {m5.curTick()}")
++            print("[single_node_fs_clean] ignored legacy guest sync toggle; "
++                  "adapter synchronization is lifetime-scoped")
+             continue
+         if "checkpoint" in cause.lower():
+             if args.cpu in ("kvm", "kvm_server_o3"):
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 5a17359..3ee6e8f 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -3238,12 +3238,14 @@ NICTopologySC::timing_dma_worker()
+     if (udma_mode_ && peer_node_id_ >= 0)
+         peer_ring_map();
+     while (true) {
+-        // A local-loopback SQ doorbell and every newly queued RX explicitly
+-        // notify the worker. Periodic polling is needed only for a
+-        // cross-process peer ring or while an RX is waiting for an RQE; the
+-        // mere existence of a JFR must not create a permanent 10-ns wakeup.
++        // A local SQ doorbell and every newly queued RX explicitly notify the
++        // worker.  In switch-adapter mode the lifetime synchronization event
++        // owns and drains the peer FIFO, so the DMA worker must not add a
++        // second periodic poll.  RNR retry remains timed because it models a
++        // missing guest receive queue entry rather than adapter progress.
+         const bool needs_poll = udma_mode_ &&
+-            (peer_node_id_ >= 0 || !udma_rx_pending_.empty());
++            ((!peer_sync_local_active_ && peer_node_id_ >= 0) ||
++             !udma_rx_pending_.empty());
+         if (timing_dma_queue_.empty() && udma_sq_work_.empty()) {
+             if (needs_poll) {
+                 gem5::Tick ticks = std::max<gem5::Tick>(
+@@ -4091,12 +4093,8 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+             panic_if(hdr->payload_length != 0,
+                      "peer ring SYNC unexpectedly carries %u bytes",
+                      hdr->payload_length);
+-            panic_if((hdr->destination_eid & 0xffffU) !=
+-                         (udma_endpoint_eid_ & 0xffffU),
+-                     "peer ring SYNC for EID 0x%x reached endpoint EID 0x%x",
+-                     hdr->destination_eid, udma_endpoint_eid_);
+-            peer_sync_grant_ = std::max<gem5::Tick>(
+-                peer_sync_grant_, hdr->receive_tick);
++            panic_if(hdr->source_eid != 0 || hdr->destination_eid != 0,
++                     "link-local SYNC unexpectedly carries endpoint EIDs");
+             __atomic_store_n(&d.tail.value, selected_tail + 1,
+                              __ATOMIC_RELEASE);
+             continue;
+@@ -4149,21 +4147,13 @@ NICTopologySC::peer_ring_drain(sc_core::sc_time &delay)
+ gem5::Tick
+ NICTopologySC::adapter_wire_tick(gem5::Tick local_tick) const
+ {
+-    if (peer_transport_ != "switch-adapter" || !peer_sync_local_active_)
+-        return local_tick;
+-    panic_if(local_tick < adapter_sync_tick_started_,
+-             "adapter local tick %llu precedes phase epoch %llu",
+-             (unsigned long long)local_tick,
+-             (unsigned long long)adapter_sync_tick_started_);
+-    return local_tick - adapter_sync_tick_started_;
++    return local_tick;
+ }
+ 
+ gem5::Tick
+ NICTopologySC::adapter_local_tick(gem5::Tick wire_tick) const
+ {
+-    if (peer_transport_ != "switch-adapter" || !peer_sync_local_active_)
+-        return wire_tick;
+-    return checked_tick_sum(adapter_sync_tick_started_, wire_tick);
++    return wire_tick;
+ }
+ 
+ bool
+@@ -4206,18 +4196,6 @@ NICTopologySC::adapter_sync_step()
+ 
+     const gem5::Tick now = gem5::curTick();
+     const gem5::Tick wire_now = adapter_wire_tick(now);
+-    const uint64_t remote_phase = __atomic_load_n(
+-        &ring_->peer_sync_phase, __ATOMIC_ACQUIRE);
+-    if (remote_phase > peer_sync_phase_ && (remote_phase & 1) == 0) {
+-        // The peer is frozen at its collective OFF toggle and promises no
+-        // more DATA. This endpoint may run without a finite bound until it
+-        // reaches the same toggle; adapterSyncToggle(false) then completes
+-        // the generation handshake on both sides.
+-        std::cerr << "[NIC adapter-sync] peer quiesced local_phase="
+-                  << peer_sync_phase_ << " remote_phase=" << remote_phase
+-                  << " tick=" << now << "\n";
+-        return gem5::MaxTick;
+-    }
+     if (peer_last_sync_sent_ != wire_now) {
+         // Avoid publishing a partial multi-port promise: either every output
+         // FIFO has room for this virtual-time horizon or none is modified.
+@@ -4240,19 +4218,30 @@ NICTopologySC::adapter_sync_step()
+             header->type = static_cast<uint32_t>(
+                 openurma_adapter::MessageType::Sync);
+             header->send_tick = wire_now;
+-            header->receive_tick = checked_tick_sum(
++            gem5::Tick promise = checked_tick_sum(
+                 wire_now, peer_link_latency_);
++            // DATA and SYNC share this FIFO. A large packet may still occupy
++            // the endpoint serializer when the adapter event fires, so the
++            // null-message timestamp must not move behind that queued DATA.
++            if (!peer_port_stage_free_ticks_[port].empty()) {
++                promise = std::max(promise, checked_tick_sum(
++                    peer_port_stage_free_ticks_[port].back(),
++                    peer_link_latency_));
++            }
++            header->receive_tick = promise;
+             header->sequence = peer_tx_seq_++;
+             header->source_port = port;
+             header->destination_port = port;
+             header->protocol_version = openurma_adapter::Version;
+-            header->source_eid = udma_endpoint_eid_;
+-            header->destination_eid = __atomic_load_n(
+-                &ring_->sync_destination_eid, __ATOMIC_ACQUIRE);
+-            header->sync_phase = peer_sync_phase_;
++            // SYNC terminates at the adjacent switch adapter. It is not a UB
++            // packet and therefore has no source/destination EID or TP state.
++            header->source_eid = 0;
++            header->destination_eid = 0;
+             __atomic_store_n(&direction.head.value, head + 1,
+                              __ATOMIC_RELEASE);
+         }
++        __atomic_add_fetch(&ring_->endpoint_sync_messages, 1,
++                           __ATOMIC_RELEASE);
+         peer_last_sync_sent_ = wire_now;
+     }
+ 
+@@ -4295,12 +4284,6 @@ NICTopologySC::process_adapter_sync_event()
+             ++adapter_sync_wait_polls_;
+             continue;
+         }
+-        if (safe_tick == gem5::MaxTick) {
+-            // The peer is frozen at its OFF pseudo instruction. Leave this
+-            // event unscheduled so the local guest can run to the matching
+-            // instruction; adapterSyncToggle(false) completes the handshake.
+-            return;
+-        }
+         if (safe_tick <= gem5::curTick()) {
+             // A promise for the tick currently being serviced is legal.  As
+             // in the SimBricks adapter, keep polling/consuming in C++ until
+@@ -4314,68 +4297,24 @@ NICTopologySC::process_adapter_sync_event()
+     }
+ }
+ 
+-bool
+-NICTopologySC::adapterSyncToggle(bool active)
++void
++NICTopologySC::adapterSyncStart()
+ {
+     panic_if(peer_transport_ != "switch-adapter" || peer_node_id_ < 0,
+-             "adapterSyncToggle requires a cross-process switch adapter");
++             "adapterSyncStart requires a cross-process switch adapter");
+     peer_ring_map();
+-    if (active != peer_sync_local_active_) {
+-        if (adapter_sync_event_.scheduled())
+-            gem5::curEventQueue()->deschedule(&adapter_sync_event_);
+-        ++peer_sync_phase_;
+-        panic_if(bool(peer_sync_phase_ & 1) != active,
+-                 "adapter synchronization phase parity is inconsistent");
+-        peer_sync_local_active_ = active;
+-        peer_last_sync_sent_ = gem5::MaxTick;
+-        if (active) {
+-            const uint32_t destination_eid =
+-                adapter_sync_destination_eid();
+-            panic_if(destination_eid == 0,
+-                     "adapter synchronization requires an active TP with a "
+-                     "destination EID");
+-            __atomic_store_n(&ring_->sync_destination_eid,
+-                             destination_eid, __ATOMIC_RELEASE);
+-            adapter_sync_steps_ = 0;
+-            adapter_sync_wait_polls_ = 0;
+-            adapter_sync_event_slices_ = 0;
+-            adapter_sync_host_started_ = std::chrono::steady_clock::now();
+-            adapter_sync_tick_started_ = gem5::curTick();
+-        }
+-        __atomic_store_n(&ring_->local_sync_phase, peer_sync_phase_,
+-                         __ATOMIC_RELEASE);
+-    }
+-    const uint64_t remote_phase = __atomic_load_n(
+-        &ring_->peer_sync_phase, __ATOMIC_ACQUIRE);
+-    if (remote_phase >= peer_sync_phase_) {
+-        if (active && !adapter_sync_event_.scheduled()) {
+-            gem5::curEventQueue()->schedule(
+-                &adapter_sync_event_, gem5::curTick());
+-        } else if (!active) {
+-            const double host_seconds =
+-                std::chrono::duration<double>(
+-                    std::chrono::steady_clock::now() -
+-                    adapter_sync_host_started_).count();
+-            std::cerr << "[NIC adapter-sync-profile] host_seconds="
+-                      << host_seconds
+-                      << " virtual_ticks="
+-                      << (gem5::curTick() - adapter_sync_tick_started_)
+-                      << " steps=" << adapter_sync_steps_
+-                      << " wait_polls=" << adapter_sync_wait_polls_
+-                      << " event_slices=" << adapter_sync_event_slices_
+-                      << "\n";
+-        }
+-        std::cerr << "[NIC adapter-sync] toggle active=" << active
+-                  << " local_phase=" << peer_sync_phase_
+-                  << " remote_phase=" << remote_phase
+-                  << " destination_eid=0x" << std::hex
+-                  << __atomic_load_n(&ring_->sync_destination_eid,
+-                                     __ATOMIC_ACQUIRE)
+-                  << std::dec
+-                  << " tick=" << gem5::curTick() << "\n";
+-        return true;
+-    }
+-    return false;
++    if (peer_sync_local_active_)
++        return;
++    peer_sync_local_active_ = true;
++    peer_last_sync_sent_ = gem5::MaxTick;
++    adapter_sync_steps_ = 0;
++    adapter_sync_wait_polls_ = 0;
++    adapter_sync_event_slices_ = 0;
++    gem5::curEventQueue()->schedule(&adapter_sync_event_, gem5::curTick());
++    std::cerr << "[NIC adapter-sync] lifetime synchronization enabled at "
++              << "tick=" << gem5::curTick() << " ports=" << ub_port_count_
++              << " lookahead="
++              << peer_link_latency_ << "\n";
+ }
+ 
+ // Wire-packet build shared by both transports.
+@@ -4449,25 +4388,6 @@ NICTopologySC::peer_eid_for_transport(uint32_t tpn) const
+     return 0;
+ }
+ 
+-uint32_t
+-NICTopologySC::adapter_sync_destination_eid() const
+-{
+-    uint32_t destination = 0;
+-    for (const auto &[id, route] : udma_tp_routes_) {
+-        (void)id;
+-        if (!route.active)
+-            continue;
+-        panic_if(route.remote_eid == 0,
+-                 "active TP %u has no destination EID", route.tpid);
+-        panic_if(destination != 0 && destination != route.remote_eid,
+-                 "one synchronized ROI currently requires one destination "
+-                 "EID, found 0x%x and 0x%x", destination,
+-                 route.remote_eid);
+-        destination = route.remote_eid;
+-    }
+-    return destination;
+-}
+-
+ void
+ NICTopologySC::peer_send(uint8_t op, uint32_t dcna, uint32_t rtoken,
+                          uint64_t rva, uint32_t len, uint64_t imm,
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+index dbcbb41..d3bf06a 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.hh
+@@ -40,7 +40,6 @@
+ #include <deque>
+ 
+ #include <array>
+-#include <chrono>
+ #include <tuple>
+ #include <memory>
+ 
+@@ -195,16 +194,12 @@ class NICTopologySC : public sc_core::sc_module
+     std::vector<uint64_t> peer_port_rx_packets_;
+     std::vector<uint64_t> peer_port_rx_bytes_;
+     gem5::Tick  peer_last_rx_arrival_ = 0;
+-    gem5::Tick  peer_sync_grant_ = 0;
+     gem5::Tick  peer_last_sync_sent_ = gem5::MaxTick;
+-    uint64_t    peer_sync_phase_ = 0;
+     bool        peer_sync_local_active_ = false;
+     gem5::EventFunctionWrapper adapter_sync_event_;
+     uint64_t    adapter_sync_steps_ = 0;
+     uint64_t    adapter_sync_wait_polls_ = 0;
+     uint64_t    adapter_sync_event_slices_ = 0;
+-    std::chrono::steady_clock::time_point adapter_sync_host_started_;
+-    gem5::Tick  adapter_sync_tick_started_ = 0;
+     uint64_t    peer_tx_seq_ = 0;
+     void peer_ring_map();
+     uint8_t *peer_ring_slot(uint32_t direction, uint32_t port,
+@@ -255,10 +250,9 @@ class NICTopologySC : public sc_core::sc_module
+     uint64_t dmaPendingRequests() const;
+     bool dmaBeginRoi();
+     bool dmaIdle();
+-    // The guest toggle enters/leaves a C++ event-queue adapter. Python handles
+-    // only this infrequent collective boundary; DATA/SYNC polling and virtual
+-    // time progression stay inside gem5's event queue.
+-    bool adapterSyncToggle(bool active);
++    // Start the lifetime-scoped conservative adapter at tick zero.  This is a
++    // fabric property, independent of guest software, EIDs, TPs, or ROI.
++    void adapterSyncStart();
+ 
+   private:
+     enum class TimingDmaCommand : uint8_t { Read, Write };
+@@ -643,7 +637,6 @@ class NICTopologySC : public sc_core::sc_module
+     uint32_t peer_port_for_transport(uint32_t tpn, uint8_t op,
+                                      uint32_t dcna, uint32_t rtoken) const;
+     uint32_t peer_eid_for_transport(uint32_t tpn) const;
+-    uint32_t adapter_sync_destination_eid() const;
+     // pop the oldest posted receive on dest jetty `dj` (used by both the local
+     // doorbell path and the cross-node peer path).
+     using RecvT = std::tuple<uint32_t, uint32_t, uint64_t, uint64_t, int, uint32_t>;
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.py b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+index ad5f992..bfe6a36 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.py
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.py
+@@ -34,7 +34,7 @@ class NICTopologySC(SystemC_ScModule):
+         PyBindMethod("dmaPendingRequests"),
+         PyBindMethod("dmaBeginRoi"),
+         PyBindMethod("dmaIdle"),
+-        PyBindMethod("adapterSyncToggle"),
++        PyBindMethod("adapterSyncStart"),
+     ]
+ 
+     mmio_socket    = TlmTargetSocket(512,
+diff --git a/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh b/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh
+index 2b529cc..d97d3e2 100644
+--- a/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh
++++ b/eval/twonode/gem5_scaffold/src/UbAdapterProtocol.hh
+@@ -7,7 +7,7 @@
+ namespace openurma_adapter {
+ 
+ constexpr uint64_t Magic = 0x4f55554241445054ULL; // "OUUBADPT"
+-constexpr uint32_t Version = 3;
++constexpr uint32_t Version = 4;
+ constexpr uint32_t RingSlots = 64;
+ constexpr uint32_t SlotBytes = 8192;
+ constexpr uint32_t MaxPorts = 16;
+@@ -42,10 +42,10 @@ struct alignas(64) MessageHeader {
+     // application, resolves destination_eid to an output adapter.
+     uint32_t source_eid;
+     uint32_t destination_eid;
+-    // SYNC generation. Zero is accepted only from legacy compatibility
+-    // producers; native fabrics use it to discard promises left over from a
+-    // preceding synchronized ROI whose wire-time epoch has already ended.
+-    uint64_t sync_phase;
++    // Reserved for link-local synchronization extensions.  SYNC is a null
++    // message on one physical adapter link; it is never routed by EID and its
++    // receive_tick is the conservative promise for that FIFO.
++    uint64_t sync_reserved;
+     uint8_t reserved[8];
+ };
+ 
+@@ -54,14 +54,13 @@ struct alignas(4096) Ring {
+         RingIndex head;
+         RingIndex tail;
+     } direction[2][MaxPorts];
+-    // Collective ROI synchronization is control-plane state, not a timed UB
+-    // packet. The endpoint monotonically increments local_sync_phase on every
+-    // ON/OFF transition. The switch mirrors the remote endpoint's phase into
+-    // peer_sync_phase. Odd phases mean active; even phases mean quiesced.
+-    uint64_t local_sync_phase;
+-    uint64_t peer_sync_phase;
++    // Synchronization is active for the lifetime of the simulation. These
++    // counters are observability fields written by the endpoint and switch;
++    // they do not gate execution and carry no application/ROI state.
++    uint64_t endpoint_sync_messages;
++    uint64_t switch_sync_messages;
+     uint32_t local_eid;
+-    uint32_t sync_destination_eid;
++    uint32_t control_reserved32;
+     uint8_t control_reserved[4072];
+ };
+ 
+-- 
+2.50.1 (Apple Git-155)
+

@@ -56,7 +56,7 @@ source and destination port within that endpoint.  IP addresses remain part
 of the userspace resource-exchange control path and never route UB data in the
 fabric process.
 
-Version 3 presents `receive_tick` at the switch ingress after gem5 has charged
+Version 4 presents `receive_tick` at the switch ingress after gem5 has charged
 the host NIC's source-port serialization and the positive Adapter lookahead.
 This makes the boundary timestamp directly usable as a native `UbSwitch`
 ingress event. The `ns3ub-compat` mode retains arithmetic switch/egress timing;
@@ -70,19 +70,18 @@ sender will not later publish an earlier `receive_tick` on that FIFO.  The
 positive host-link propagation delay is the conservative lookahead.
 
 The ns-3-UB process may advance only to the minimum safe horizon advertised by
-its active neighbours.  It must execute this synchronization in C++ and must
+every physical ingress link. It must execute this synchronization in C++ and must
 not return to Python for every lookahead interval.  Wall-clock scheduling is
 never used as simulated latency.
 
-Each endpoint has its own ROI-relative wire-time epoch. The adapter records
-the current monotonic ns-3 time when that endpoint enters an odd synchronization
-phase, adds that base on ingress, and subtracts it on delivery/grant. This is
-required when independent communication pairs start at different times on the
-same switch; one pair must not reinterpret another pair's zero-based timestamps.
+Synchronization starts with the simulator and uses one absolute virtual-time
+axis. SYNC terminates at the adjacent fabric adapter and carries no EID, TP,
+pair, workload or ROI state. EIDs route DATA only. This lets independent flows
+start at different times without creating pair-specific epochs or barriers.
 
 ## Delivery stages
 
-1. `compatibility bridge`: consume the current version-3 ring, execute fabric
+1. `compatibility bridge`: consume the current version-4 ring, execute fabric
    events in an ns-3 process, and reproduce the existing switch timing test.
 2. `native fabric`: translate the opaque endpoint carrier to an ns-3-UB frame
    at switch ingress and use native switch queues, routing, egress ports, and
@@ -90,9 +89,9 @@ same switch; one pair must not reinterpret another pair's zero-based timestamps.
    lossless base path.
 3. `fabric features`: enable native flow control, congestion feedback, link
    faults, and topology-driven routing without moving transaction semantics.
-4. `scale`: more than two hosts is validated for four full-system guests and
-   two concurrent reciprocal pairs. Multiple physical ports, MTP profiling,
-   and optional MPI partitioning inside ns-3-UB remain future work.
+4. `scale`: the adapter/switch ABI is validated for two and four endpoints and
+   one and two physical ports. Larger full-system runs, MTP profiling, and
+   optional MPI partitioning inside ns-3-UB remain future work.
 
 Each stage must retain deterministic unit tests and an A/B test against the
 preceding stage.  Native transport or transaction-layer ownership is outside

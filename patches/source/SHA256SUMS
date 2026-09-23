@@ -1,6 +1,7 @@
 5fa4d6f9dace11b1ad0ee4d27df8b0cb8e8f8edcfef266ce1293f37f4d210849  patches/source/gem5/0001-sim-add-OpenURMA-device-and-deterministic-timing-sup.patch
 5f249337a758384bfc3aa02f278f7f52f2dc0c042e33744642afa526ec60c3c7  patches/source/gem5/0002-Enforce-distributed-synchronization-wake-deadlines.patch
 2108ae9cce3348fc6cf4756dc5220e04a148d2e5f38789b9a4ab877472d82b0d  patches/source/gem5/0003-Route-sync-toggles-to-adapter-simulation-loop.patch
+d5eff1732ddbbdf0a482efe5fd1bbc094e12fc965117ba3999568a5607b45ea5  patches/source/gem5/0004-Ignore-guest-sync-toggles-in-lifetime-adapter-mode.patch
 a3e6faedc980738e13c6193e7737a45a4acd347142e3fd37bec3846705863ed0  patches/source/openurma/0001-sim-checkpoint-dual-node-and-official-UBUS-discovery.patch
 f13cc57bfb759b98c5f065a6ec391088123c6cc7b2b4a764e422b6f2462d1e63  patches/source/openurma/0002-Model-UBASE-command-queue-and-USI-capability.patch
 e53f899eacde498cea8b32c2a990ff24954b9c640b26633a715b2358e0ea14b8  patches/source/openurma/0003-Model-UBASE-CtrlQ-responses-and-Type-1-MSI-delivery.patch
@@ -34,6 +35,7 @@ e3f7c78e5500ecab3783e1a86d31133099cb8c12ef3b88c88e9c001e64689400  patches/source
 0b2e04803364540dc5cf1d4ab0375b253cc4408b5d544d8c65f2ef37d87a1100  patches/source/openurma/0031-Run-adapter-synchronization-in-gem5-event-queue.patch
 f74ed334b96913ffdb2f7fdb83f6357284051aa4bf16625f45d5958546d99de7  patches/source/openurma/0032-Route-adapter-traffic-by-official-peer-EID.patch
 15c8796cb4d80e1837909c322e95be1b38881a6706c7b19e8846c775204d331d  patches/source/openurma/0033-Tag-adapter-sync-promises-with-generation.patch
+b500405635655ab64ccd206e0d48f079246267a9206756c2ca9cd03de2bf8d91  patches/source/openurma/0034-Run-adapter-synchronization-for-simulation-lifetime.patch
 bb5182e9935fd993bcfd330b232920610c075540cdfe320ad002885fb22804c5  patches/source/umdk/0001-sim-add-deterministic-gem5-perftest-instrumentation.patch
 850fdf20c3541a5a4941476b246b0d80ab5c8f28853a1d3ba73caa3fedb5ac38  patches/source/umdk/0002-sim-synchronize-iteration-send-bandwidth-runs.patch
 f2ba4e59bd69cf738692aeef4e983ddc93ba0c3f0dc9b07e1c9771a25ebd06e6  patches/source/umdk/0003-Support-synchronized-bidirectional-RMA-bandwidth-tes.patch

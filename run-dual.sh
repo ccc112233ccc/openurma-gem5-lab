@@ -698,12 +698,9 @@ case "$profile" in
         profile_sq_wqebb_latency=0ns
         profile_payload_dma_latency=0ns
         profile_payload_dma_rate_gbps=0
-        # A cross-process UDMA endpoint otherwise wakes an idle KVM vCPU on
-        # every 10-ns ring poll, even while both guests are merely booting.
-        # During a synchronized ROI the adapter lookahead event drains DATA
-        # at its exact timestamp and explicitly kicks the worker, so this
-        # coarse fallback applies only when no synchronization event can
-        # deliver cross-process work.
+        # The lifetime adapter event owns peer-ring delivery. This value is
+        # retained for RNR retry and non-adapter compatibility transports; it
+        # no longer polls an empty synchronized peer ring.
         profile_udma_poll_interval=1ms
         ;;
     server)
@@ -1384,8 +1381,6 @@ esac
 if [[ "$sync_mode" == adapter-local ]]; then
     [[ "$ub_transport" == switch-adapter ]] ||
         die "adapter-local sync requires --ub-transport switch-adapter"
-    (( ub_port_count == 1 )) ||
-        die "adapter-local sync is currently validated only for one UB port"
 fi
 if [[ "$ub_transport" == switch-adapter && "$peer_topology" != l1-switch ]]; then
     die "switch-adapter requires --peer-topology l1-switch"
@@ -1987,7 +1982,7 @@ echo "  UB topology: $peer_topology (source-to-destination port map: ${peer_port
 echo "  UB egress selection: $peer_port_selection"
 echo "  UB switch service delay: $peer_switch_delay"
 if [[ "$sync_mode" == adapter-local ]]; then
-    echo "  synchronization: EID-scoped Adapter DATA/SYNC (no dist-gem5 switch)"
+    echo "  synchronization: lifetime per-link Adapter DATA/SYNC (switch is a virtual-time participant)"
 else
     echo "  synchronization: dist-gem5 global barrier at localhost:$actual_dist_port (${sync_quantum_ns} ns quantum)"
 fi
