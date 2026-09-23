@@ -211,8 +211,10 @@ outside the measured interval.
 
 ### ns-3-UB network-process bring-up
 
-The first ns-3-UB integration checkpoint can replace the built-in L1 switch
-process while preserving the current version-3 physical-port Adapter ABI.  The
+The ns-3-UB integration can replace the built-in L1 switch process while
+preserving the current version-4 physical-port Adapter ABI. The build helper
+idempotently applies the pinned lifetime-synchronization patch shipped in this
+repository because the public ns-3-UB remote is read-only for this workspace. The
 official guest software, UDMA queues, DMA and completion semantics remain in
 gem5; the independent ns-3 process uses ns-3 packet/time primitives for the
 compatibility fabric and keeps EID

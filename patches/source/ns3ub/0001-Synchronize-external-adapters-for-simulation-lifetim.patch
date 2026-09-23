@@ -1,0 +1,681 @@
+From 34c236d4098538764f4b6b04d481fc82e72776be Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Wed, 23 Sep 2026 17:25:31 +0800
+Subject: [PATCH] Synchronize external adapters for simulation lifetime
+
+---
+ scratch/ub-gem5-adapter.cc                    | 424 ++++++------------
+ .../model/ub-external-adapter-protocol.h      |  10 +-
+ 2 files changed, 148 insertions(+), 286 deletions(-)
+
+diff --git a/scratch/ub-gem5-adapter.cc b/scratch/ub-gem5-adapter.cc
+index c3992aba..b82800b1 100644
+--- a/scratch/ub-gem5-adapter.cc
++++ b/scratch/ub-gem5-adapter.cc
+@@ -312,7 +312,8 @@ class ExternalFabric
+                                                  std::vector<uint64_t>(serializationStages))),
+           m_lastOutput(paths.size(), std::vector<uint64_t>(ports)),
+           m_reservedOutputs(paths.size(), std::vector<uint64_t>(ports)),
+-          m_activePhase(paths.size())
++          m_lastGrant(paths.size(), std::vector<uint64_t>(ports)),
++          m_ingressPromise(paths.size(), std::vector<uint64_t>(ports))
+     {
+         if (paths.size() < 2 || paths.size() != m_endpointEids.size())
+         {
+@@ -346,30 +347,45 @@ class ExternalFabric
+     {
+         std::cerr << "[NS3_UB_ADAPTER] ready endpoints=" << m_links.size() << " ports=" << m_ports
+                   << " rate_gbps=" << m_rateGbps << " link_delay_ps=" << m_linkDelayPs
+-                  << " switch_delay_ps=" << m_switchDelayPs << " boundary=version3-compat\n";
++                  << " switch_delay_ps=" << m_switchDelayPs << " boundary=version4-lifetime\n";
+         while (!g_stopRequested)
+         {
+-            bool progress = UpdatePhases();
+-            for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
++            bool progress = false;
++            bool consumed = false;
++            do
+             {
+-                for (uint32_t port = 0; port < m_ports; ++port)
+-                {
+-                    progress |= PullOne(endpoint, port);
+-                }
+-            }
++                consumed = false;
++                for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
++                    for (uint32_t port = 0; port < m_ports; ++port)
++                        consumed |= PullOne(endpoint, port);
++                progress |= consumed;
++            } while (consumed);
+             if (m_scheduled != 0)
+             {
+                 Simulator::Run();
+                 progress = true;
+             }
+-            if (!progress && !AnySynchronizedPairActive())
++            const uint64_t safe = SafeHorizon();
++            if (safe > m_virtualTime)
+             {
+-                std::this_thread::sleep_for(std::chrono::microseconds(20));
++                m_virtualTime = safe;
++                m_started = true;
++                progress = true;
++                continue;
++            }
++            if (m_started)
++                for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
++                    for (uint32_t port = 0; port < m_ports; ++port)
++                        progress |= PublishGrant(endpoint, port);
++            if (!progress)
++            {
++                std::this_thread::yield();
+             }
+         }
+         Simulator::Destroy();
+         std::cerr << "[NS3_UB_ADAPTER_STATS] forwarded=" << m_forwarded
+-                  << " payload_bytes=" << m_payloadBytes << " ns3_events=" << m_events << '\n';
++                  << " payload_bytes=" << m_payloadBytes << " ns3_events=" << m_events
++                  << " virtual_ps=" << m_virtualTime << '\n';
+     }
+ 
+   private:
+@@ -425,11 +441,28 @@ class ExternalFabric
+         {
+             throw std::runtime_error("adapter protocol version mismatch");
+         }
+-        if (source->sourcePort != sourcePort ||
+-            (source->sourceEid & 0xffffU) != (m_endpointEids[sourceEndpoint] & 0xffffU))
++        if (source->sourcePort != sourcePort)
+         {
+             throw std::runtime_error("record identity does not match ingress adapter");
+         }
++        if (source->receiveTick > m_virtualTime)
++            return false;
++        const auto type = static_cast<protocol::MessageType>(source->type);
++        m_ingressPromise[sourceEndpoint][sourcePort] = std::max(
++            m_ingressPromise[sourceEndpoint][sourcePort], source->receiveTick);
++        if (type == protocol::MessageType::SYNC)
++        {
++            if (source->payloadLength != 0 || source->sourceEid != 0 ||
++                source->destinationEid != 0)
++                throw std::runtime_error("link-local SYNC carries payload or EIDs");
++            __atomic_store_n(&input.tail.value, tail + 1, __ATOMIC_RELEASE);
++            return true;
++        }
++        if (type != protocol::MessageType::DATA)
++            throw std::runtime_error("unsupported adapter message type");
++        if ((source->sourceEid & 0xffffU) !=
++            (m_endpointEids[sourceEndpoint] & 0xffffU))
++            throw std::runtime_error("record source EID does not match ingress adapter");
+         const uint32_t destinationEndpoint = RouteEndpoint(source->destinationEid);
+         if (destinationEndpoint == sourceEndpoint)
+         {
+@@ -447,46 +480,25 @@ class ExternalFabric
+         record->destinationEndpoint = destinationEndpoint;
+         record->destinationPort = destinationPort;
+ 
+-        const auto type = static_cast<protocol::MessageType>(source->type);
+         uint64_t outputTime = CheckedAdd(source->receiveTick, m_switchDelayPs);
+-        if (type == protocol::MessageType::DATA)
+-        {
+-            if (source->payloadLength < 40 ||
+-                source->payloadLength > protocol::SLOT_BYTES - sizeof(*source))
+-            {
+-                throw std::runtime_error("invalid DATA payload length");
+-            }
+-            const uint8_t* payload = reinterpret_cast<const uint8_t*>(source) + sizeof(*source);
+-            record->payload.assign(payload, payload + source->payloadLength);
+-            const uint32_t applicationBytes = source->payloadLength - 40;
+-            record->networkPacket = Create<Packet>(applicationBytes + m_overheadBytes);
+-            for (uint32_t stage = 0; stage < m_serializationStages; ++stage)
+-            {
+-                auto& free = m_egressFree[destinationEndpoint][destinationPort][stage];
+-                outputTime = std::max(outputTime, free);
+-                outputTime =
+-                    CheckedAdd(outputTime, SerializationPs(record->networkPacket->GetSize()));
+-                free = outputTime;
+-            }
+-            ++m_forwarded;
+-            m_payloadBytes += applicationBytes;
+-        }
+-        else if (type == protocol::MessageType::SYNC)
++        if (source->payloadLength < 40 ||
++            source->payloadLength > protocol::SLOT_BYTES - sizeof(*source))
+         {
+-            if (source->payloadLength != 0)
+-            {
+-                throw std::runtime_error("SYNC record carries a payload");
+-            }
+-            for (uint32_t stage = 0; stage < m_serializationStages; ++stage)
+-            {
+-                outputTime =
+-                    std::max(outputTime, m_egressFree[destinationEndpoint][destinationPort][stage]);
+-            }
++            throw std::runtime_error("invalid DATA payload length");
+         }
+-        else
++        const uint8_t* payload = reinterpret_cast<const uint8_t*>(source) + sizeof(*source);
++        record->payload.assign(payload, payload + source->payloadLength);
++        const uint32_t applicationBytes = source->payloadLength - 40;
++        record->networkPacket = Create<Packet>(applicationBytes + m_overheadBytes);
++        for (uint32_t stage = 0; stage < m_serializationStages; ++stage)
+         {
+-            throw std::runtime_error("unsupported adapter message type");
++            auto& free = m_egressFree[destinationEndpoint][destinationPort][stage];
++            outputTime = std::max(outputTime, free);
++            outputTime = CheckedAdd(outputTime, SerializationPs(record->networkPacket->GetSize()));
++            free = outputTime;
+         }
++        ++m_forwarded;
++        m_payloadBytes += applicationBytes;
+ 
+         outputTime = CheckedAdd(outputTime, m_linkDelayPs);
+         outputTime = std::max(outputTime, m_lastOutput[destinationEndpoint][destinationPort]);
+@@ -534,78 +546,57 @@ class ExternalFabric
+         ++m_events;
+     }
+ 
+-    bool UpdatePhases()
++    uint64_t SafeHorizon()
+     {
+-        bool progress = false;
+-        std::vector<uint64_t> phases(m_links.size());
+-        for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
+-        {
+-            phases[endpoint] =
+-                __atomic_load_n(&m_links[endpoint]->Ring()->localSyncPhase, __ATOMIC_ACQUIRE);
+-        }
++        uint64_t safe = std::numeric_limits<uint64_t>::max();
+         for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
+         {
+-            const uint32_t targetEid =
+-                __atomic_load_n(&m_links[endpoint]->Ring()->syncDestinationEid, __ATOMIC_ACQUIRE);
+-            uint64_t acknowledged = 0;
+-            if (targetEid != 0)
++            for (uint32_t port = 0; port < m_ports; ++port)
+             {
+-                const uint32_t peer = RouteEndpoint(targetEid);
+-                const uint32_t reverseEid =
+-                    __atomic_load_n(&m_links[peer]->Ring()->syncDestinationEid, __ATOMIC_ACQUIRE);
+-                const bool reciprocal = reverseEid != 0 && RouteEndpoint(reverseEid) == endpoint;
+-                const bool localActive = (phases[endpoint] & 1) != 0;
+-                const bool peerActive = (phases[peer] & 1) != 0;
+-                if (reciprocal && localActive == peerActive)
+-                {
+-                    acknowledged = phases[endpoint];
+-                }
+-                else if (reciprocal && localActive && !peerActive &&
+-                         phases[peer] > phases[endpoint])
+-                {
+-                    // The selected peer has crossed the OFF boundary for this
+-                    // generation, so let the still-active endpoint run to its
+-                    // matching OFF instruction.  A peer on the preceding even
+-                    // phase has not joined the new generation yet and must not
+-                    // be mistaken for a peer that has already finished it.
+-                    acknowledged = phases[endpoint] + 1;
+-                }
+-                else if (reciprocal && phases[endpoint] != 0)
++                auto& input = m_links[endpoint]->Ring()->direction[ENDPOINT_TO_SWITCH][port];
++                const uint64_t tail = __atomic_load_n(&input.tail.value, __ATOMIC_RELAXED);
++                const uint64_t head = __atomic_load_n(&input.head.value, __ATOMIC_ACQUIRE);
++                uint64_t horizon = m_ingressPromise[endpoint][port];
++                if (tail != head)
+                 {
+-                    acknowledged = phases[endpoint] - 1;
+-                }
+-                if (reciprocal && localActive && peerActive &&
+-                    m_activePhase[endpoint] != phases[endpoint])
+-                {
+-                    for (auto& port : m_egressFree[endpoint])
+-                    {
+-                        std::fill(port.begin(), port.end(), 0);
+-                    }
+-                    std::fill(m_lastOutput[endpoint].begin(), m_lastOutput[endpoint].end(), 0);
+-                    m_activePhase[endpoint] = phases[endpoint];
++                    const auto* message = reinterpret_cast<const protocol::MessageHeader*>(
++                        m_links[endpoint]->Slot(ENDPOINT_TO_SWITCH, port, tail));
++                    if (message->protocolVersion != protocol::VERSION)
++                        throw std::runtime_error("adapter protocol version mismatch");
++                    if (message->receiveTick < horizon)
++                        throw std::runtime_error("input FIFO moved behind its promise");
++                    horizon = message->receiveTick;
+                 }
+-            }
+-            auto* remote = &m_links[endpoint]->Ring()->peerSyncPhase;
+-            if (__atomic_load_n(remote, __ATOMIC_RELAXED) != acknowledged)
+-            {
+-                __atomic_store_n(remote, acknowledged, __ATOMIC_RELEASE);
+-                progress = true;
++                safe = std::min(safe, horizon);
+             }
+         }
+-        return progress;
++        return safe;
+     }
+ 
+-    bool AnySynchronizedPairActive() const
++    bool PublishGrant(uint32_t endpoint, uint32_t port)
+     {
+-        for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
+-        {
+-            if ((__atomic_load_n(&m_links[endpoint]->Ring()->localSyncPhase, __ATOMIC_ACQUIRE) &
+-                 1) != 0)
+-            {
+-                return true;
+-            }
+-        }
+-        return false;
++        if (m_lastGrant[endpoint][port] == m_virtualTime ||
++            !OutputHasRoom(endpoint, port))
++            return false;
++        auto& output = m_links[endpoint]->Ring()->direction[SWITCH_TO_ENDPOINT][port];
++        const uint64_t head = __atomic_load_n(&output.head.value, __ATOMIC_RELAXED);
++        uint8_t* slot = m_links[endpoint]->Slot(SWITCH_TO_ENDPOINT, port, head);
++        protocol::MessageHeader header{};
++        header.type = static_cast<uint32_t>(protocol::MessageType::SYNC);
++        header.sendTick = m_virtualTime;
++        header.receiveTick = std::max(CheckedAdd(m_virtualTime, m_linkDelayPs),
++                                      m_lastOutput[endpoint][port]);
++        header.sequence = m_grantSequence++;
++        header.sourcePort = port;
++        header.destinationPort = port;
++        header.protocolVersion = protocol::VERSION;
++        std::memcpy(slot, &header, sizeof(header));
++        std::atomic_thread_fence(std::memory_order_release);
++        __atomic_store_n(&output.head.value, head + 1, __ATOMIC_RELEASE);
++        m_lastGrant[endpoint][port] = m_virtualTime;
++        __atomic_add_fetch(&m_links[endpoint]->Ring()->switchSyncMessages, 1,
++                           __ATOMIC_RELEASE);
++        return true;
+     }
+ 
+     std::vector<std::unique_ptr<Mapping>> m_links;
+@@ -620,7 +611,11 @@ class ExternalFabric
+     std::vector<std::vector<std::vector<uint64_t>>> m_egressFree;
+     std::vector<std::vector<uint64_t>> m_lastOutput;
+     std::vector<std::vector<uint64_t>> m_reservedOutputs;
+-    std::vector<uint64_t> m_activePhase;
++    std::vector<std::vector<uint64_t>> m_lastGrant;
++    std::vector<std::vector<uint64_t>> m_ingressPromise;
++    uint64_t m_virtualTime{0};
++    bool m_started{false};
++    uint64_t m_grantSequence{0};
+     uint64_t m_scheduled{0};
+     uint64_t m_forwarded{0};
+     uint64_t m_payloadBytes{0};
+@@ -644,10 +639,9 @@ class NativeExternalFabric
+           m_rateGbps(rateGbps),
+           m_portMap(std::move(portMap)),
+           m_ingressPromise(paths.size(), std::vector<uint64_t>(ports)),
+-          m_lastGrant(paths.size()),
+-          m_activePhase(paths.size()),
+-          m_pendingOutputs(paths.size()),
+-          m_generationBasePs(paths.size())
++          m_lastGrant(paths.size(), std::vector<uint64_t>(ports)),
++          m_lastOutput(paths.size(), std::vector<uint64_t>(ports)),
++          m_pendingOutputs(paths.size())
+     {
+         if (paths.size() < 2 || paths.size() != m_endpointEids.size())
+         {
+@@ -693,7 +687,7 @@ class NativeExternalFabric
+                   << " switch_delay_ps=" << m_switchDelayPs << " boundary=native-ub-switch-v1\n";
+         while (!g_stopRequested)
+         {
+-            bool progress = UpdatePhases();
++            bool progress = false;
+             for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
+             {
+                 for (uint32_t port = 0; port < m_ports; ++port)
+@@ -715,7 +709,7 @@ class NativeExternalFabric
+             }
+             if (!progress)
+             {
+-                std::this_thread::sleep_for(std::chrono::microseconds(20));
++                std::this_thread::yield();
+             }
+         }
+         Simulator::Destroy();
+@@ -820,30 +814,18 @@ class NativeExternalFabric
+ 
+     uint64_t ToAbsoluteTick(uint32_t endpoint, uint64_t wireTick) const
+     {
+-        NS_ABORT_MSG_IF(wireTick >
+-                            std::numeric_limits<uint64_t>::max() - m_generationBasePs[endpoint],
+-                        "native adapter generation tick overflow");
+-        return m_generationBasePs[endpoint] + wireTick;
++        (void)endpoint;
++        return wireTick;
+     }
+ 
+     uint64_t ToWireTick(uint32_t endpoint, uint64_t absoluteTick) const
+     {
+-        NS_ABORT_MSG_IF(absoluteTick < m_generationBasePs[endpoint],
+-                        "native adapter time precedes the active generation");
+-        return absoluteTick - m_generationBasePs[endpoint];
++        (void)endpoint;
++        return absoluteTick;
+     }
+ 
+     bool PullOne(uint32_t sourceEndpoint, uint32_t sourcePort)
+     {
+-        const uint64_t localPhase =
+-            __atomic_load_n(&m_links[sourceEndpoint]->Ring()->localSyncPhase, __ATOMIC_ACQUIRE);
+-        if ((localPhase & 1) != 0 && m_activePhase[sourceEndpoint] != localPhase)
+-        {
+-            // The endpoint crossed an ON boundary after this loop's phase
+-            // snapshot. Leave its first record in place so UpdatePhases can
+-            // reset and accept the new generation before the FIFO is drained.
+-            return false;
+-        }
+         auto& input = m_links[sourceEndpoint]->Ring()->direction[ENDPOINT_TO_SWITCH][sourcePort];
+         const uint64_t tail = __atomic_load_n(&input.tail.value, __ATOMIC_RELAXED);
+         const uint64_t head = __atomic_load_n(&input.head.value, __ATOMIC_ACQUIRE);
+@@ -858,35 +840,21 @@ class NativeExternalFabric
+         {
+             throw std::runtime_error("adapter protocol version mismatch");
+         }
+-        if (source->sourcePort != sourcePort ||
+-            (source->sourceEid & 0xffffU) != (m_endpointEids[sourceEndpoint] & 0xffffU))
++        if (source->sourcePort != sourcePort)
+         {
+             throw std::runtime_error("record identity does not match ingress adapter");
+         }
+         const auto type = static_cast<protocol::MessageType>(source->type);
+         if (type == protocol::MessageType::SYNC)
+         {
+-            if (source->payloadLength != 0)
+-            {
+-                throw std::runtime_error("SYNC record carries a payload");
+-            }
+-            if (source->syncPhase != 0 && source->syncPhase != localPhase)
++            if (source->payloadLength != 0 || source->sourceEid != 0 ||
++                source->destinationEid != 0)
+             {
+-                if (source->syncPhase > localPhase)
+-                {
+-                    return false;
+-                }
+-                // A prior ROI can leave conservative promises behind the
+-                // last DATA record. Their wire-time epoch is no longer
+-                // comparable with this generation, so retire them without
+-                // updating the new promise.
+-                __atomic_store_n(&input.tail.value, tail + 1, __ATOMIC_RELEASE);
+-                return true;
++                throw std::runtime_error("link-local SYNC carries payload or EIDs");
+             }
+-            (void)RouteEndpoint(source->destinationEid);
+             m_ingressPromise[sourceEndpoint][sourcePort] =
+                 std::max(m_ingressPromise[sourceEndpoint][sourcePort],
+-                         ToAbsoluteTick(sourceEndpoint, source->receiveTick));
++                         source->receiveTick);
+             __atomic_store_n(&input.tail.value, tail + 1, __ATOMIC_RELEASE);
+             return true;
+         }
+@@ -894,6 +862,11 @@ class NativeExternalFabric
+         {
+             throw std::runtime_error("unsupported adapter message type");
+         }
++        if ((source->sourceEid & 0xffffU) !=
++            (m_endpointEids[sourceEndpoint] & 0xffffU))
++        {
++            throw std::runtime_error("record source EID does not match ingress adapter");
++        }
+         if (source->payloadLength < 40 ||
+             source->payloadLength > protocol::SLOT_BYTES - sizeof(*source))
+         {
+@@ -918,6 +891,8 @@ class NativeExternalFabric
+         {
+             throw std::runtime_error("native ingress record violates conservative virtual time");
+         }
++        m_ingressPromise[sourceEndpoint][sourcePort] = std::max(
++            m_ingressPromise[sourceEndpoint][sourcePort], absoluteReceiveTick);
+ 
+         auto record = std::make_shared<PendingRecord>();
+         record->header = *source;
+@@ -1017,6 +992,8 @@ class NativeExternalFabric
+         header.flags = tag.m_flags;
+         header.sourceEid = tag.m_sourceEid;
+         header.destinationEid = tag.m_destinationEid;
++        m_lastOutput[endpoint][destinationPort] = std::max(
++            m_lastOutput[endpoint][destinationPort], header.receiveTick);
+         std::memcpy(slot, &header, sizeof(header));
+         packet->CopyData(slot + sizeof(header), packet->GetSize());
+         std::atomic_thread_fence(std::memory_order_release);
+@@ -1025,45 +1002,11 @@ class NativeExternalFabric
+         ++m_events;
+     }
+ 
+-    bool IsRendezvoused(uint32_t endpoint) const
+-    {
+-        const uint64_t phase =
+-            __atomic_load_n(&m_links[endpoint]->Ring()->localSyncPhase, __ATOMIC_ACQUIRE);
+-        if ((phase & 1) == 0)
+-        {
+-            return false;
+-        }
+-        const uint32_t targetEid =
+-            __atomic_load_n(&m_links[endpoint]->Ring()->syncDestinationEid, __ATOMIC_ACQUIRE);
+-        if (targetEid == 0)
+-        {
+-            return false;
+-        }
+-        const uint32_t peer = RouteEndpoint(targetEid);
+-        const uint64_t peerPhase =
+-            __atomic_load_n(&m_links[peer]->Ring()->localSyncPhase, __ATOMIC_ACQUIRE);
+-        const uint32_t reverseEid =
+-            __atomic_load_n(&m_links[peer]->Ring()->syncDestinationEid, __ATOMIC_ACQUIRE);
+-        return (peerPhase & 1) != 0 && reverseEid != 0 && RouteEndpoint(reverseEid) == endpoint;
+-    }
+-
+     uint64_t SafeHorizon() const
+     {
+         uint64_t safe = std::numeric_limits<uint64_t>::max();
+-        bool anyActive = false;
+         for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
+         {
+-            const uint64_t phase =
+-                __atomic_load_n(&m_links[endpoint]->Ring()->localSyncPhase, __ATOMIC_ACQUIRE);
+-            if ((phase & 1) == 0)
+-            {
+-                continue;
+-            }
+-            if (!IsRendezvoused(endpoint))
+-            {
+-                return 0;
+-            }
+-            anyActive = true;
+             for (uint32_t port = 0; port < m_ports; ++port)
+             {
+                 if (m_ingressPromise[endpoint][port] == 0)
+@@ -1073,23 +1016,13 @@ class NativeExternalFabric
+                 safe = std::min(safe, m_ingressPromise[endpoint][port]);
+             }
+         }
+-        return anyActive ? safe : 0;
++        return safe;
+     }
+ 
+     bool GrantsHaveRoom() const
+     {
+         for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
+         {
+-            const uint64_t phase =
+-                __atomic_load_n(&m_links[endpoint]->Ring()->localSyncPhase, __ATOMIC_ACQUIRE);
+-            if ((phase & 1) == 0)
+-            {
+-                continue;
+-            }
+-            if (!IsRendezvoused(endpoint))
+-            {
+-                return false;
+-            }
+             for (uint32_t port = 0; port < m_ports; ++port)
+             {
+                 if (!OutputHasRoom(endpoint, port))
+@@ -1114,103 +1047,33 @@ class NativeExternalFabric
+     {
+         for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
+         {
+-            const uint64_t phase =
+-                __atomic_load_n(&m_links[endpoint]->Ring()->localSyncPhase, __ATOMIC_ACQUIRE);
+-            if ((phase & 1) == 0 || !IsRendezvoused(endpoint) || m_lastGrant[endpoint] >= safe)
+-            {
+-                continue;
+-            }
+-            if (m_lastGrant[endpoint] == 0)
+-            {
+-                std::cerr << "[NS3_UB_SYNC_GENERATION] endpoint=" << endpoint << " phase=" << phase
+-                          << " first_grant=" << safe << '\n';
+-            }
+-            const uint32_t sourceEid =
+-                __atomic_load_n(&m_links[endpoint]->Ring()->syncDestinationEid, __ATOMIC_ACQUIRE);
+             for (uint32_t port = 0; port < m_ports; ++port)
+             {
++                if (m_lastGrant[endpoint][port] >= safe)
++                    continue;
+                 auto& output = m_links[endpoint]->Ring()->direction[SWITCH_TO_ENDPOINT][port];
+                 const uint64_t head = __atomic_load_n(&output.head.value, __ATOMIC_RELAXED);
+                 uint8_t* slot = m_links[endpoint]->Slot(SWITCH_TO_ENDPOINT, port, head);
+                 protocol::MessageHeader header{};
+                 header.type = static_cast<uint32_t>(protocol::MessageType::SYNC);
+-                header.sendTick = ToWireTick(endpoint, safe);
+-                header.receiveTick = ToWireTick(endpoint, safe);
++                header.sendTick = safe;
++                // Native ns-3 owns the egress link. A direct null-message
++                // grant at the current safe horizon is conservative; using
++                // safe+link here could overtake an already injected packet
++                // whose ns-3 delivery event lies between those two times.
++                header.receiveTick = std::max(safe, m_lastOutput[endpoint][port]);
+                 header.sequence = m_grantSequence++;
+                 header.sourcePort = port;
+                 header.destinationPort = port;
+                 header.protocolVersion = protocol::VERSION;
+-                header.sourceEid = sourceEid;
+-                header.destinationEid = m_endpointEids[endpoint];
+-                header.syncPhase = phase;
+                 std::memcpy(slot, &header, sizeof(header));
+                 std::atomic_thread_fence(std::memory_order_release);
+                 __atomic_store_n(&output.head.value, head + 1, __ATOMIC_RELEASE);
+-            }
+-            m_lastGrant[endpoint] = safe;
+-        }
+-    }
+-
+-    bool UpdatePhases()
+-    {
+-        bool progress = false;
+-        std::vector<uint64_t> phases(m_links.size());
+-        for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
+-        {
+-            phases[endpoint] =
+-                __atomic_load_n(&m_links[endpoint]->Ring()->localSyncPhase, __ATOMIC_ACQUIRE);
+-        }
+-        for (uint32_t endpoint = 0; endpoint < m_links.size(); ++endpoint)
+-        {
+-            const uint32_t targetEid =
+-                __atomic_load_n(&m_links[endpoint]->Ring()->syncDestinationEid, __ATOMIC_ACQUIRE);
+-            uint64_t acknowledged = 0;
+-            if (targetEid != 0)
+-            {
+-                const uint32_t peer = RouteEndpoint(targetEid);
+-                const uint32_t reverseEid =
+-                    __atomic_load_n(&m_links[peer]->Ring()->syncDestinationEid, __ATOMIC_ACQUIRE);
+-                const bool reciprocal = reverseEid != 0 && RouteEndpoint(reverseEid) == endpoint;
+-                const bool localActive = (phases[endpoint] & 1) != 0;
+-                const bool peerActive = (phases[peer] & 1) != 0;
+-                if (localActive && m_activePhase[endpoint] != phases[endpoint])
+-                {
+-                    // Reset at the local ON transition. The first promise may
+-                    // arrive before the peer reaches the same generation; a
+-                    // later reset would forget an already-consumed promise.
+-                    std::fill(m_ingressPromise[endpoint].begin(),
+-                              m_ingressPromise[endpoint].end(),
+-                              0);
+-                    m_lastGrant[endpoint] = 0;
+-                    m_activePhase[endpoint] = phases[endpoint];
+-                    m_generationBasePs[endpoint] =
+-                        static_cast<uint64_t>(Simulator::Now().GetPicoSeconds());
+-                    std::cerr << "[NS3_UB_SYNC_GENERATION] endpoint=" << endpoint
+-                              << " phase=" << phases[endpoint]
+-                              << " base_ps=" << m_generationBasePs[endpoint] << " reset\n";
+-                }
+-                if (reciprocal && localActive == peerActive)
+-                {
+-                    acknowledged = phases[endpoint];
+-                }
+-                else if (reciprocal && localActive && !peerActive &&
+-                         phases[peer] > phases[endpoint])
+-                {
+-                    acknowledged = phases[endpoint] + 1;
+-                }
+-                else if (reciprocal && phases[endpoint] != 0)
+-                {
+-                    acknowledged = phases[endpoint] - 1;
+-                }
+-            }
+-            auto* remote = &m_links[endpoint]->Ring()->peerSyncPhase;
+-            if (__atomic_load_n(remote, __ATOMIC_RELAXED) != acknowledged)
+-            {
+-                __atomic_store_n(remote, acknowledged, __ATOMIC_RELEASE);
+-                progress = true;
++                m_lastGrant[endpoint][port] = safe;
++                __atomic_add_fetch(&m_links[endpoint]->Ring()->switchSyncMessages,
++                                   1, __ATOMIC_RELEASE);
+             }
+         }
+-        return progress;
+     }
+ 
+     std::vector<std::unique_ptr<Mapping>> m_links;
+@@ -1227,10 +1090,9 @@ class NativeExternalFabric
+     Ptr<UbSwitch> m_switch;
+     std::vector<Ptr<UbPort>> m_switchPorts;
+     std::vector<std::vector<uint64_t>> m_ingressPromise;
+-    std::vector<uint64_t> m_lastGrant;
+-    std::vector<uint64_t> m_activePhase;
++    std::vector<std::vector<uint64_t>> m_lastGrant;
++    std::vector<std::vector<uint64_t>> m_lastOutput;
+     std::vector<uint64_t> m_pendingOutputs;
+-    std::vector<uint64_t> m_generationBasePs;
+     uint64_t m_grantSequence{0};
+     uint64_t m_forwarded{0};
+     uint64_t m_payloadBytes{0};
+diff --git a/src/unified-bus/model/ub-external-adapter-protocol.h b/src/unified-bus/model/ub-external-adapter-protocol.h
+index 35dc6bdf..85c628b4 100644
+--- a/src/unified-bus/model/ub-external-adapter-protocol.h
++++ b/src/unified-bus/model/ub-external-adapter-protocol.h
+@@ -9,7 +9,7 @@ namespace ns3::ub_external
+ {
+ 
+ constexpr uint64_t MAGIC = 0x4f55554241445054ULL;
+-constexpr uint32_t VERSION = 3;
++constexpr uint32_t VERSION = 4;
+ constexpr uint32_t RING_SLOTS = 64;
+ constexpr uint32_t SLOT_BYTES = 8192;
+ constexpr uint32_t MAX_PORTS = 16;
+@@ -40,7 +40,7 @@ struct alignas(64) MessageHeader
+     uint16_t flags;
+     uint32_t sourceEid;
+     uint32_t destinationEid;
+-    uint64_t syncPhase;
++    uint64_t syncReserved;
+     uint8_t reserved[8];
+ };
+ 
+@@ -52,10 +52,10 @@ struct alignas(4096) Ring
+         RingIndex tail;
+     } direction[2][MAX_PORTS];
+ 
+-    uint64_t localSyncPhase;
+-    uint64_t peerSyncPhase;
++    uint64_t endpointSyncMessages;
++    uint64_t switchSyncMessages;
+     uint32_t localEid;
+-    uint32_t syncDestinationEid;
++    uint32_t controlReserved32;
+     uint8_t controlReserved[4072];
+ };
+ 
+-- 
+2.50.1 (Apple Git-155)
+
