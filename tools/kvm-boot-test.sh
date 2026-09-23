@@ -61,5 +61,6 @@ exec "$gem5" --listener-mode=on --outdir="$run_dir" "$config" \
     --kernel="$kernel" --initrd="$initrd" --root-device=/dev/ram \
     --cpu="$cpu_mode" --num-cpus=1 --benchmark-cpu=0 \
     --m5ops-base=0x10010000 --dma-backend="$dma_backend" \
+    --udma-poll-interval="${OPENURMA_UDMA_POLL_INTERVAL:-1ms}" \
     --terminal-port="$terminal_port" \
     --extra-cmdline="openurma_node=0 openurma_provider=$provider"

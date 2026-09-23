@@ -680,7 +680,7 @@ case "$profile" in
         # the UB adapter and switch remain simulator-owned.  The host CPU is
         # intentionally not presented as a timing model.
         profile_provider=udma
-        profile_revision=udma400-kvm-functional-v1
+        profile_revision=udma400-kvm-functional-v2
         profile_cpu_mode=kvm
         profile_cpu_freq=3GHz
         profile_num_cpus=1
@@ -698,6 +698,13 @@ case "$profile" in
         profile_sq_wqebb_latency=0ns
         profile_payload_dma_latency=0ns
         profile_payload_dma_rate_gbps=0
+        # A cross-process UDMA endpoint otherwise wakes an idle KVM vCPU on
+        # every 10-ns ring poll, even while both guests are merely booting.
+        # During a synchronized ROI the adapter lookahead event drains DATA
+        # at its exact timestamp and explicitly kicks the worker, so this
+        # coarse fallback applies only when no synchronization event can
+        # deliver cross-process work.
+        profile_udma_poll_interval=1ms
         ;;
     server)
         # Generic reduced-core Arm server slice.  It deliberately does not
@@ -1037,6 +1044,14 @@ provider="${OPENURMA_PROVIDER:-$profile_provider}"
 [[ -n "$cli_udma_iotlb_entries" ]] && udma_iotlb_entries=$cli_udma_iotlb_entries
 [[ -n "$cli_dma_max_outstanding" ]] && dma_max_outstanding=$cli_dma_max_outstanding
 [[ -n "$cli_provider" ]] && provider=$cli_provider
+
+# CPU mode may be overridden independently of --profile. Preserve an explicit
+# CLI/environment poll value, but never accidentally pair KVM with the generic
+# 10-ns idle fallback inherited from another profile.
+if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]] &&
+   [[ -z "$cli_udma_poll_interval" && -z "${OPENURMA_UDMA_POLL_INTERVAL+x}" ]]; then
+    udma_poll_interval=1ms
+fi
 
 if [[ "$provider" == official ]]; then
     default_dma_backend=udma

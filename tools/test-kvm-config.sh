@@ -14,7 +14,20 @@ grep -qx 'cpu_boot_model=ArmV8KvmCPU' "$tmp/kvm"
 grep -qx 'initial_memory_mode=atomic_noncaching' "$tmp/kvm"
 grep -qx 'm5ops_mode=addr' "$tmp/kvm"
 grep -qx 'cpu_count=1' "$tmp/kvm"
+grep -qx 'udma_poll_interval=1ms' "$tmp/kvm"
 grep -qx 'kvm_host_cpu_contract=portable_udma_provider' "$tmp/kvm"
+
+OPENURMA_EXECUTION_MODE=native "$lab/run-dual.sh" --profile fast \
+    --print-config >"$tmp/fast"
+grep -qx 'udma_poll_interval=10ns' "$tmp/fast"
+
+OPENURMA_EXECUTION_MODE=native "$lab/run-dual.sh" --profile fast \
+    --cpu-mode kvm --print-config >"$tmp/kvm-override"
+grep -qx 'udma_poll_interval=1ms' "$tmp/kvm-override"
+
+OPENURMA_EXECUTION_MODE=native OPENURMA_UDMA_POLL_INTERVAL=25us \
+    "$lab/run-dual.sh" --profile kvm --print-config >"$tmp/kvm-explicit"
+grep -qx 'udma_poll_interval=25us' "$tmp/kvm-explicit"
 
 if OPENURMA_EXECUTION_MODE=native "$lab/run-dual.sh" --profile kvm \
         --num-cpus 2 --print-config >"$tmp/invalid" 2>&1; then

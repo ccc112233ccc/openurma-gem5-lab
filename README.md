@@ -62,7 +62,7 @@ cd openurma-gem5-lab
 
 `kvm` 只加速 guest 指令，UDMA/UMMU、IRQ、UB 链路和 switch 仍由仿真器
 执行；它不用于 CPU/cache 时延预测，并且当前限制为 1 vCPU。定时器选择、
-官方 provider 的宿主 CPU/KSVA 差异和诊断方法见
+双节点空 ring 轮询退避、官方 provider 的宿主 CPU/KSVA 差异和诊断方法见
 [`docs/kvm-functional-mode.md`](docs/kvm-functional-mode.md)。
 
 原有 `./setup.sh` 保留为 `setup-docker.sh` 的兼容入口。Docker 包装层完成以下工作：
