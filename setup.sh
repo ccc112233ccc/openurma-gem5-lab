@@ -8,21 +8,25 @@ container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
 kernel_volume="${OPENURMA_KERNEL_VOLUME:-openurma-gem5-lab-kernel}"
 jobs="${JOBS:-2}"
 sources_only=0
+enable_kvm=0
 
 usage() {
     cat <<'EOF'
-Usage: ./setup.sh [--sources-only] [--jobs N]
+Usage: ./setup.sh [--sources-only] [--kvm] [--jobs N]
 
 Build the ARM64 Ubuntu image, create the persistent container, then invoke
 setup-native.sh inside it. The native and Docker paths therefore share source,
 build, and validation logic.
 --sources-only stops after fetching and validating the source trees.
+--kvm requires an ARM64 Linux host with /dev/kvm and passes that device into
+the persistent container. It is not available through Docker Desktop on macOS.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --sources-only) sources_only=1; shift ;;
+        --kvm) enable_kvm=1; shift ;;
         --jobs) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; jobs=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "setup.sh: unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -31,6 +35,16 @@ done
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo "setup.sh: --jobs must be positive" >&2; exit 2; }
 command -v docker >/dev/null || { echo "setup.sh: Docker is required" >&2; exit 1; }
 docker info >/dev/null
+if (( enable_kvm )); then
+    [[ "$(uname -s)" == Linux && "$(uname -m)" == aarch64 ]] || {
+        echo "setup.sh: --kvm requires an ARM64 Linux Docker host" >&2
+        exit 2
+    }
+    [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] || {
+        echo "setup.sh: --kvm requires readable/writable /dev/kvm" >&2
+        exit 2
+    }
+fi
 
 echo "[setup] building $image"
 docker build --provenance=false --platform linux/arm64 -t "$image" \
@@ -41,13 +55,18 @@ if docker container inspect "$container" >/dev/null 2>&1; then
     desired_image=$(docker image inspect -f '{{.Id}}' "$image")
     current_image=$(docker inspect -f '{{.Image}}' "$container")
     current_lab=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/workspace/openurma-gem5-lab"}}{{.Source}}{{end}}{{end}}' "$container")
-    if [[ "$current_image" != "$desired_image" || "$current_lab" != "$script_dir" ]]; then
-        echo "[setup] replacing $container because its image or workspace mount changed"
+    current_kvm=$(docker inspect -f '{{range .HostConfig.Devices}}{{if eq .PathInContainer "/dev/kvm"}}yes{{end}}{{end}}' "$container")
+    if [[ "$current_image" != "$desired_image" || "$current_lab" != "$script_dir" || \
+          ( "$enable_kvm" == 1 && "$current_kvm" != yes ) ]]; then
+        echo "[setup] replacing $container because its image, workspace mount, or KVM device contract changed"
         docker rm -f "$container" >/dev/null
     fi
 fi
 if ! docker container inspect "$container" >/dev/null 2>&1; then
+    docker_kvm_args=()
+    (( enable_kvm == 0 )) || docker_kvm_args+=(--device /dev/kvm:/dev/kvm)
     docker run -d --name "$container" --platform linux/arm64 \
+        "${docker_kvm_args[@]}" \
         --label openurma.gem5.lab=managed \
         --mount "type=bind,src=$script_dir,dst=/workspace/openurma-gem5-lab" \
         --mount "type=volume,src=$kernel_volume,dst=/opt/openurma-gem5-lab" \

@@ -17,12 +17,13 @@ can also be supplied through the environment variable shown below.
 
 Profiles:
   --nodes N                     OPENURMA_NODE_COUNT (default: 2; 2..8)
-  --profile fast|server|udma400|legacy
+  --profile fast|kvm|server|udma400|legacy
                                 OPENURMA_DUAL_PROFILE (default: fast;
                                 fast is the AtomicSimpleCPU functional path)
 
 CPU, cache, and memory:
-  --cpu-mode MODE               OPENURMA_CPU_MODE (atomic_fast is fastest;
+  --cpu-mode MODE               OPENURMA_CPU_MODE (atomic_fast is portable;
+                                kvm is the fastest functional ARM64 path;
                                 server_o3 uses Atomic boot + ArmO3 ROI)
   --m5ops-base HEX              OPENURMA_M5OPS_BASE (VExpress m5ops MMIO ABI)
   --cpu-freq FREQ               OPENURMA_CPU_FREQ
@@ -674,6 +675,30 @@ case "$profile" in
         profile_payload_dma_latency=0ns
         profile_payload_dma_rate_gbps=0
         ;;
+    kvm)
+        # KVM accelerates guest instructions only.  UDMA, UMMU, interrupts,
+        # the UB adapter and switch remain simulator-owned.  The host CPU is
+        # intentionally not presented as a timing model.
+        profile_provider=udma
+        profile_revision=udma400-kvm-functional-v1
+        profile_cpu_mode=kvm
+        profile_cpu_freq=3GHz
+        profile_num_cpus=1
+        profile_benchmark_cpu=0
+        profile_peer_link_rate_gbps=400
+        profile_peer_serialization_stages=1
+        profile_peer_switch_delay=0ns
+        profile_peer_link_overhead_bytes=0
+        profile_sq_control_bytes=48
+        profile_wqebb_bytes=64
+        profile_sq_sge_bytes=16
+        profile_direct_wqe_max_blocks=0
+        profile_direct_wqe_latency=0ns
+        profile_sq_fetch_latency=0ns
+        profile_sq_wqebb_latency=0ns
+        profile_payload_dma_latency=0ns
+        profile_payload_dma_rate_gbps=0
+        ;;
     server)
         # Generic reduced-core Arm server slice.  It deliberately does not
         # claim to reproduce a named CPU: stock gem5 ArmO3 supplies the core,
@@ -776,7 +801,7 @@ case "$profile" in
         profile_payload_dma_latency=0ns
         profile_payload_dma_rate_gbps=0
         ;;
-    *) die "unknown profile '$profile'; expected fast, server, udma400, or legacy" ;;
+    *) die "unknown profile '$profile'; expected fast, kvm, server, udma400, or legacy" ;;
 esac
 
 cpu_mode="${OPENURMA_CPU_MODE:-${OPENURMA_DUAL_CPU:-$profile_cpu_mode}}"
@@ -1019,6 +1044,15 @@ else
     default_dma_backend=$provider
 fi
 dma_backend="${OPENURMA_DMA_BACKEND:-$default_dma_backend}"
+kvm_host_cpu_contract=not_applicable
+if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]]; then
+    if [[ "$provider" == official ]]; then
+        kvm_host_cpu_contract=official_provider_host_dependent_ksva
+        echo "run-dual.sh: warning: the official provider under KVM sees host ARM CPU address-width/ASID capabilities; if they exceed the modeled UMMU (currently 40-bit OAS), UMMU_FEAT_SVA is cleared and KSVA enable fails. Use --provider udma for portable KVM validation." >&2
+    else
+        kvm_host_cpu_contract=portable_udma_provider
+    fi
+fi
 
 # These labels describe executable simulator mechanisms, not latency-fit
 # inputs.  Every non-legacy DMA operation enters the native gem5 RequestPort;
@@ -1033,31 +1067,42 @@ fi
 udma_address_translation=context_pgd_control_abi_v2
 dma_request_segmentation=cacheline_and_4KiB_boundaries
 udma_iotlb_policy=fully_associative_lru_4KiB_context_tagged
-if [[ "$cpu_mode" == server_o3 ]]; then
+if [[ "$cpu_mode" == server_o3 || "$cpu_mode" == kvm_server_o3 ]]; then
     cpu_switch_policy=send_lat_roi_enter_o3_exit_atomic
-    cpu_boot_model=AtomicSimpleCPU
+    if [[ "$cpu_mode" == kvm_server_o3 ]]; then
+        cpu_boot_model=ArmV8KvmCPU
+        initial_memory_mode=atomic_noncaching
+        m5ops_mode=addr
+    else
+        cpu_boot_model=AtomicSimpleCPU
+        initial_memory_mode=atomic
+        m5ops_mode=inst
+    fi
     cpu_roi_model=ArmO3CPU
-    initial_memory_mode=atomic
     online_cpu_count=$num_cpus
     cpu_event_queue_policy=single_event_queue
-    m5ops_mode=inst
 else
     cpu_switch_policy=none
     case "$cpu_mode" in
         atomic|atomic_hot|atomic_fast|atomic_cache) cpu_model=AtomicSimpleCPU ;;
         timing|timing_nocache|timing_full) cpu_model=TimingSimpleCPU ;;
         o3) cpu_model=ArmO3CPU ;;
+        kvm) cpu_model=ArmV8KvmCPU ;;
         *) die "invalid CPU mode '$cpu_mode'" ;;
     esac
     cpu_boot_model=$cpu_model
     cpu_roi_model=$cpu_model
     case "$cpu_mode" in
+        kvm) initial_memory_mode=atomic_noncaching ;;
         timing*|o3) initial_memory_mode=timing ;;
         *) initial_memory_mode=atomic ;;
     esac
     online_cpu_count=$num_cpus
     cpu_event_queue_policy=single_event_queue
-    m5ops_mode=inst
+    case "$cpu_mode" in
+        kvm) m5ops_mode=addr ;;
+        *) m5ops_mode=inst ;;
+    esac
 fi
 
 lab_host="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1141,9 +1186,15 @@ case "$benchmark_cpu" in
     *) die "benchmark CPU must be -1 or a non-negative decimal integer" ;;
 esac
 case "$cpu_mode" in
-    atomic|atomic_hot|atomic_fast|atomic_cache|timing|timing_nocache|timing_full|o3|server_o3) ;;
+    atomic|atomic_hot|atomic_fast|atomic_cache|timing|timing_nocache|timing_full|o3|server_o3|kvm|kvm_server_o3) ;;
     *) die "invalid CPU mode '$cpu_mode'" ;;
 esac
+if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]]; then
+    (( num_cpus == 1 )) ||
+        die "KVM modes currently require --num-cpus=1; multi-vCPU event queues are not validated with distributed UB synchronization"
+    (( benchmark_cpu == -1 || benchmark_cpu == 0 )) ||
+        die "KVM modes bring only CPU0 online; use --benchmark-cpu=0"
+fi
 [[ "$m5ops_base" =~ ^0[xX][0-9a-fA-F]+$ ]] ||
     die "m5ops base must be a hexadecimal physical address (for example 0x10010000)"
 (( m5ops_base > 0 && (m5ops_base & 65535) == 0 )) ||
@@ -1376,6 +1427,7 @@ cpu_switch_policy=$cpu_switch_policy
 cpu_count=$num_cpus
 online_cpu_count=$online_cpu_count
 cpu_event_queue_policy=$cpu_event_queue_policy
+kvm_host_cpu_contract=$kvm_host_cpu_contract
 benchmark_cpu=$benchmark_cpu
 o3_width=$o3_width
 o3_rob_entries=$o3_rob_entries
@@ -1523,6 +1575,9 @@ for path in "$gem5" "$kernel" "$initrd" "$config" "$switch_config" \
             "$lab/tools/run-background.sh"; do
     ou_exec test -f "$path" || die "missing in runtime environment: $path"
 done
+if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]]; then
+    ou_exec bash "$lab/tools/kvm-preflight.sh" "$gem5"
+fi
 
 # The default image records both its own digest and the exact paths/digests of
 # mutable build inputs. Refuse an overwritten archive or a source/image skew.

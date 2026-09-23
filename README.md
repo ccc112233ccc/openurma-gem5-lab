@@ -52,6 +52,19 @@ cd openurma-gem5-lab
 ./setup-docker.sh --jobs 2
 ```
 
+在 ARM64 Linux KVM 主机上可使用功能加速模式。原生环境直接启动；Docker
+容器必须在创建时映射 `/dev/kvm`：
+
+```bash
+./setup-docker.sh --kvm --jobs 8
+./run-dual.sh --profile kvm
+```
+
+`kvm` 只加速 guest 指令，UDMA/UMMU、IRQ、UB 链路和 switch 仍由仿真器
+执行；它不用于 CPU/cache 时延预测，并且当前限制为 1 vCPU。定时器选择、
+官方 provider 的宿主 CPU/KSVA 差异和诊断方法见
+[`docs/kvm-functional-mode.md`](docs/kvm-functional-mode.md)。
+
 原有 `./setup.sh` 保留为 `setup-docker.sh` 的兼容入口。Docker 包装层完成以下工作：
 
 1. 构建 Ubuntu 22.04 ARM64 工具容器；

@@ -33,6 +33,7 @@ UPSTREAM = OPENURMA_ROOT / (
     "eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py"
 )
 UNSAFE_EARLY_EL2_FEATURES = {"FEAT_HCX", "FEAT_SME"}
+KVM_CPU_MODES = ("kvm", "kvm_server_o3")
 OFFICIAL_UDMA_UBRT = 0x2D010000
 # SPIs 100..103 are the VExpress PCI INTx range and are occupied when the
 # dual-node OOB e1000 is present.  The matching UBIOS entry is emitted by the
@@ -123,9 +124,16 @@ def create_olk66_compatible(args):
     # initialization pending on a frame that it can never use and fall back to
     # the 250 Hz jiffies clock.  The CP15 timer is complete and sufficient for
     # this SMP guest, so omit only the unusable MMIO DT node.
+    kvm_boot = getattr(args, "cpu", None) in KVM_CPU_MODES
     original_timer_dtb = GenericTimerMem.generateDeviceTree
     original_system_dtb = ArmSystem.generateDeviceTree
-    GenericTimerMem.generateDeviceTree = _omit_mmio_timer_from_dtb
+    # The upstream KVM path suppresses the CP15 timer because an EL1 KVM
+    # guest would otherwise observe the host counter.  Keep the MMIO timer in
+    # that mode; suppressing both nodes leaves Linux with no usable timer.
+    # Interpreted CPUs keep the existing CP15-only topology because direct
+    # boot provides no secure firmware to grant non-secure CNTACR access.
+    if not kvm_boot:
+        GenericTimerMem.generateDeviceTree = _omit_mmio_timer_from_dtb
     if args.official_udma_discovery:
         ArmSystem.generateDeviceTree = _official_udma_device_tree(
             original_system_dtb
@@ -135,7 +143,10 @@ def create_olk66_compatible(args):
     finally:
         GenericTimerMem.generateDeviceTree = original_timer_dtb
         ArmSystem.generateDeviceTree = original_system_dtb
-    timer_message = "DT advertises CP15 timer only"
+    timer_message = (
+        "DT advertises platform MMIO timer (KVM boot)"
+        if kvm_boot else "DT advertises CP15 timer only"
+    )
     kept = []  # Preserve every extension that direct EL2 boot can expose.
     removed = []
     for extension in system.release.extensions:
