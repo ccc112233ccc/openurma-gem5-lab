@@ -48,7 +48,8 @@ int RunHost(const std::string& socket)
     host_proto::Interface interface{};
     SimbricksBaseIfParams params{};
     host_proto::DefaultParams(&params);
-    host_proto::HostIntro host_intro{host_proto::kVersion, 64, 0};
+    host_proto::HostIntro host_intro{
+        host_proto::kVersion, 64, 0, 0x2d000000, 0x01000000};
     host_proto::DeviceIntro device_intro{};
     if (!Connect(interface.base, params, socket, &host_intro, sizeof(host_intro),
                  &device_intro, sizeof(device_intro))) return 10;

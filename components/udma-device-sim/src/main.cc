@@ -31,6 +31,7 @@ struct Options {
     std::uint64_t link_latency_ps{100000};
     std::uint64_t sync_interval_ps{100000};
     SimbricksBaseIfSyncMode sync_mode{kSimbricksBaseIfSyncOptional};
+    bool extraction_test_abi{false};
 };
 
 bool ParseUnsigned(const char* value, std::uint64_t& output)
@@ -61,6 +62,8 @@ bool ParseOptions(int argc, char** argv, Options& options)
             else if (mode == "optional") options.sync_mode = kSimbricksBaseIfSyncOptional;
             else if (mode == "required") options.sync_mode = kSimbricksBaseIfSyncRequired;
             else return false;
+        } else if (arg == "--test-abi") {
+            options.extraction_test_abi = true;
         } else {
             return false;
         }
@@ -182,8 +185,13 @@ class HostPort final : public device::HostInterface {
         response->completion.request_id = request.request_id;
         response->completion.length = request.length;
         bool ok = true;
-        if (write) ok = model_->WriteMmio(request.offset, request.length, request.value);
-        else response->completion.value = model_->ReadMmio(request.offset, request.length);
+        if (write) {
+            ok = model_->WriteMmio(request.offset, request.length, request.value);
+        } else {
+            std::uint64_t value{};
+            ok = model_->ReadMmio(request.offset, request.length, value);
+            response->completion.value = value;
+        }
         response->completion.status = static_cast<std::uint16_t>(
             ok ? host_proto::Status::Success : host_proto::Status::InvalidAddress);
         host_proto::UbHostD2HOutSend(
@@ -311,7 +319,7 @@ int Run(const Options& options)
     device_intro.irq_count = 1;
     device_intro.port_count = 2;
     device_intro.device_id = device::UdmaModel::kIdentity;
-    device_intro.regions[0].size = 0x10000;
+    device_intro.regions[0].size = device::UdmaModel::kOfficialApertureBytes;
     host_proto::HostIntro host_intro{};
     net_proto::Intro net_intro{net_proto::kVersion, 2, 16384, 32, 0};
     net_proto::Intro peer_net_intro{};
@@ -326,7 +334,11 @@ int Run(const Options& options)
     std::uint64_t now = 0;
     HostPort host(host_if, now);
     NetworkPort network(net_if, now);
-    device::UdmaModel model(host, network);
+    device::UdmaModel::Config model_config{};
+    model_config.mmio_base = host_intro.mmio_base;
+    model_config.port_count = device_intro.port_count;
+    model_config.extraction_test_abi = options.extraction_test_abi;
+    device::UdmaModel model(host, network, model_config);
     host.Attach(&model);
     network.Attach(&model);
     std::cout << "udma-device-sim: connected host=" << options.host_socket
@@ -357,7 +369,8 @@ int main(int argc, char** argv)
     if (!ParseOptions(argc, argv, options)) {
         std::cerr << "usage: udma-device-sim --host-socket PATH --net-socket PATH "
                      "--shm PATH [--sync off|optional|required] "
-                     "[--link-latency-ps N] [--sync-interval-ps N]\n";
+                     "[--link-latency-ps N] [--sync-interval-ps N] "
+                     "[--test-abi]\n";
         return 2;
     }
     std::signal(SIGINT, Stop);

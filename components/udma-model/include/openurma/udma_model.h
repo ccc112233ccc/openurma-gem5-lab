@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -62,14 +63,27 @@ static_assert(sizeof(CompletionEntry) == 16);
 
 class UdmaModel {
   public:
+    struct Config {
+        std::uint64_t mmio_base{};
+        std::uint32_t port_count{2};
+        // Temporary descriptor ABI used only by the extraction contract test.
+        // Production device processes leave this false.
+        bool extraction_test_abi{false};
+    };
+
     static constexpr std::uint64_t kRegisterIdentity = 0x0000;
     static constexpr std::uint64_t kRegisterStatus = 0x0008;
     static constexpr std::uint64_t kRegisterDoorbell = 0x0100;
     static constexpr std::uint64_t kIdentity = 0x4f50454e55444d41ULL;
 
+    static constexpr std::uint64_t kOfficialApertureBytes = 0x01000000;
+
     UdmaModel(HostInterface& host, NetworkInterface& network);
+    UdmaModel(HostInterface& host, NetworkInterface& network, Config config);
 
     std::uint64_t ReadMmio(std::uint64_t offset, std::uint32_t length) const;
+    bool ReadMmio(std::uint64_t offset, std::uint32_t length,
+                  std::uint64_t& value) const;
     bool WriteMmio(std::uint64_t offset, std::uint32_t length,
                    std::uint64_t value);
     void Receive(Frame frame);
@@ -82,9 +96,37 @@ class UdmaModel {
     void FetchPayload(std::uint64_t sequence, Descriptor descriptor);
     void Finish(std::uint64_t sequence, const Descriptor& descriptor,
                 std::uint32_t status);
+    void KickUbios(std::uint32_t producer);
+    void ProcessNextUbios();
+    void HandleUbiosSqe(std::vector<std::uint8_t> sqe);
+    void HandleUbiosPayload(std::vector<std::uint8_t> sqe,
+                            std::vector<std::uint8_t> request);
+    bool BuildUbiosResponse(const std::vector<std::uint8_t>& request,
+                            std::uint8_t task_type, std::uint8_t opcode,
+                            std::vector<std::uint8_t>& response,
+                            std::uint8_t& response_opcode);
+    std::uint32_t UbiosConfigRead(std::uint32_t address,
+                                  bool endpoint) const;
+    void UbiosConfigWrite(std::uint32_t address, std::uint32_t byte_enable,
+                          std::uint32_t value, bool endpoint);
+    void FailUbios();
 
     HostInterface& host_;
     NetworkInterface& network_;
+    Config config_;
+    std::array<std::uint8_t, 0x5000> ummu_registers_{};
+    std::array<std::uint32_t, 0x120 / sizeof(std::uint32_t)>
+        ubios_message_queue_registers_{};
+    std::array<std::uint32_t, 0x2c / sizeof(std::uint32_t)>
+        ubase_command_queue_registers_{};
+    std::uint32_t ubase_command_source_{};
+    std::unordered_map<std::uint32_t, std::uint32_t> ubios_root_config_;
+    std::unordered_map<std::uint32_t, std::uint32_t> ubios_endpoint_config_;
+    std::uint32_t ubios_root_cna_{};
+    std::uint32_t ubios_endpoint_cna_{};
+    std::uint32_t ubios_target_producer_{};
+    bool ubios_busy_{};
+    std::uint64_t ubios_errors_{};
     std::uint64_t next_sequence_{1};
     std::uint64_t submitted_{0};
     std::uint64_t completed_{0};

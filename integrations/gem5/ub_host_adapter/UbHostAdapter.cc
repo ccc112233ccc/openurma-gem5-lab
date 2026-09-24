@@ -86,7 +86,8 @@ UbHostAdapter::connectDevice()
         SimbricksBaseIfConnect(&interface.base) != 0)
         fatal("%s: cannot connect UB-HOST socket %s\n", name(), socketPath);
 
-    host_proto::HostIntro host_intro{host_proto::kVersion, 64, 0};
+    host_proto::HostIntro host_intro{
+        host_proto::kVersion, 64, 0, pioAddr, pioSize};
     SimBricksBaseIfEstablishData establish{
         &interface.base, &host_intro, sizeof(host_intro),
         &deviceIntro, sizeof(deviceIntro)};

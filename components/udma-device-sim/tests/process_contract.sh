@@ -18,7 +18,7 @@ cleanup() {
 trap cleanup EXIT
 
 "$device" --host-socket "$host_socket" --net-socket "$net_socket" \
-    --shm "$shm" --sync off >"$device_log" 2>&1 &
+    --shm "$shm" --sync off --test-abi >"$device_log" 2>&1 &
 device_pid=$!
 
 for _ in $(seq 1 100); do

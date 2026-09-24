@@ -152,3 +152,21 @@ ownership, timestamp, or synchronization implementation.
 
 This ordering keeps every checkpoint bootable and makes regressions attributable
 to one boundary at a time.
+
+## Migration status
+
+The standalone production-mode device now owns the first official-driver
+bootstrap slice:
+
+- UBIOS root, UBC, and UMMU firmware discovery tables, with addresses derived
+  from the MMIO base supplied by the host handshake;
+- the complete 16 MiB official device aperture advertised to the host;
+- architecture-generic UMMU capability registers, CR0/ACK, GBPA update, and
+  MCMDQ producer/consumer handshakes;
+- retained UBIOS and UBASE management queue registers;
+- asynchronous UBIOS SQ payload DMA, root/endpoint enumeration, configuration
+  and token responses, RQ response DMA, CQE DMA, and index advancement.
+
+The temporary descriptor used by the original process contract is now behind
+the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in
+official-aperture mode; test-only registers no longer overlap production MMIO.

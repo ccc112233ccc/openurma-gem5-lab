@@ -68,6 +68,8 @@ struct HostIntro {
     std::uint32_t version;
     std::uint32_t address_bits;
     std::uint64_t feature_bits;
+    std::uint64_t mmio_base;
+    std::uint64_t mmio_size;
 };
 
 struct [[gnu::packed]] MmioRequest {
