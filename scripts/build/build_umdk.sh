@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Build the pinned openEuler UMDK userspace for the ARM64 gem5 guest.
+# Build the pinned openEuler UMDK userspace for an ARM64 or x86_64 target.
 #
-# Run this on ARM64 Linux, either natively or inside the build container. The build tree is
+# Run this on Linux, either natively or inside the build container. The build tree is
 # deliberately outside the UMDK source tree, so the pinned integration revision
 # remains clean and the result can be copied directly into the guest initramfs.
 set -euo pipefail
@@ -10,17 +10,13 @@ PINNED_UMDK_SHA="f84b90b8ddd8173b851334f55d332783d248bfc7"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="${OPENURMA_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 UMDK_SRC="${UMDK_SRC:-$LAB_DIR/sources/OpenURMA/integration/umdk/vendor/umdk}"
-BUILD_DIR="${UMDK_BUILD_DIR:-$LAB_DIR/artifacts/umdk-build}"
+TARGET_ARCH="${OPENURMA_TARGET_ARCH:-arm64}"
 JOBS="${JOBS:-2}"
 BUILD_STOCK_UDMA="${BUILD_STOCK_UDMA:-disable}"
 ALLOW_DIRTY_UMDK="${ALLOW_DIRTY_UMDK:-disable}"
 UMMU_DEPS="${UMMU_DEPS:-$LAB_DIR/deps/ummu}"
 UMDK_INTEGRATION_DIR="${UMDK_INTEGRATION_DIR:-$(dirname -- "$(dirname -- "$UMDK_SRC")")}"
-UMMU_SHIM_SRC="${UMMU_SHIM_SRC:-$UMDK_INTEGRATION_DIR/ummu_shim}"
-UMMU_SHIM_BUILD_DIR="${UMMU_SHIM_BUILD_DIR:-${BUILD_DIR}-ummu-shim}"
 GEM5_ROOT="${GEM5_ROOT:-$LAB_DIR/gem5}"
-CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
-GEM5_M5_LIB="${GEM5_M5_LIB:-$GEM5_ROOT/util/m5/build/arm64/out/libm5.a}"
 M5OPS_DISPATCH_DIR="${M5OPS_DISPATCH_DIR:-$LAB_DIR/tools}"
 
 die() {
@@ -28,8 +24,67 @@ die() {
     exit 1
 }
 
-[[ "$(uname -s)" == "Linux" ]] || die "run this build on ARM64 Linux"
-[[ "$(uname -m)" == "aarch64" ]] || die "expected an aarch64 builder, got $(uname -m)"
+usage() {
+    cat <<'EOF'
+Usage: ./lab build umdk [--target-arch arm64|x86_64]
+
+Build the unmodified UMDK userspace stack for the selected Linux ABI. ARM64 is
+the complete full-system target. x86_64 builds UMDK and its provider on native
+x86_64 Linux; the official OLK UB/UMMU kernel stack and gem5 machine remain
+ARM64-only.
+EOF
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --target-arch)
+            (( $# >= 2 )) || die "--target-arch requires a value"
+            TARGET_ARCH=$2
+            shift 2
+            ;;
+        --target-arch=*)
+            TARGET_ARCH=${1#*=}
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+
+case "$TARGET_ARCH" in
+    arm64|aarch64)
+        TARGET_ARCH=arm64
+        TARGET_MACHINE_RE='Machine:[[:space:]]+AArch64'
+        TARGET_MACHINE_NAME=AArch64
+        M5_ABI=arm64
+        default_build_dir="$LAB_DIR/artifacts/umdk-build"
+        default_cross_compile=aarch64-linux-gnu-
+        required_host_arch=aarch64
+        ;;
+    x86_64|amd64)
+        TARGET_ARCH=x86_64
+        TARGET_MACHINE_RE='Machine:[[:space:]]+(Advanced Micro Devices X86-64|AMD x86-64)'
+        TARGET_MACHINE_NAME=x86_64
+        M5_ABI=x86
+        default_build_dir="$LAB_DIR/artifacts/umdk-build-x86_64"
+        default_cross_compile=
+        required_host_arch=x86_64
+        ;;
+    *) die "target architecture must be arm64 or x86_64" ;;
+esac
+
+BUILD_DIR="${UMDK_BUILD_DIR:-$default_build_dir}"
+UMMU_SHIM_SRC="${UMMU_SHIM_SRC:-$UMDK_INTEGRATION_DIR/ummu_shim}"
+UMMU_SHIM_BUILD_DIR="${UMMU_SHIM_BUILD_DIR:-${BUILD_DIR}-ummu-shim}"
+CROSS_COMPILE="${CROSS_COMPILE-$default_cross_compile}"
+GEM5_M5_LIB="${GEM5_M5_LIB:-$GEM5_ROOT/util/m5/build/$M5_ABI/out/libm5.a}"
+
+[[ "$(uname -s)" == "Linux" ]] || die "UMDK target builds require Linux"
+[[ "$(uname -m)" == "$required_host_arch" ]] || \
+    die "$TARGET_ARCH requires a native $required_host_arch Linux builder; use the ARM64 Docker runtime on other hosts"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 [[ "$BUILD_STOCK_UDMA" == "enable" || "$BUILD_STOCK_UDMA" == "disable" ]] || \
     die "BUILD_STOCK_UDMA must be 'enable' or 'disable'"
@@ -42,7 +97,7 @@ die() {
 [[ -f "$M5OPS_DISPATCH_DIR/ou-m5ops.h" ]] || die "OpenURMA m5ops dispatcher is missing"
 command -v scons >/dev/null || die "scons is required to build libm5"
 command -v "${CROSS_COMPILE}gcc" >/dev/null || \
-    die "cross compiler not found: ${CROSS_COMPILE}gcc"
+    die "target compiler not found: ${CROSS_COMPILE}gcc"
 
 actual_sha="$(git -C "$UMDK_SRC" rev-parse HEAD)"
 [[ "$actual_sha" == "$PINNED_UMDK_SHA" ]] || \
@@ -64,12 +119,12 @@ else
     git -C "$UMDK_SRC" diff --cached --quiet -- || die "UMDK worktree has staged source changes"
 fi
 
-echo "Building UMDK $PINNED_UMDK_SHA for aarch64 with JOBS=$JOBS, stock UDMA=$BUILD_STOCK_UDMA"
+echo "Building UMDK $PINNED_UMDK_SHA for $TARGET_ARCH with JOBS=$JOBS, stock UDMA=$BUILD_STOCK_UDMA"
 rm -rf -- "$BUILD_DIR"
 
 echo "Building gem5 address/instruction pseudo-op library"
 scons -C "$GEM5_ROOT/util/m5" \
-    "arm64.CROSS_COMPILE=$CROSS_COMPILE" build/arm64/out/libm5.a >/dev/null
+    "$M5_ABI.CROSS_COMPILE=$CROSS_COMPILE" "build/$M5_ABI/out/libm5.a" >/dev/null
 [[ -f "$GEM5_M5_LIB" ]] || die "gem5 m5 library was not produced: $GEM5_M5_LIB"
 
 if [[ "$BUILD_STOCK_UDMA" == "enable" ]]; then
@@ -118,29 +173,29 @@ ubagg_cli="$BUILD_DIR/urma/tools/ubagg_cli/ubagg_cli"
 libtpsa="$BUILD_DIR/urma/lib/uvs/core/libtpsa.so.0.0.1"
 ummu_shim="$UMMU_SHIM_BUILD_DIR/libummu.so.1"
 
-verify_aarch64() {
+verify_target() {
     local artifact="$1"
     [[ -f "$artifact" ]] || die "missing artifact: $artifact"
-    readelf -h "$artifact" | grep -Eq 'Machine:[[:space:]]+AArch64' || {
+    readelf -h "$artifact" | grep -Eq "$TARGET_MACHINE_RE" || {
         file "$artifact" >&2 || true
-        die "artifact is not AArch64 ELF: $artifact"
+        die "artifact is not $TARGET_MACHINE_NAME ELF: $artifact"
     }
-    printf 'AArch64  %s\n' "$artifact"
+    printf '%-8s %s\n' "$TARGET_MACHINE_NAME" "$artifact"
 }
 
 echo
 echo "Verified guest artifacts:"
-verify_aarch64 "$liburma"
-verify_aarch64 "$liburma_common"
-verify_aarch64 "$urma_admin"
-verify_aarch64 "$urma_perftest"
-verify_aarch64 "$ubagg_provider"
-verify_aarch64 "$ubagg_cli"
-verify_aarch64 "$libtpsa"
+verify_target "$liburma"
+verify_target "$liburma_common"
+verify_target "$urma_admin"
+verify_target "$urma_perftest"
+verify_target "$ubagg_provider"
+verify_target "$ubagg_cli"
+verify_target "$libtpsa"
 
 if [[ "$BUILD_STOCK_UDMA" == "enable" ]]; then
-    verify_aarch64 "$stock_udma"
-    verify_aarch64 "$ummu_shim"
+    verify_target "$stock_udma"
+    verify_target "$ummu_shim"
     readelf -d "$stock_udma" | grep -Fq 'Shared library: [libummu.so.1]' || \
         die "stock UDMA provider is not linked against libummu.so.1"
     readelf -d "$ummu_shim" | grep -Fq 'Library soname: [libummu.so.1]' || \

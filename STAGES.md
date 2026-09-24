@@ -255,6 +255,22 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   complete KVM `--print-config` resolution pass without starting or disturbing
   a running simulation.
 
+### `stage/2026-09-24-explicit-architecture-targets`
+
+- Native setup and UMDK builds accept `--target-arch arm64|x86_64`; ARM64
+  remains the default and preserves the complete full-system build.
+- On native x86_64 Ubuntu, the x86 target builds the unmodified official UMDK
+  userspace and stock UDMA provider into `artifacts/umdk-build-x86_64`, keeping
+  it isolated from ARM64 guest artifacts.
+- Full x86_64 kernel/initramfs targets are rejected explicitly. The pinned OLK
+  `CONFIG_UB` depends on ARM64, Hisilicon UMMU uses ARM64 system registers and
+  SVA APIs, and the current gem5 platform uses ArmSystem, GIC interrupts, and
+  an ARM64 page-table walker. Claiming full x86 support would otherwise require
+  modifying official kernel code and adding a separate simulated machine.
+- CLI tests cover x86 userspace routing and unsupported full-system rejection;
+  all existing ARM64/KVM configuration tests continue to pass. Runtime x86_64
+  compilation still requires validation on an actual x86_64 Ubuntu host.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:

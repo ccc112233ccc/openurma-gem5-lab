@@ -127,3 +127,24 @@ bash -n scripts/run/*.sh scripts/build/*.sh scripts/*.sh
 Build products and fetched upstream trees are not part of the control-plane
 script count.  Run `git ls-files '*.sh' '*.py'` to audit repository-owned
 automation.
+
+## Architecture targets
+
+Host architecture and guest architecture are separate. An x86 host can run the
+existing ARM64 Docker image through container emulation, while native x86_64
+Linux can also build the official UMDK userspace ABI directly:
+
+```bash
+./lab --runtime native setup --target-arch x86_64
+
+# Or, in an already provisioned source tree:
+BUILD_STOCK_UDMA=enable ./lab --runtime native build umdk --target-arch x86_64
+```
+
+The resulting files use `artifacts/umdk-build-x86_64/`, so they cannot overwrite
+the ARM64 guest artifacts. This is intentionally a userspace-only target. The
+pinned OLK source declares `CONFIG_UB` as `depends on ARM64`; its UMMU SVA path
+uses ARM64 system registers and page-table APIs. The current gem5 platform also
+uses ArmSystem, GIC interrupts, and an ARM64 page-table walker. Consequently,
+`build kernel|initramfs|all --target-arch x86_64` is rejected instead of
+silently producing a nonfunctional full-system image.

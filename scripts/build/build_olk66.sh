@@ -12,7 +12,8 @@ KSRC="${KSRC:-$LAB_DIR/oe66}"
 OPENURMA_ROOT="${OPENURMA_ROOT:-$LAB_DIR/sources/OpenURMA}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$LAB_DIR/artifacts/kernel}"
 JOBS="${JOBS:-$(nproc)}"
-ARCH="${ARCH:-arm64}"
+TARGET_ARCH="${OPENURMA_TARGET_ARCH:-arm64}"
+ARCH=arm64
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 EXPECTED_KERNEL_COMMIT="5078a3a23a1e1825ec136485173ec98668cdd640"
 
@@ -25,6 +26,44 @@ fail() {
     echo "[olk66] ERROR: $*" >&2
     exit 1
 }
+
+usage() {
+    cat <<'EOF'
+Usage: ./lab build kernel [--target-arch arm64]
+
+Build OLK, official UB/URMA modules, and the simulation provider. The pinned
+official kernel declares CONFIG_UB as ARM64-only, so x86_64 is not exposed as
+a full-system target. Use './lab build umdk --target-arch x86_64' for the
+official userspace stack alone.
+EOF
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --target-arch)
+            (( $# >= 2 )) || fail "--target-arch requires a value"
+            TARGET_ARCH=$2
+            shift 2
+            ;;
+        --target-arch=*)
+            TARGET_ARCH=${1#*=}
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *) fail "unknown option: $1" ;;
+    esac
+done
+
+case "$TARGET_ARCH" in
+    arm64|aarch64) TARGET_ARCH=arm64 ;;
+    x86_64|amd64)
+        fail "full x86_64 UB kernel build is unsupported: official CONFIG_UB depends on ARM64 and UMMU uses ARM64 SVA/page-table interfaces"
+        ;;
+    *) fail "target architecture must be arm64 or x86_64" ;;
+esac
 
 [[ -f "$KSRC/Makefile" ]] || fail "kernel tree not found at $KSRC"
 [[ -f "$KMOD_DIR/Kbuild" ]] || fail "OpenURMA kmod not found at $KMOD_DIR"

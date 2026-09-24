@@ -33,6 +33,33 @@ class LabCliTest(unittest.TestCase):
         self.assertTrue(command[1].endswith("scripts/run/run-dual.sh"))
         self.assertEqual(command[-1], "--print-config")
 
+    @mock.patch("openurma_lab.cli.subprocess.run")
+    def test_x86_userspace_target_is_routed(self, run):
+        run.return_value.returncode = 0
+        self.assertEqual(
+            cli.main(["--runtime", "native", "build", "umdk", "--target-arch", "x86_64"]),
+            0,
+        )
+        self.assertIn("scripts/build/build_umdk.sh", run.call_args.args[0][1])
+
+    @mock.patch("openurma_lab.cli.subprocess.run")
+    def test_x86_full_system_target_is_rejected(self, run):
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            result = cli.main(["build", "kernel", "--target-arch", "x86_64"])
+        self.assertEqual(result, 2)
+        self.assertIn("userspace target only", error.getvalue())
+        run.assert_not_called()
+
+    @mock.patch("openurma_lab.cli.subprocess.run")
+    def test_x86_setup_requires_native_runtime(self, run):
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            result = cli.main(["--runtime", "docker", "setup", "--target-arch", "x86_64"])
+        self.assertEqual(result, 2)
+        self.assertIn("requires '--runtime native'", error.getvalue())
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

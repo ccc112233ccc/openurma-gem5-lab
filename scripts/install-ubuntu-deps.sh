@@ -14,8 +14,10 @@ source /etc/os-release
 [[ "${ID:-}" == ubuntu ]] || die "native setup currently supports Ubuntu, found ${ID:-unknown}"
 [[ "${VERSION_ID:-}" == 22.04 ]] ||
     die "native setup is validated on Ubuntu 22.04, found ${VERSION_ID:-unknown}"
-[[ "$(uname -m)" == aarch64 ]] ||
-    die "native setup currently supports ARM64 Ubuntu; found $(uname -m)"
+case "$(uname -m)" in
+    aarch64|x86_64) ;;
+    *) die "native setup supports ARM64 or x86_64 Ubuntu; found $(uname -m)" ;;
+esac
 [[ -r "$package_file" ]] || die "package list not found: $package_file"
 
 mapfile -t packages < <(sed '/^[[:space:]]*$/d' "$package_file")

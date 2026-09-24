@@ -123,6 +123,15 @@ def _script(relative: str, args: Sequence[str], runtime: str) -> int:
     return subprocess.run(["bash", str(path), *args], env=env).returncode
 
 
+def _requested_target_arch(args: Sequence[str]) -> str | None:
+    for index, value in enumerate(args):
+        if value == "--target-arch" and index + 1 < len(args):
+            return args[index + 1]
+        if value.startswith("--target-arch="):
+            return value.split("=", 1)[1]
+    return None
+
+
 def _attach(args: Sequence[str], runtime: str) -> int:
     if len(args) != 1 or not args[0].isdigit():
         print("usage: ./lab [--runtime ...] attach NODE", file=sys.stderr)
@@ -155,6 +164,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     command, tail = args[0], args[1:]
 
     if command == "setup":
+        target_arch = _requested_target_arch(tail)
+        if target_arch in {"x86_64", "amd64"} and runtime != "native":
+            print(
+                "lab: x86_64 UMDK setup requires '--runtime native' on x86_64 Linux",
+                file=sys.stderr,
+            )
+            return 2
         script = "scripts/setup-native.sh" if runtime == "native" else "scripts/setup-docker.sh"
         return _script(script, tail, runtime)
     if command == "attach":
@@ -162,6 +178,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "build":
         if not tail or tail[0] not in BUILD_TARGETS:
             print("lab: build target must be one of: " + ", ".join(BUILD_TARGETS), file=sys.stderr)
+            return 2
+        target_arch = _requested_target_arch(tail[1:])
+        if target_arch in {"x86_64", "amd64"} and tail[0] != "umdk":
+            print(
+                "lab: x86_64 currently supports the UMDK userspace target only; "
+                "the official UB/UMMU kernel and gem5 machine are ARM64-only",
+                file=sys.stderr,
+            )
             return 2
         return _script(BUILD_TARGETS[tail[0]], tail[1:], runtime)
     if command in COMMANDS:
