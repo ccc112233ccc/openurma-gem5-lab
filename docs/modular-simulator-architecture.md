@@ -73,7 +73,7 @@ places the virtual timestamp at byte 48 and the ownership/type byte at byte 63.
 Payload follows the header in the same queue entry. The pinned upstream
 revision is recorded in `SOURCE_REVISIONS.md`.
 
-## First executable contract
+## Executable contracts
 
 The first extracted slice deliberately tests causality instead of performance
 fitting:
@@ -98,11 +98,34 @@ new guest ABI. It will be replaced by the official UDMA WQE decoder moved out
 of `NICTopologySC`. Keeping that distinction explicit prevents a test-only
 format from becoming accidental architecture.
 
+`components/udma-device-sim/` is the corresponding standalone process. It
+listens on two independent SimBricks interfaces, exchanges typed introduction
+records, and drives the same core through `UB-HOST` and `UB-NET`. Its contract
+test launches three actual processes:
+
+```text
+mock host process <-> UDMA device process <-> mock network process
+```
+
+The host peer owns guest memory and services DMA. The network peer sees only a
+frame. The test proves the complete Doorbell→DMA→frame→CQE→IRQ chain crosses
+both process boundaries:
+
+```bash
+./lab --runtime native build udma-device
+ctest --test-dir artifacts/udma-device-sim-build --output-on-failure
+```
+
+The small portability translation unit compiles the pinned upstream SimBricks
+base implementation directly. On macOS it supplies equivalents for Linux-only
+`accept4` and `MAP_POPULATE`; it does not replace the shared-memory queue,
+ownership, timestamp, or synchronization implementation.
+
 ## Migration sequence
 
 1. Freeze and test `UB-HOST`/`UB-NET` layouts and the simulator-neutral core.
-2. Run the core as an independent Linux process over SimBricks shared-memory
-   queues using mock host and network peers.
+2. Run the core as an independent process over SimBricks shared-memory queues
+   using mock host and network peers. **Complete.**
 3. Replace one gem5 control path at a time: discovery/MMIO, DMA, interrupt,
    SEND, then READ/WRITE and receive queues.
 4. Connect ns-3-UB at the frame boundary and remove transaction shortcuts.

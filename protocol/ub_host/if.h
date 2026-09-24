@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 #include <simbricks/base/generic.h>
 #include <simbricks/base/if.h>
+#ifdef __cplusplus
+}
+#endif
 
 #include "protocol/ub_host/proto.h"
 

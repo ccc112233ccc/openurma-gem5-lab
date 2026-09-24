@@ -46,6 +46,7 @@ BUILD_TARGETS = {
     "initramfs": "scripts/build/build-interactive-initramfs.sh",
     "ns3ub": "scripts/build-ns3ub-adapter.sh",
     "udma-model": "scripts/build/build_udma_model.sh",
+    "udma-device": "scripts/build/build_udma_device_sim.sh",
     "mooncake": "scripts/build-mooncake-urma.sh",
     "mooncake-initramfs": "scripts/package-mooncake-urma-initramfs.sh",
 }

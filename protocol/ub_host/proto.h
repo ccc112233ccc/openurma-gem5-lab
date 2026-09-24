@@ -25,7 +25,7 @@ enum class H2DType : std::uint8_t {
 };
 
 enum class D2HType : std::uint8_t {
-    MmioReadCompletion = 0x40,
+    MmioCompletion = 0x40,
     DmaRead = 0x41,
     DmaWrite = 0x42,
     Interrupt = 0x43,
