@@ -56,6 +56,13 @@ class MockHost final : public device::HostInterface {
         irq_asserted = asserted;
     }
 
+    void PulseInterrupt(std::uint32_t vector) override
+    {
+        events.emplace_back("irq-pulse");
+        irq_vector = vector;
+        ++irq_pulses;
+    }
+
     template <typename T>
     T LoadObject(std::uint64_t address) const
     {
@@ -74,6 +81,7 @@ class MockHost final : public device::HostInterface {
     std::vector<std::string> events;
     std::uint32_t irq_vector{};
     bool irq_asserted{};
+    std::uint32_t irq_pulses{};
 
   private:
     std::unordered_map<std::uint64_t, std::vector<std::uint8_t>> memory_;
@@ -255,7 +263,7 @@ int main()
     assert(mailbox_event.size() == 64);
     assert(mailbox_event[0] == 0x13 && (mailbox_event[3] & 0x80));
     assert(mailbox_event[12] == 0x34 && mailbox_event[13] == 0x12);
-    assert(host.irq_asserted && host.irq_vector == 1);
+    assert(host.irq_vector == 1 && host.irq_pulses == 1);
 
     constexpr std::uint64_t jfc_context_iova = 0xa0000;
     constexpr std::uint64_t cq_iova = 0xb0000;

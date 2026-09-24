@@ -835,7 +835,7 @@ UdmaModel::EmitMailboxEvent(std::uint16_t sequence, Completion completion)
             if (ok) {
                 ++aeq_producer_;
                 ubase_command_source_ |= 1U << 1;
-                host_.SetInterrupt(1, true);
+                host_.PulseInterrupt(1);
             }
             completion(ok);
         });

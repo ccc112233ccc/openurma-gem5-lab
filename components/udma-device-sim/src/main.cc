@@ -127,14 +127,24 @@ class HostPort final : public device::HostInterface {
 
     void SetInterrupt(std::uint32_t vector, bool asserted) override
     {
+        SendInterrupt(vector, asserted ? host_proto::InterruptAction::Raise
+                                       : host_proto::InterruptAction::Lower);
+    }
+
+    void PulseInterrupt(std::uint32_t vector) override
+    {
+        SendInterrupt(vector, host_proto::InterruptAction::Pulse);
+    }
+
+    void SendInterrupt(std::uint32_t vector,
+                       host_proto::InterruptAction action)
+    {
         auto* message = host_proto::UbHostD2HOutAlloc(&interface_, now_);
         if (message == nullptr) return;
         ZeroVolatile(message->interrupt);
         message->interrupt.sequence = next_request_++;
         message->interrupt.vector = vector;
-        message->interrupt.action = static_cast<std::uint8_t>(
-            asserted ? host_proto::InterruptAction::Raise
-                     : host_proto::InterruptAction::Lower);
+        message->interrupt.action = static_cast<std::uint8_t>(action);
         host_proto::UbHostD2HOutSend(
             &interface_, message,
             static_cast<std::uint8_t>(host_proto::D2HType::Interrupt));

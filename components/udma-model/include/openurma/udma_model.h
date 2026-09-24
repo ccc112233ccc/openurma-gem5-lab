@@ -34,6 +34,11 @@ class HostInterface {
         DmaWrite(address, std::move(data), std::move(completion));
     }
     virtual void SetInterrupt(std::uint32_t vector, bool asserted) = 0;
+    virtual void PulseInterrupt(std::uint32_t vector)
+    {
+        SetInterrupt(vector, true);
+        SetInterrupt(vector, false);
+    }
 };
 
 struct Frame {

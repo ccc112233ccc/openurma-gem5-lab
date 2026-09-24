@@ -249,8 +249,12 @@ UbHostAdapter::handleInterrupt(
         interrupt_message.action);
     if (action == host_proto::InterruptAction::Lower)
         interrupt->clear();
-    else
+    else if (action == host_proto::InterruptAction::Raise)
         interrupt->raise();
+    else {
+        interrupt->raise();
+        interrupt->clear();
+    }
 }
 
 } // namespace gem5
