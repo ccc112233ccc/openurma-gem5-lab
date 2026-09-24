@@ -102,6 +102,9 @@ class UdmaModel {
 
     std::uint64_t submitted() const { return submitted_; }
     std::uint64_t completed() const { return completed_; }
+    std::size_t jfc_count() const { return jfc_contexts_.size(); }
+    std::size_t jfr_count() const { return jfr_contexts_.size(); }
+    std::size_t jetty_count() const { return jetty_contexts_.size(); }
 
   private:
     void FetchDescriptor(std::uint64_t address);
@@ -125,11 +128,18 @@ class UdmaModel {
     void KickUbase(std::uint32_t producer);
     void ProcessNextUbase();
     void HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor);
+    void HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
+                            std::uint32_t descriptor_count);
+    void ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
+                           std::uint32_t descriptor_count,
+                           std::vector<std::uint8_t> context);
+    void EmitMailboxEvent(std::uint16_t sequence, Completion completion);
     std::vector<std::uint8_t> BuildUbaseResponse(std::uint16_t opcode) const;
     void FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
                                std::uint16_t opcode,
                                std::uint32_t descriptor_count,
-                               std::vector<std::uint8_t> response);
+                               std::vector<std::uint8_t> response,
+                               std::function<void()> after_completion = {});
     void FailUbase();
 
     HostInterface& host_;
@@ -151,6 +161,23 @@ class UdmaModel {
     std::uint32_t ubase_target_producer_{};
     bool ubase_busy_{};
     std::uint64_t ubase_errors_{};
+    struct QueueContext {
+        std::uint64_t queue_iova{};
+        std::uint64_t index_iova{};
+        std::uint64_t producer_iova{};
+        std::uint32_t depth{};
+        std::uint32_t completion_queue{};
+        std::uint32_t token{};
+    };
+    std::uint64_t aeq_iova_{};
+    std::uint32_t aeq_depth_{};
+    std::uint32_t aeq_producer_{};
+    std::uint64_t ceq_iova_{};
+    std::uint32_t ceq_depth_{};
+    std::uint32_t ceq_producer_{};
+    std::unordered_map<std::uint32_t, QueueContext> jfc_contexts_;
+    std::unordered_map<std::uint32_t, QueueContext> jfr_contexts_;
+    std::unordered_map<std::uint32_t, QueueContext> jetty_contexts_;
     std::uint64_t next_sequence_{1};
     std::uint64_t submitted_{0};
     std::uint64_t completed_{0};

@@ -232,6 +232,49 @@ int main()
     std::memcpy(&port_rate, completed_query.data() + 8, sizeof(port_rate));
     assert(port_rate == 400000);
     assert(completed_query[22] == 1);
+
+    // The unchanged UBASE driver creates event/completion/work queues through
+    // opcode 0x7000.  Hardware fetches the context by IOVA, commits the CSQ
+    // descriptor first, then publishes a mailbox AEQE and raises vector 1.
+    constexpr std::uint64_t aeq_context_iova = 0x80000;
+    constexpr std::uint64_t aeq_iova = 0x90000;
+    std::vector<std::uint8_t> aeq_context(64, 0);
+    store32(aeq_context, 8, static_cast<std::uint32_t>(aeq_iova));
+    host.Store(aeq_context_iova, aeq_context);
+    std::vector<std::uint8_t> create_aeq(32, 0);
+    create_aeq[0] = 0x00;
+    create_aeq[1] = 0x70;
+    create_aeq[3] = 1;
+    store32(create_aeq, 8, aeq_context_iova);
+    store32(create_aeq, 16, 0x34);
+    store32(create_aeq, 20, (1U << 16) | 0x1234);
+    host.Store(ubase_csq + 32, create_aeq);
+    assert(official_model.WriteMmio(0x318410, 4, 2));
+    assert(official_model.ReadMmio(0x318414, 4, value) && value == 2);
+    const auto& mailbox_event = host.Load(aeq_iova);
+    assert(mailbox_event.size() == 64);
+    assert(mailbox_event[0] == 0x13 && (mailbox_event[3] & 0x80));
+    assert(mailbox_event[12] == 0x34 && mailbox_event[13] == 0x12);
+    assert(host.irq_asserted && host.irq_vector == 1);
+
+    constexpr std::uint64_t jfc_context_iova = 0xa0000;
+    constexpr std::uint64_t cq_iova = 0xb0000;
+    constexpr std::uint64_t ci_iova = 0xc0000;
+    std::vector<std::uint8_t> jfc_context(128, 0);
+    store32(jfc_context, 0, static_cast<std::uint32_t>(cq_iova));
+    store32(jfc_context, 2 * 4, 9);
+    store32(jfc_context, 6 * 4, static_cast<std::uint32_t>(ci_iova >> 6));
+    host.Store(jfc_context_iova, jfc_context);
+    std::vector<std::uint8_t> create_jfc(32, 0);
+    create_jfc[0] = 0x00;
+    create_jfc[1] = 0x70;
+    create_jfc[3] = 1;
+    store32(create_jfc, 8, jfc_context_iova);
+    store32(create_jfc, 16, (7U << 8) | 0x24);
+    host.Store(ubase_csq + 64, create_jfc);
+    assert(official_model.WriteMmio(0x318410, 4, 3));
+    assert(official_model.ReadMmio(0x318414, 4, value) && value == 3);
+    assert(official_model.jfc_count() == 1);
     assert(!official_model.ReadMmio(
         device::UdmaModel::kOfficialApertureBytes, 1, value));
 

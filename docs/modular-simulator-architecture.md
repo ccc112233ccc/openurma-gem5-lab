@@ -170,6 +170,9 @@ bootstrap slice:
   response writes, firmware/resource/port capability queries, and hardware
   head/tail publication. The UB-HOST DMA message explicitly distinguishes
   guest-physical and I/O-virtual addresses.
+- asynchronous UBASE mailbox DMA now captures the official driver's AEQ, CEQ,
+  JFC, JFR, JFS, and Jetty contexts, handles context query/destruction, and
+  publishes mailbox completion through the architected AEQ before vector 1.
 
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in

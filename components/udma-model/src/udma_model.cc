@@ -677,6 +677,10 @@ UdmaModel::HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor)
 {
     const std::uint16_t opcode = LoadLe<std::uint16_t>(descriptor.data());
     const std::uint32_t count = std::max<std::uint32_t>(1, descriptor[3]);
+    if (opcode == 0x7000) {
+        HandleUbaseMailbox(std::move(descriptor), count);
+        return;
+    }
     if (opcode != 0x0030 && opcode != 0x0002 && opcode != 0x6200 &&
         opcode != 0x0001 && opcode != 0x7001)
         return FailUbase();
@@ -685,10 +689,164 @@ UdmaModel::HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor)
 }
 
 void
+UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
+                              std::uint32_t descriptor_count)
+{
+    const std::uint8_t command = descriptor[16];
+    const std::uint64_t context_iova =
+        LoadLe<std::uint32_t>(descriptor.data() + 8) |
+        (std::uint64_t(LoadLe<std::uint32_t>(descriptor.data() + 12)) << 32);
+    constexpr std::uint8_t QueryJfsContext = 0x06;
+    constexpr std::uint8_t DestroyJfsContext = 0x07;
+    constexpr std::uint8_t DestroyJfcContext = 0x27;
+    constexpr std::uint8_t DestroyJfrContext = 0x57;
+    const std::uint32_t tag =
+        LoadLe<std::uint32_t>(descriptor.data() + 16) >> 8;
+
+    if (command == DestroyJfsContext) jetty_contexts_.erase(tag);
+    if (command == DestroyJfcContext) jfc_contexts_.erase(tag);
+    if (command == DestroyJfrContext) jfr_contexts_.erase(tag);
+
+    if (command == QueryJfsContext && context_iova) {
+        std::vector<std::uint8_t> context(128, 0);
+        StoreLe<std::uint32_t>(context, 0, 1U << 16);
+        StoreLe<std::uint32_t>(context, 26 * sizeof(std::uint32_t), 1U << 26);
+        host_.DmaWriteIoVirtual(context_iova, std::move(context),
+            [this, descriptor = std::move(descriptor), descriptor_count](bool ok) mutable {
+                if (!ok) return FailUbase();
+                ApplyUbaseMailbox(std::move(descriptor), descriptor_count, {});
+            });
+        return;
+    }
+
+    const bool creates_context = command == 0x34 || command == 0x44 ||
+        command == 0x04 || command == 0x24 || command == 0x54;
+    if (creates_context && context_iova) {
+        const std::size_t bytes = (command == 0x34 || command == 0x44) ? 64 : 128;
+        host_.DmaReadIoVirtual(context_iova, bytes,
+            [this, descriptor = std::move(descriptor), descriptor_count, bytes]
+            (bool ok, std::vector<std::uint8_t> context) mutable {
+                if (!ok || context.size() != bytes) return FailUbase();
+                ApplyUbaseMailbox(std::move(descriptor), descriptor_count,
+                                  std::move(context));
+            });
+        return;
+    }
+    ApplyUbaseMailbox(std::move(descriptor), descriptor_count, {});
+}
+
+void
+UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
+                             std::uint32_t descriptor_count,
+                             std::vector<std::uint8_t> context)
+{
+    const std::uint8_t command = descriptor[16];
+    const std::uint32_t tag =
+        LoadLe<std::uint32_t>(descriptor.data() + 16) >> 8;
+    const std::uint32_t control =
+        LoadLe<std::uint32_t>(descriptor.data() + 20);
+    const std::uint16_t sequence = static_cast<std::uint16_t>(control);
+    const bool event_enabled = (control & (1U << 16)) != 0;
+    const auto dw = [&context](std::size_t index) {
+        return LoadLe<std::uint32_t>(context.data() + index * 4);
+    };
+
+    if ((command == 0x34 || command == 0x44) && context.size() >= 64) {
+        const std::uint32_t shift = dw(1) & 0x1f;
+        if (shift >= 26) return FailUbase();
+        const std::uint64_t iova =
+            ((std::uint64_t(dw(3)) << 20) | (dw(2) >> 12)) << 12;
+        if (!iova) return FailUbase();
+        if (command == 0x34) {
+            aeq_iova_ = iova;
+            aeq_depth_ = 1U << (shift + 6);
+            aeq_producer_ = 0;
+        } else {
+            ceq_iova_ = iova;
+            ceq_depth_ = 1U << (shift + 6);
+            ceq_producer_ = 0;
+        }
+    } else if (command == 0x24 && context.size() >= 128) {
+        const std::uint32_t shift = ((dw(0) >> 4) & 0xfU) + 6U;
+        QueueContext queue{};
+        queue.queue_iova =
+            ((std::uint64_t(dw(1)) << 20) | (dw(0) >> 12)) << 12;
+        queue.index_iova =
+            ((std::uint64_t(dw(7) & 0x03ffffffU) << 32) | dw(6)) << 6;
+        queue.depth = shift < 31 ? 1U << shift : 0;
+        queue.token = dw(2) & 0x000fffffU;
+        if (!queue.queue_iova || !queue.index_iova || !queue.depth)
+            return FailUbase();
+        jfc_contexts_[tag] = queue;
+    } else if (command == 0x54 && context.size() >= 128) {
+        const std::uint32_t rqe_shift = (dw(0) >> 8) & 0xfU;
+        QueueContext queue{};
+        queue.queue_iova =
+            ((std::uint64_t(dw(2)) << 20) | (dw(1) >> 12)) << 12;
+        queue.index_iova =
+            ((std::uint64_t(dw(9) & 0x000fffffU) << 32) | dw(8)) << 12;
+        queue.completion_queue = ((dw(10) & 0xffU) << 12) | (dw(9) >> 20);
+        queue.producer_iova =
+            ((std::uint64_t(dw(12) & 3U) << 56) |
+             (std::uint64_t(dw(11)) << 24) | (dw(10) >> 8)) << 6;
+        queue.depth = rqe_shift < 31 ? 1U << rqe_shift : 0;
+        queue.token = ((dw(1) & 0x3fU) << 14) | ((dw(0) >> 18) & 0x3fffU);
+        if (!queue.queue_iova || !queue.index_iova ||
+            !queue.producer_iova || !queue.depth) return FailUbase();
+        jfr_contexts_[tag] = queue;
+    } else if (command == 0x04 && context.size() >= 128) {
+        const std::uint32_t sq_shift = (dw(0) >> 8) & 0xfU;
+        QueueContext queue{};
+        queue.queue_iova =
+            ((std::uint64_t(dw(2)) << 20) | (dw(1) >> 12)) << 12;
+        queue.depth = sq_shift < 31 ? 1U << sq_shift : 0;
+        queue.completion_queue = dw(4) & 0x000fffffU;
+        queue.token = ((dw(1) & 0xffU) << 12) | ((dw(0) >> 20) & 0xfffU);
+        if (!queue.queue_iova || !queue.depth) return FailUbase();
+        jetty_contexts_[tag] = queue;
+    }
+
+    auto after = event_enabled ? std::function<void()>([this, sequence]() {
+        EmitMailboxEvent(sequence, [this](bool ok) {
+            if (!ok) ++ubase_errors_;
+        });
+    }) : std::function<void()>{};
+    FinishUbaseDescriptor(std::move(descriptor), 0x7000, descriptor_count, {},
+                          std::move(after));
+}
+
+void
+UdmaModel::EmitMailboxEvent(std::uint16_t sequence, Completion completion)
+{
+    if (!aeq_iova_ || !aeq_depth_ || (aeq_depth_ & (aeq_depth_ - 1))) {
+        completion(false);
+        return;
+    }
+    std::vector<std::uint8_t> event(64, 0);
+    std::uint32_t header = 0x13;
+    if (!(aeq_producer_ & aeq_depth_)) header |= 1U << 31;
+    StoreLe<std::uint32_t>(event, 0, header);
+    event[12] = static_cast<std::uint8_t>(sequence);
+    event[13] = static_cast<std::uint8_t>(sequence >> 8);
+    const std::uint32_t slot = aeq_producer_ & (aeq_depth_ - 1);
+    host_.DmaWriteIoVirtual(aeq_iova_ + std::uint64_t(slot) * 64,
+                            std::move(event),
+        [this, completion = std::move(completion)](bool ok) mutable {
+            if (ok) {
+                ++aeq_producer_;
+                ubase_command_source_ |= 1U << 1;
+                host_.SetInterrupt(1, true);
+            }
+            completion(ok);
+        });
+}
+
+void
 UdmaModel::FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
                                  std::uint16_t opcode,
                                  std::uint32_t descriptor_count,
-                                 std::vector<std::uint8_t> response)
+                                 std::vector<std::uint8_t> response,
+                                 std::function<void()> after_completion)
 {
     constexpr std::size_t BaseLow = 0x00 / 4;
     constexpr std::size_t BaseHigh = 0x04 / 4;
@@ -724,7 +882,8 @@ UdmaModel::FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
     writes->push_back({base + std::uint64_t(head) * 32, std::move(descriptor)});
     auto cursor = std::make_shared<std::size_t>(0);
     auto issue = std::make_shared<std::function<void()>>();
-    *issue = [this, writes, cursor, issue, head, descriptor_count, depth]() {
+    *issue = [this, writes, cursor, issue, head, descriptor_count, depth,
+              after_completion = std::move(after_completion)]() mutable {
         if (*cursor == writes->size()) {
             constexpr std::size_t Tail = 0x10 / 4;
             constexpr std::size_t Head = 0x14 / 4;
@@ -732,6 +891,7 @@ UdmaModel::FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
                 (head + descriptor_count) % depth;
             ubase_command_queue_registers_[Tail] =
                 ubase_target_producer_ % depth;
+            if (after_completion) after_completion();
             ProcessNextUbase();
             return;
         }
