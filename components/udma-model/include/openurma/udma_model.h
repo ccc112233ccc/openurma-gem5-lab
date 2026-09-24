@@ -6,6 +6,7 @@
 #include <array>
 #include <functional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace openurma::device {
@@ -21,6 +22,17 @@ class HostInterface {
     virtual void DmaWrite(std::uint64_t address,
                           std::vector<std::uint8_t> data,
                           Completion completion) = 0;
+    virtual void DmaReadIoVirtual(std::uint64_t address, std::size_t length,
+                                  ReadCompletion completion)
+    {
+        DmaRead(address, length, std::move(completion));
+    }
+    virtual void DmaWriteIoVirtual(std::uint64_t address,
+                                   std::vector<std::uint8_t> data,
+                                   Completion completion)
+    {
+        DmaWrite(address, std::move(data), std::move(completion));
+    }
     virtual void SetInterrupt(std::uint32_t vector, bool asserted) = 0;
 };
 
@@ -110,6 +122,15 @@ class UdmaModel {
     void UbiosConfigWrite(std::uint32_t address, std::uint32_t byte_enable,
                           std::uint32_t value, bool endpoint);
     void FailUbios();
+    void KickUbase(std::uint32_t producer);
+    void ProcessNextUbase();
+    void HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor);
+    std::vector<std::uint8_t> BuildUbaseResponse(std::uint16_t opcode) const;
+    void FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
+                               std::uint16_t opcode,
+                               std::uint32_t descriptor_count,
+                               std::vector<std::uint8_t> response);
+    void FailUbase();
 
     HostInterface& host_;
     NetworkInterface& network_;
@@ -127,6 +148,9 @@ class UdmaModel {
     std::uint32_t ubios_target_producer_{};
     bool ubios_busy_{};
     std::uint64_t ubios_errors_{};
+    std::uint32_t ubase_target_producer_{};
+    bool ubase_busy_{};
+    std::uint64_t ubase_errors_{};
     std::uint64_t next_sequence_{1};
     std::uint64_t submitted_{0};
     std::uint64_t completed_{0};

@@ -213,6 +213,25 @@ int main()
     const auto ubios_cqe = host.LoadObject<std::array<std::uint8_t, 16>>(ubios_cq);
     assert(ubios_cqe[0] == 0 && ubios_cqe[1] == 0x11);
     assert(ubios_cqe[2] == 40 && ubios_cqe[4] == 7);
+
+    constexpr std::uint64_t ubase_csq = 0x70000;
+    std::vector<std::uint8_t> port_query(32, 0);
+    port_query[0] = 0x00;
+    port_query[1] = 0x62;
+    port_query[3] = 1;
+    host.Store(ubase_csq, port_query);
+    assert(official_model.WriteMmio(0x318400, 4, ubase_csq));
+    assert(official_model.WriteMmio(0x318404, 4, ubase_csq >> 32));
+    assert(official_model.WriteMmio(0x318408, 4, 1));
+    assert(official_model.WriteMmio(0x318410, 4, 1));
+    assert(official_model.ReadMmio(0x318414, 4, value) && value == 1);
+    const auto& completed_query = host.Load(ubase_csq);
+    assert(completed_query.size() == 32);
+    assert((completed_query[2] & 2) != 0);
+    std::uint32_t port_rate{};
+    std::memcpy(&port_rate, completed_query.data() + 8, sizeof(port_rate));
+    assert(port_rate == 400000);
+    assert(completed_query[22] == 1);
     assert(!official_model.ReadMmio(
         device::UdmaModel::kOfficialApertureBytes, 1, value));
 

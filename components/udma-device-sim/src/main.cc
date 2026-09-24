@@ -100,6 +100,23 @@ class HostPort final : public device::HostInterface {
         SendDma(address, data.size(), false, {}, std::move(completion), &data);
     }
 
+    void DmaReadIoVirtual(std::uint64_t address, std::size_t length,
+                          device::ReadCompletion completion) override
+    {
+        if (length > PayloadCapacity()) return completion(false, {});
+        SendDma(address, length, true, std::move(completion), {}, nullptr,
+                host_proto::AddressKind::IoVirtual);
+    }
+
+    void DmaWriteIoVirtual(std::uint64_t address,
+                           std::vector<std::uint8_t> data,
+                           device::Completion completion) override
+    {
+        if (data.size() > PayloadCapacity()) return completion(false);
+        SendDma(address, data.size(), false, {}, std::move(completion), &data,
+                host_proto::AddressKind::IoVirtual);
+    }
+
     void SetInterrupt(std::uint32_t vector, bool asserted) override
     {
         auto* message = host_proto::UbHostD2HOutAlloc(&interface_, now_);
@@ -148,7 +165,9 @@ class HostPort final : public device::HostInterface {
     bool SendDma(std::uint64_t address, std::size_t length, bool read,
                  device::ReadCompletion read_completion,
                  device::Completion write_completion,
-                 const std::vector<std::uint8_t>* payload = nullptr)
+                 const std::vector<std::uint8_t>* payload = nullptr,
+                 host_proto::AddressKind address_kind =
+                     host_proto::AddressKind::GuestPhysical)
     {
         auto* message = host_proto::UbHostD2HOutAlloc(&interface_, now_);
         if (message == nullptr) {
@@ -161,8 +180,7 @@ class HostPort final : public device::HostInterface {
         message->dma.request_id = id;
         message->dma.address = address;
         message->dma.length = static_cast<std::uint32_t>(length);
-        message->dma.address_kind = static_cast<std::uint8_t>(
-            host_proto::AddressKind::GuestPhysical);
+        message->dma.address_kind = static_cast<std::uint8_t>(address_kind);
         if (payload != nullptr) {
             auto* destination = reinterpret_cast<volatile std::uint8_t*>(message) +
                                 sizeof(host_proto::D2HMessage);

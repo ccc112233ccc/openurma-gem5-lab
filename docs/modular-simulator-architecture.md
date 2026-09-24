@@ -166,6 +166,10 @@ bootstrap slice:
 - retained UBIOS and UBASE management queue registers;
 - asynchronous UBIOS SQ payload DMA, root/endpoint enumeration, configuration
   and token responses, RQ response DMA, CQE DMA, and index advancement.
+- asynchronous UBASE CSQ consumption over I/O-virtual DMA, multi-descriptor
+  response writes, firmware/resource/port capability queries, and hardware
+  head/tail publication. The UB-HOST DMA message explicitly distinguishes
+  guest-physical and I/O-virtual addresses.
 
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in

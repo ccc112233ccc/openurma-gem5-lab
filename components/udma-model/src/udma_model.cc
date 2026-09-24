@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "openurma/udma_model.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <utility>
 
 namespace openurma::device {
@@ -262,6 +264,12 @@ UdmaModel::WriteMmio(std::uint64_t offset, std::uint32_t length,
         auto* bytes = reinterpret_cast<std::uint8_t*>(
             ubase_command_queue_registers_.data());
         write_bytes(bytes + offset - kUbaseCommandQueueOffset);
+        const std::uint64_t local = offset - kUbaseCommandQueueOffset;
+        if ((local == 0 || local == 4) && length == 4) {
+            if (local == 0) ubase_command_queue_registers_[0x14 / 4] = 0;
+        }
+        if (local == 0x10 && length == 4)
+            KickUbase(static_cast<std::uint32_t>(value));
         return true;
     }
     if (offset == kUbaseCommandSourceOffset && length == 4) {
@@ -560,6 +568,181 @@ UdmaModel::HandleUbiosPayload(std::vector<std::uint8_t> sqe,
                     ProcessNextUbios();
                 });
         });
+}
+
+void
+UdmaModel::KickUbase(std::uint32_t producer)
+{
+    ubase_target_producer_ = producer;
+    if (ubase_busy_) return;
+    ubase_busy_ = true;
+    ProcessNextUbase();
+}
+
+void
+UdmaModel::FailUbase()
+{
+    ++ubase_errors_;
+    ubase_busy_ = false;
+}
+
+void
+UdmaModel::ProcessNextUbase()
+{
+    constexpr std::size_t BaseLow = 0x00 / 4;
+    constexpr std::size_t BaseHigh = 0x04 / 4;
+    constexpr std::size_t Depth = 0x08 / 4;
+    constexpr std::size_t Head = 0x14 / 4;
+    const std::uint32_t depth = ubase_command_queue_registers_[Depth] << 3;
+    if (depth == 0) return FailUbase();
+    const std::uint32_t head = ubase_command_queue_registers_[Head] % depth;
+    if (head == ubase_target_producer_ % depth) {
+        ubase_busy_ = false;
+        return;
+    }
+    const std::uint64_t base = ubase_command_queue_registers_[BaseLow] |
+        (std::uint64_t(ubase_command_queue_registers_[BaseHigh]) << 32);
+    if (base == 0) return FailUbase();
+    host_.DmaReadIoVirtual(base + std::uint64_t(head) * 32, 32,
+        [this](bool ok, std::vector<std::uint8_t> descriptor) {
+            if (!ok || descriptor.size() != 32) return FailUbase();
+            HandleUbaseDescriptor(std::move(descriptor));
+        });
+}
+
+std::vector<std::uint8_t>
+UdmaModel::BuildUbaseResponse(std::uint16_t opcode) const
+{
+    std::vector<std::uint8_t> response;
+    if (opcode == 0x0030) {
+        response.resize(312, 0);
+        StoreLe<std::uint16_t>(response, 26, 1);
+        StoreLe<std::uint16_t>(response, 28, 1);
+        StoreLe<std::uint16_t>(response, 30, 1);
+        StoreLe<std::uint16_t>(response, 32, 64);
+        StoreLe<std::uint16_t>(response, 34, 64);
+        StoreLe<std::uint16_t>(response, 36, 64);
+        StoreLe<std::uint32_t>(response, 40, 512);
+        StoreLe<std::uint32_t>(response, 44, 4096);
+        StoreLe<std::uint32_t>(response, 48, 1024);
+        StoreLe<std::uint32_t>(response, 56, 4096);
+        StoreLe<std::uint32_t>(response, 60, 1024);
+        StoreLe<std::uint32_t>(response, 68, 1024);
+        StoreLe<std::uint32_t>(response, 84, 1024);
+        StoreLe<std::uint32_t>(response, 92, 4096);
+        StoreLe<std::uint32_t>(response, 192, 1);
+        StoreLe<std::uint32_t>(response, 224, 1024);
+        response[239] = 1;
+        StoreLe<std::uint32_t>(response, 256, 128);
+        StoreLe<std::uint32_t>(response, 264, 64);
+        StoreLe<std::uint32_t>(response, 268, 128);
+    } else if (opcode == 0x0002) {
+        response.resize(112, 0);
+        StoreLe<std::uint16_t>(response, 0, 0xaaaa);
+        StoreLe<std::uint16_t>(response, 2, 64);
+        StoreLe<std::uint16_t>(response, 4, 0x6cac);
+        StoreLe<std::uint16_t>(response, 6, 0x1084);
+        StoreLe<std::uint16_t>(response, 8, 256);
+        StoreLe<std::uint16_t>(response, 10, 256);
+        StoreLe<std::uint16_t>(response, 16, 0x27);
+        StoreLe<std::uint16_t>(response, 18, 1);
+        StoreLe<std::uint16_t>(response, 24, 64);
+        StoreLe<std::uint16_t>(response, 26, 1);
+        StoreLe<std::uint16_t>(response, 28, 64);
+        StoreLe<std::uint16_t>(response, 30, 1);
+        StoreLe<std::uint16_t>(response, 32, 64);
+        StoreLe<std::uint16_t>(response, 34, 4);
+        response[44] = static_cast<std::uint8_t>(
+            std::min<std::uint32_t>(config_.port_count, 255));
+        StoreLe<std::uint16_t>(response, 48, 128);
+        StoreLe<std::uint16_t>(response, 50, 128);
+        response[52] = 64;
+        StoreLe<std::uint16_t>(response, 58, 128);
+        StoreLe<std::uint16_t>(response, 76, 128);
+        StoreLe<std::uint16_t>(response, 78, 896);
+        StoreLe<std::uint32_t>(response, 80, 65536);
+        StoreLe<std::uint32_t>(response, 84, 65536);
+        StoreLe<std::uint32_t>(response, 88, 8);
+        StoreLe<std::uint32_t>(response, 92, 8);
+    } else if (opcode == 0x6200) {
+        response.resize(24, 0);
+        StoreLe<std::uint32_t>(response, 0, 400000);
+        response[14] = 1;
+    }
+    return response;
+}
+
+void
+UdmaModel::HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor)
+{
+    const std::uint16_t opcode = LoadLe<std::uint16_t>(descriptor.data());
+    const std::uint32_t count = std::max<std::uint32_t>(1, descriptor[3]);
+    if (opcode != 0x0030 && opcode != 0x0002 && opcode != 0x6200 &&
+        opcode != 0x0001 && opcode != 0x7001)
+        return FailUbase();
+    FinishUbaseDescriptor(std::move(descriptor), opcode, count,
+                          BuildUbaseResponse(opcode));
+}
+
+void
+UdmaModel::FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
+                                 std::uint16_t opcode,
+                                 std::uint32_t descriptor_count,
+                                 std::vector<std::uint8_t> response)
+{
+    constexpr std::size_t BaseLow = 0x00 / 4;
+    constexpr std::size_t BaseHigh = 0x04 / 4;
+    constexpr std::size_t Depth = 0x08 / 4;
+    constexpr std::size_t Head = 0x14 / 4;
+    const std::uint32_t depth = ubase_command_queue_registers_[Depth] << 3;
+    const std::uint32_t head = ubase_command_queue_registers_[Head] % depth;
+    const std::uint64_t base = ubase_command_queue_registers_[BaseLow] |
+        (std::uint64_t(ubase_command_queue_registers_[BaseHigh]) << 32);
+    const std::size_t first = std::min<std::size_t>(response.size(), 24);
+    if (first) std::memcpy(descriptor.data() + 8, response.data(), first);
+    descriptor[2] |= 1U << 1;
+    descriptor[4] = descriptor[5] = 0;
+    if (opcode == 0x0001) StoreLe<std::uint32_t>(descriptor, 8, 0x01000000);
+    if (opcode == 0x7001) StoreLe<std::uint32_t>(descriptor, 8, 1);
+
+    struct WriteRecord {
+        std::uint64_t address;
+        std::vector<std::uint8_t> bytes;
+    };
+    auto writes = std::make_shared<std::vector<WriteRecord>>();
+    std::size_t response_offset = first;
+    for (std::uint32_t index = 1;
+         index < descriptor_count && response_offset < response.size(); ++index) {
+        std::vector<std::uint8_t> continuation(32, 0);
+        const std::size_t chunk = std::min<std::size_t>(
+            continuation.size(), response.size() - response_offset);
+        std::memcpy(continuation.data(), response.data() + response_offset, chunk);
+        writes->push_back({base + std::uint64_t((head + index) % depth) * 32,
+                           std::move(continuation)});
+        response_offset += chunk;
+    }
+    writes->push_back({base + std::uint64_t(head) * 32, std::move(descriptor)});
+    auto cursor = std::make_shared<std::size_t>(0);
+    auto issue = std::make_shared<std::function<void()>>();
+    *issue = [this, writes, cursor, issue, head, descriptor_count, depth]() {
+        if (*cursor == writes->size()) {
+            constexpr std::size_t Tail = 0x10 / 4;
+            constexpr std::size_t Head = 0x14 / 4;
+            ubase_command_queue_registers_[Head] =
+                (head + descriptor_count) % depth;
+            ubase_command_queue_registers_[Tail] =
+                ubase_target_producer_ % depth;
+            ProcessNextUbase();
+            return;
+        }
+        WriteRecord& record = writes->at((*cursor)++);
+        host_.DmaWriteIoVirtual(record.address, std::move(record.bytes),
+            [this, issue](bool ok) {
+                if (!ok) return FailUbase();
+                (*issue)();
+            });
+    };
+    (*issue)();
 }
 
 void
