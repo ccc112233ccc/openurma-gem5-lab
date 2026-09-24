@@ -9,13 +9,13 @@ UMDK core, `urma_perftest`, or `liburma-udma.so` source file was modified.
 
 ```sh
 OPENURMA_TRACE_PACKETS=1 \
-./run-dual.sh \
+./lab start \
   --profile fast --provider official --ub-port-count 2 \
   --peer-topology l1-switch --peer-port-map 0,1 \
   --peer-port-selection tp-context
 
-./sync-dual.sh
-./run-latency.sh \
+./lab sync
+./lab latency \
   --profile ctp-rm-send-imm-i128 --samples 5 --size 128 --port 21115
 ```
 

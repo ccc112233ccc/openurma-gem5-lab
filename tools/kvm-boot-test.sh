@@ -26,7 +26,7 @@ esac
     exit 2
 }
 [[ -x "$gem5" && -f "$kernel" && -f "$config" ]] || {
-    echo "kvm-boot-test.sh: build artifacts are incomplete; run setup-native.sh first" >&2
+    echo "kvm-boot-test.sh: build artifacts are incomplete; run './lab --runtime native setup' first" >&2
     exit 2
 }
 if [[ "$cpu_mode" == kvm* ]]; then

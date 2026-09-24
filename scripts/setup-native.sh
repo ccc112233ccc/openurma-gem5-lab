@@ -3,13 +3,14 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+lab_root="$(cd "$script_dir/.." && pwd)"
 jobs="${JOBS:-2}"
 sources_only=0
 install_deps=1
 
 usage() {
     cat <<'EOF'
-Usage: ./setup-native.sh [--sources-only] [--skip-deps] [--jobs N]
+Usage: ./lab --runtime native setup [--sources-only] [--skip-deps] [--jobs N]
 
 Install Ubuntu dependencies, fetch every pinned source revision, and build the
 complete lab directly on an ARM64 Ubuntu 22.04 host. --skip-deps is useful for
@@ -33,21 +34,21 @@ done
     exit 2
 }
 
-(( install_deps == 0 )) || "$script_dir/scripts/install-ubuntu-deps.sh"
+(( install_deps == 0 )) || "$script_dir/install-ubuntu-deps.sh"
 
 export OPENURMA_EXECUTION_MODE=native
-export OPENURMA_LAB_ROOT="${OPENURMA_LAB_ROOT:-$script_dir}"
+export OPENURMA_LAB_ROOT="${OPENURMA_LAB_ROOT:-$lab_root}"
 export KSRC="${KSRC:-$OPENURMA_LAB_ROOT/oe66}"
 export JOBS="$jobs"
 
 echo "[native-setup] fetching pinned source trees"
-"$script_dir/scripts/fetch-sources.sh"
+"$script_dir/fetch-sources.sh"
 if (( sources_only )); then
     echo "[native-setup] source preparation passed"
     exit 0
 fi
 
 echo "[native-setup] building the complete stack"
-"$script_dir/scripts/build-all.sh"
+"$script_dir/build-all.sh"
 echo "[native-setup] PASS"
-echo "Start two nodes with: ./run-dual-native.sh --profile fast --provider official"
+echo "Start two nodes with: ./lab --runtime native start --profile fast --provider official"

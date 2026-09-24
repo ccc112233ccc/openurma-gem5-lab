@@ -3,9 +3,10 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
-source "$script_dir/scripts/runtime.sh"
+source "$script_dir/../runtime.sh"
 container="$OPENURMA_CONTAINER"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"
 uart1="${OPENURMA_DUAL_UART1:-3470}"

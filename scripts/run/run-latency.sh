@@ -3,13 +3,13 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
-source "$script_dir/scripts/runtime.sh"
+source "$script_dir/../runtime.sh"
 
 die() { echo "run-latency.sh: $*" >&2; exit 2; }
 
 usage() {
     cat <<'EOF'
-usage: run-latency.sh [OPTIONS] [SAMPLES [MESSAGE_BYTES [PORT]]]
+usage: ./lab latency [OPTIONS] [SAMPLES [MESSAGE_BYTES [PORT]]]
 
 Run synchronized send_lat on the two guests. The default benchmark profile is
 the real-machine comparison shape: CTP, RM, SEND_IMM, inline threshold 128 B,
@@ -34,7 +34,8 @@ EOF
 }
 
 container="$OPENURMA_CONTAINER"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"
 uart1="${OPENURMA_DUAL_UART1:-3470}"
@@ -104,7 +105,7 @@ case "$output_format" in human|tsv) ;; *) die "format must be human or tsv" ;; e
 
 ou_runtime_start
 ou_exec test -e "$run_root/sync.ready" || {
-    echo "dual-node measurement setup is not ready; run sync-dual.sh first" >&2
+    echo "dual-node measurement setup is not ready; run './lab sync' first" >&2
     exit 1
 }
 

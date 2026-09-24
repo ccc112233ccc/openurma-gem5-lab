@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAB_DIR="${LAB_DIR:-$SCRIPT_DIR}"
+LAB_DIR="${LAB_DIR:-${OPENURMA_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}}"
 OPENURMA_ROOT="${OPENURMA_ROOT:-$LAB_DIR/sources/OpenURMA}"
 GEM5_ROOT="${GEM5_ROOT:-$LAB_DIR/gem5}"
 KSRC="${KSRC:-}"
@@ -33,7 +33,7 @@ Usage:
   KSRC=/path/to/olk-6.6 \
   ARM_BUILD=/path/to/umdk-arm-build \
   BUSYBOX_ARM64=/path/to/static-arm64-busybox \
-    ./build-interactive-initramfs.sh
+    ./lab build initramfs
 
 Optional environment:
   OPENURMA_ROOT  OpenURMA checkout (default: sources/OpenURMA)

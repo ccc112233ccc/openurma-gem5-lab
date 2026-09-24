@@ -21,11 +21,11 @@ export ARTIFACT_DIR="$lab/artifacts/kernel"
 export JOBS="$jobs"
 
 echo "[build-all] gem5"
-"$lab/build_gem5.sh"
+"$lab/scripts/build/build_gem5.sh"
 echo "[build-all] official UMDK and UDMA provider"
-BUILD_STOCK_UDMA=enable "$lab/build_umdk.sh"
+BUILD_STOCK_UDMA=enable "$lab/scripts/build/build_umdk.sh"
 echo "[build-all] OLK-6.6 and official kernel drivers"
-"$lab/build_olk66.sh"
+"$lab/scripts/build/build_olk66.sh"
 echo "[build-all] official UBUS/UMMU/UBASE/UDMA modules"
 "$lab/official-udma/build_modules.sh"
 echo "[build-all] official UDMA initramfs"
@@ -35,7 +35,7 @@ KSRC="$kernel_root" ARM_BUILD="$UMDK_BUILD_DIR" BUSYBOX_ARM64=/bin/busybox \
 echo "[build-all] interactive initramfs"
 KSRC="$kernel_root" ARM_BUILD="$UMDK_BUILD_DIR" BUSYBOX_ARM64=/bin/busybox \
     OUT="$lab/out/openurma-interactive.cpio.gz" \
-    "$lab/build-interactive-initramfs.sh"
+    "$lab/scripts/build/build-interactive-initramfs.sh"
 
 for artifact in \
     "$lab/gem5/build/ARM/gem5.opt" \

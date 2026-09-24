@@ -3,9 +3,10 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
-source "$script_dir/scripts/runtime.sh"
+source "$script_dir/../runtime.sh"
 container="$OPENURMA_CONTAINER"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
 m5term="${OPENURMA_M5TERM:-$lab/gem5/util/term/m5term}"
 port="${OPENURMA_M5TERM_PORT:-3456}"
 takeover="${OPENURMA_ATTACH_TAKEOVER:-1}"

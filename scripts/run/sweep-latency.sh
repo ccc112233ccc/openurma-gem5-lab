@@ -3,13 +3,13 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
-source "$script_dir/scripts/runtime.sh"
+source "$script_dir/../runtime.sh"
 
 die() { echo "sweep-latency.sh: $*" >&2; exit 2; }
 
 usage() {
     cat <<'EOF'
-usage: sweep-latency.sh [OPTIONS] [SIZE ...]
+usage: ./lab sweep-latency [OPTIONS] [SIZE ...]
 
 Run a reproducible series of two-node send_lat measurements. With no SIZE
 arguments the sweep includes powers of two plus the first receive-DMA,
@@ -32,7 +32,8 @@ EOF
 }
 
 container="$OPENURMA_CONTAINER"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 profile="${OPENURMA_LAT_PROFILE:-ctp-rm-send-imm-i128}"
 samples="${OPENURMA_SWEEP_SAMPLES:-100}"
@@ -41,7 +42,7 @@ port="${OPENURMA_LAT_PORT:-21115}"
 roi_stats="${OPENURMA_ROI_STATS:-0}"
 timeout="${OPENURMA_LAT_TIMEOUT:-300}"
 stagger="${OPENURMA_LAT_STAGGER:-0}"
-output_dir="${OPENURMA_SWEEP_OUT:-$script_dir/sweeps/$(date -u +%Y%m%dT%H%M%SZ)}"
+output_dir="${OPENURMA_SWEEP_OUT:-$repo_root/sweeps/$(date -u +%Y%m%dT%H%M%SZ)}"
 positional_sizes=()
 
 need_value() {

@@ -48,7 +48,7 @@ control-plane decision; there is no per-packet hash or benchmark override.
 
 Boot the normal official-provider dual-node profile with two 400-Gbit/s
 ports, the L1-switch topology, and `tp-context` egress selection.  After
-`sync-dual.sh`, install the same topology on both guests:
+`lab sync`, install the same topology on both guests:
 
 ```text
 node0: ou-ubagg-topology 0 0x100 0x101 0x200 0x201

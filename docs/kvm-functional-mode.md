@@ -13,12 +13,12 @@ needs no extra option. A Docker setup must pass the device while creating the
 container:
 
 ```bash
-./setup-native.sh --jobs 8
-./run-dual-native.sh --profile kvm
+./lab --runtime native setup --jobs 8
+./lab --runtime native start --profile kvm
 
 # Or on an ARM64 Linux Docker host:
-./setup-docker.sh --kvm --jobs 8
-./run-dual.sh --profile kvm
+./lab --runtime docker setup --kvm --jobs 8
+./lab start --profile kvm
 ```
 
 KVM defaults to **unsynchronized** adapter execution. The two gem5 guests and
@@ -35,10 +35,10 @@ Use `--sync` or `--no-sync` to override it, and inspect
 
 ```bash
 # Default fast functional KVM execution: no adapter horizons.
-./run-dual-native.sh --profile kvm
+./lab --runtime native start --profile kvm
 
 # Diagnostic only: reproduce strict adapter-local KVM synchronization.
-./run-dual-native.sh --profile kvm --sync
+./lab --runtime native start --profile kvm --sync
 ```
 
 The synchronized override is intentionally not the default. With a 100-ns
@@ -77,8 +77,8 @@ on the reported host, but it is not the test that clears this bit. This is not
 evidence that the modeled UB datapath failed. Compare against:
 
 ```bash
-./run-dual-native.sh --profile kvm --provider udma
-./run-dual-native.sh --profile fast --provider official
+./lab --runtime native start --profile kvm --provider udma
+./lab --runtime native start --profile fast --provider official
 ```
 
 For a direct one-node diagnosis or boot-time measurement:

@@ -18,9 +18,9 @@ note() { printf '[mooncake-urma] %s\n' "$*"; }
 [[ -n "$mooncake_dir" && -f "$mooncake_dir/CMakeLists.txt" ]] ||
     die "Mooncake checkout not found; clone it next to the lab or set MOONCAKE_DIR"
 [[ -f "$lab_dir/artifacts/umdk-build/urma/lib/urma/core/liburma.so" ]] ||
-    die "UMDK ARM64 artifacts are missing; run ./setup.sh first"
+    die "UMDK ARM64 artifacts are missing; run './lab setup' first"
 [[ -f "$lab_dir/artifacts/umdk-build/urma/common/liburma_common.so.0" ]] ||
-    die "liburma_common.so.0 is missing; run ./setup.sh first"
+    die "liburma_common.so.0 is missing; run './lab setup' first"
 [[ "$build_dir_name" != */* ]] || die "MOONCAKE_URMA_BUILD_DIR must be a directory name"
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 actual_mooncake_commit="$(git -C "$mooncake_dir" rev-parse HEAD)"

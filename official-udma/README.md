@@ -53,7 +53,7 @@ docker exec openurma-gem5-lab \
 Then start the fastest functional two-node configuration with:
 
 ```sh
-./run-dual.sh \
+./lab start \
   --profile fast --provider official
 ```
 

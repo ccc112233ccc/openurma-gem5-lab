@@ -132,7 +132,7 @@ def main() -> int:
     offsets = stats_offsets(args.run_root)
 
     command = [
-        "bash", "run-latency.sh", "--samples", str(args.samples),
+        "./lab", "latency", "--samples", str(args.samples),
         "--size", str(args.size), "--port", str(args.port), "--roi-stats",
         "--format", "tsv", "--raw-output", str(raw_path), "--timeout", "600",
     ]

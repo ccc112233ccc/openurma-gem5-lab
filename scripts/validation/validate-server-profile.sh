@@ -6,13 +6,14 @@ set -euo pipefail
 # files, and (optionally) evidence left by a completed CPU switch.
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-run_root="${OPENURMA_DUAL_OUT:-$script_dir/run-dual}"
+lab_root="${OPENURMA_LAB_ROOT:-$(CDPATH= cd -- "$script_dir/../.." && pwd)}"
+run_root="${OPENURMA_DUAL_OUT:-$lab_root/run-dual}"
 runtime_mode=auto
 positional_root_seen=0
 
 usage() {
     cat <<'EOF'
-Usage: validate-server-profile.sh [OPTIONS] [RUN_ROOT]
+Usage: ./lab validate-server [OPTIONS] [RUN_ROOT]
 
 Validate a dual-node server-profile run without changing it.
 
@@ -308,7 +309,7 @@ if [ -r "$manifest" ]; then
     assert_manifest dma_max_outstanding 16
 else
     fail "missing readable manifest: $manifest"
-    note "No resolved server profile exists yet; start run-dual.sh and retry after gem5 writes its output files."
+    note "No resolved server profile exists yet; run './lab start' and retry after gem5 writes its output files."
 fi
 
 validate_node_config() {

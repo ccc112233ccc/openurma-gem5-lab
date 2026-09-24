@@ -8,20 +8,20 @@ set -euo pipefail
 
 PINNED_UMDK_SHA="f84b90b8ddd8173b851334f55d332783d248bfc7"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-LAB_DIR="${OPENURMA_LAB_ROOT:-$SCRIPT_DIR}"
+LAB_DIR="${OPENURMA_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 UMDK_SRC="${UMDK_SRC:-$LAB_DIR/sources/OpenURMA/integration/umdk/vendor/umdk}"
 BUILD_DIR="${UMDK_BUILD_DIR:-$LAB_DIR/artifacts/umdk-build}"
 JOBS="${JOBS:-2}"
 BUILD_STOCK_UDMA="${BUILD_STOCK_UDMA:-disable}"
 ALLOW_DIRTY_UMDK="${ALLOW_DIRTY_UMDK:-disable}"
-UMMU_DEPS="${UMMU_DEPS:-$SCRIPT_DIR/deps/ummu}"
+UMMU_DEPS="${UMMU_DEPS:-$LAB_DIR/deps/ummu}"
 UMDK_INTEGRATION_DIR="${UMDK_INTEGRATION_DIR:-$(dirname -- "$(dirname -- "$UMDK_SRC")")}"
 UMMU_SHIM_SRC="${UMMU_SHIM_SRC:-$UMDK_INTEGRATION_DIR/ummu_shim}"
 UMMU_SHIM_BUILD_DIR="${UMMU_SHIM_BUILD_DIR:-${BUILD_DIR}-ummu-shim}"
-GEM5_ROOT="${GEM5_ROOT:-$SCRIPT_DIR/gem5}"
+GEM5_ROOT="${GEM5_ROOT:-$LAB_DIR/gem5}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 GEM5_M5_LIB="${GEM5_M5_LIB:-$GEM5_ROOT/util/m5/build/arm64/out/libm5.a}"
-M5OPS_DISPATCH_DIR="${M5OPS_DISPATCH_DIR:-$SCRIPT_DIR/tools}"
+M5OPS_DISPATCH_DIR="${M5OPS_DISPATCH_DIR:-$LAB_DIR/tools}"
 
 die() {
     echo "ERROR: $*" >&2

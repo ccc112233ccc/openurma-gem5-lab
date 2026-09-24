@@ -236,6 +236,25 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   `official-udma/tp-port-routing-evidence.md`. No official OLK driver or UMDK
   provider source file was modified.
 
+### `stage/2026-09-24-unified-python-cli`
+
+- `./lab` is the only supported host-side entry point. It selects native or
+  Docker execution, maps node IDs to UART ports, and dispatches lifecycle,
+  build, validation, and benchmark subcommands.
+- Stable Python control-plane code lives in `openurma_lab/`. Heavyweight,
+  already-validated Bash implementations are private backends under
+  `scripts/build/`, `scripts/run/`, and `scripts/validation/`.
+- Fifteen fixed-node, native-mode, Docker-mode, and compatibility wrappers
+  were removed. Repository-owned automation fell from 59 scattered `.sh` and
+  `.py` files to 48 programs including the extensionless `lab` entry point;
+  the root directory now contains one executable instead of 32 scripts.
+- The main README is now a concise CLI and architecture guide. The full model
+  reference was retained as `docs/reference-guide.md`, and all active examples
+  use the unified CLI.
+- CLI routing/unit tests, Bash syntax checks, Python compilation, and the
+  complete KVM `--print-config` resolution pass without starting or disturbing
+  a running simulation.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:

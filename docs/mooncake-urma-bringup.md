@@ -29,9 +29,9 @@ git clone https://github.com/kvcache-ai/Mooncake.git ../Mooncake
 git -C ../Mooncake checkout 1a0c0a44214ff61a8a4b2e9d90dfb023dd4703ed
 ./scripts/build-mooncake-urma.sh
 ./scripts/package-mooncake-urma-initramfs.sh
-./run-dual.sh --nodes 2 --profile fast --provider official \
+./lab start --nodes 2 --profile fast --provider official \
   --network-backend builtin --ub-transport switch-adapter --mem-size 1GB
-./sync-dual.sh
+./lab sync
 ```
 
 The first builder run creates an Ubuntu 22.04 ARM64 build image. Subsequent

@@ -3,13 +3,13 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
-source "$script_dir/scripts/runtime.sh"
+source "$script_dir/../runtime.sh"
 
 die() { echo "run-node-pair-latency.sh: $*" >&2; exit 2; }
 
 usage() {
     cat <<'EOF'
-usage: run-node-pair-latency.sh SERVER_NODE CLIENT_NODE [SAMPLES [SIZE [PORT]]]
+usage: ./lab latency-pair SERVER_NODE CLIENT_NODE [SAMPLES [SIZE [PORT]]]
 
 Run official synchronized send_lat between any two nodes on the shared OOB and
 UB switches. The client uses the server's 10.0.0.(node+1) control address;
@@ -27,7 +27,8 @@ samples=${3:-100}
 size=${4:-128}
 port=${5:-21115}
 container="$OPENURMA_CONTAINER"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"
 uart1="${OPENURMA_DUAL_UART1:-3470}"
@@ -43,7 +44,7 @@ esac
 
 ou_runtime_start
 ou_exec test -e "$run_root/sync.ready" ||
-    die "measurement setup is not ready; run sync-dual.sh first"
+    die "measurement setup is not ready; run './lab sync' first"
 node_count=$(ou_exec awk -F= '$1 == "node_count" {print $2; exit}' \
     "$run_root/run-manifest.txt")
 [[ "$node_count" =~ ^[0-9]+$ ]] || die "invalid node count in run manifest"

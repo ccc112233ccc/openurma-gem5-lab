@@ -13,7 +13,7 @@ note() {
 }
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-lab_dir="${OPENURMA_LAB_ROOT:-$script_dir}"
+lab_dir="${OPENURMA_LAB_ROOT:-$(cd "$script_dir/../.." && pwd)}"
 gem5_root="${GEM5_ROOT:-$lab_dir/gem5}"
 openurma_root="${OPENURMA_ROOT:-$lab_dir/sources/OpenURMA}"
 openclicknp_root="${OPENCLICKNP_ROOT:-$lab_dir/sources/OpenClickNP}"

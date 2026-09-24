@@ -3,13 +3,13 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
-source "$script_dir/scripts/runtime.sh"
+source "$script_dir/../runtime.sh"
 
 die() { echo "run-dual.sh: $*" >&2; exit 2; }
 
 usage() {
     cat <<'EOF'
-usage: run-dual.sh [OPTIONS]
+usage: ./lab start [OPTIONS]
 
 Start multiple synchronized OpenURMA full-system guests connected through one
 EID-routing UB switch. Every timing-model knob
@@ -1144,9 +1144,9 @@ else
     synchronization=disabled
 fi
 
-lab_host="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+lab_host="$(cd "$script_dir/../.." && pwd)"
 container="$OPENURMA_CONTAINER"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$lab_host")}"
 gem5="${OPENURMA_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
 m5_path="${OPENURMA_M5_PATH:-$lab/system}"
 kernel="${OPENURMA_KERNEL:-$lab/artifacts/kernel/vmlinux}"
@@ -1702,7 +1702,7 @@ find_process_with_argument() {
 
 for ((node = 0; node < node_count; ++node)); do
     if pid_is_live "$run_root/node$node/gem5.pid" "$run_root/node$node"; then
-        die "node$node is already running; use status-dual.sh or stop-dual.sh"
+        die "node$node is already running; use './lab status' or './lab stop'"
     fi
     node_terminal_argument="--terminal-port=$(node_uart "$node")"
     if conflict=$(find_process_with_argument "$node_terminal_argument"); then
@@ -1710,14 +1710,14 @@ for ((node = 0; node < node_count; ++node)); do
     fi
 done
 if pid_is_live "$run_root/switch/gem5.pid" "$run_root/switch"; then
-    die "switch is already running; use status-dual.sh or stop-dual.sh"
+    die "switch is already running; use './lab status' or './lab stop'"
 fi
 if pid_is_live "$run_root/ub-switch/gem5.pid" "$ub_switch_binary"; then
-    die "UB switch is already running; use status-dual.sh or stop-dual.sh"
+    die "UB switch is already running; use './lab status' or './lab stop'"
 fi
 if pid_is_live "$run_root/oob-switch/relay.pid" \
         "$lab/tools/ethernet_relay.py"; then
-    die "OOB switch is already running; use status-dual.sh or stop-dual.sh"
+    die "OOB switch is already running; use './lab status' or './lab stop'"
 fi
 
 case "$run_root" in
@@ -2035,6 +2035,6 @@ echo "  UB routing: destination EID -> registered endpoint adapter"
 echo "  OOB control network: one learning Ethernet switch across all nodes"
 echo
 echo "After all shells are ready, detach any existing UART clients and run:"
-echo "  bash $lab_host/sync-dual.sh"
+echo "  $lab_host/lab --runtime $OPENURMA_EXECUTION_MODE sync"
 echo
-echo "Attach node N with: bash $lab_host/attach-nodeN.sh N"
+echo "Attach node N with: $lab_host/lab --runtime $OPENURMA_EXECUTION_MODE attach N"

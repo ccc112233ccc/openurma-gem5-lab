@@ -21,16 +21,16 @@ The official image and nodes are created with:
 docker exec openurma-gem5-lab \
   bash /workspace/openurma-gem5-lab/official-udma/build_initramfs.sh
 
-./run-dual.sh \
+./lab start \
   --profile fast --provider official
-./sync-dual.sh
+./lab sync
 ```
 
 The recorded benchmark command is equivalent to a server on node 0 and a
 client on node 1:
 
 ```sh
-./run-latency.sh \
+./lab latency \
   --samples 5 --size 128 --port 21116
 ```
 

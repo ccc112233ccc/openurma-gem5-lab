@@ -18,11 +18,11 @@ explicit L1 switch:
 
 ```bash
 OPENURMA_TRACE_PACKETS=1 \
-  ./run-dual.sh \
+  ./lab start \
     --profile fast --provider official --ub-port-count 2 \
     --peer-topology l1-switch --peer-port-map 0,1 \
     --peer-port-selection tp-context --peer-switch-delay 0ns
-./sync-dual.sh
+./lab sync
 ```
 
 Install the topology through the official `uvs_set_topo_info()` entry point:

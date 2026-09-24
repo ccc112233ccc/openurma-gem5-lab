@@ -34,6 +34,6 @@ ARM_BUILD="$arm_build" \
 BUSYBOX_ARM64="$busybox" \
 OUT="$output" \
 EXTRA_MODULES="${extra_modules% }" \
-    "$lab_root/build-interactive-initramfs.sh"
+    "$lab_root/scripts/build/build-interactive-initramfs.sh"
 
 echo "official UDMA initramfs: $output"

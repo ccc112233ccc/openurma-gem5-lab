@@ -9,7 +9,7 @@ gem5_binary=${1:-}
 [[ "$(uname -m)" == aarch64 ]] ||
     die "ArmV8KvmCPU requires an ARM64 host; found $(uname -m)"
 [[ -c /dev/kvm ]] ||
-    die "/dev/kvm is absent (for Docker recreate with ./setup-docker.sh --kvm)"
+    die "/dev/kvm is absent (for Docker recreate with ./lab --runtime docker setup --kvm)"
 [[ -r /dev/kvm && -w /dev/kvm ]] ||
     die "/dev/kvm is not readable and writable by uid $(id -u)"
 [[ -n "$gem5_binary" && -x "$gem5_binary" ]] ||

@@ -3,12 +3,13 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
-source "$script_dir/scripts/runtime.sh"
+source "$script_dir/../runtime.sh"
 
 # Paths are inside the ARM64 Linux build container. They may be overridden for
 # a different checkout while the documented lab layout remains the default.
 container="$OPENURMA_CONTAINER"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$script_dir")}"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
 gem5="${OPENURMA_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
 m5_path="${OPENURMA_M5_PATH:-$lab/system}"
 kernel="${OPENURMA_KERNEL:-$lab/artifacts/kernel/vmlinux}"
@@ -45,7 +46,7 @@ for resource in boot.arm64 boot.arm; do
 done
 
 echo "Starting the OpenURMA full-system guest. In a second terminal run:"
-echo "  ./attach.sh"
+echo "  ./lab attach 0"
 echo "The UART transcript is also written to $outdir/system.terminal."
 
 gem5_args=(
