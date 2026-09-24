@@ -161,6 +161,39 @@ def run_case(binary: pathlib.Path, endpoints: int, ports: int, mode: str) -> Non
                 mapping.close()
 
 
+def run_unsynchronized_case(binary: pathlib.Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="openurma-adapter-unsync-") as directory:
+        paths, maps = create_maps(directory, 2, 1)
+        process = subprocess.Popen(
+            [str(binary), "--unsynchronized", "--multi", "1", "100t", "50t",
+             "400", "0", "", "1", "0x100,0x101", *(str(path) for path in paths)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            payload = bytes(range(64))
+            # No null-message promise is published. Functional mode must still
+            # forward DATA while preserving the modeled arrival timestamp.
+            publish(maps[0], 1, 0, 300, 1, 0x100, 0x101, payload)
+            wait_for(
+                lambda: any(message[1] == DATA
+                            for message in output_messages(maps[1], 1, 0)),
+                process, "unsynchronized switch waited for a SYNC promise",
+            )
+            messages = output_messages(maps[1], 1, 0)
+            assert all(message[1] != SYNC for message in messages), messages
+            received = next(message for message in messages if message[1] == DATA)
+            assert received[3] == 1730, received
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            for mapping in maps:
+                mapping.close()
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3):
         print(f"usage: {sys.argv[0]} UB_SWITCH_BINARY [--multi|--native-multi]",
@@ -173,6 +206,8 @@ def main() -> int:
     run_case(binary, 2, 1, mode)
     run_case(binary, 4, 1, mode)
     run_case(binary, 2, 2, mode)
+    if mode == "--multi":
+        run_unsynchronized_case(binary)
     print("ub-switch lifetime adapter synchronization smoke test: PASS")
     return 0
 

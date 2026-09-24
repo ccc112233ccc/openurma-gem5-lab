@@ -21,16 +21,38 @@ container:
 ./run-dual.sh --profile kvm
 ```
 
+KVM defaults to **unsynchronized** adapter execution. The two gem5 guests and
+the switch run independently; DATA still crosses the same shared-memory
+adapter and retains the configured serialization/propagation timestamps, but
+no periodic SYNC horizons are generated. This is the useful KVM mode for fast
+driver, boot and functional validation. Cross-process latency numbers from it
+are not virtual-time performance results.
+
+The policy is selected by `OPENURMA_SYNC=auto` (the default): `kvm` and
+`kvm_server_o3` resolve to off, while Atomic/Timing/O3 profiles resolve to on.
+Use `--sync` or `--no-sync` to override it, and inspect
+`virtual_time_synchronization` in `run-dual/run-manifest.txt`. For example:
+
+```bash
+# Default fast functional KVM execution: no adapter horizons.
+./run-dual-native.sh --profile kvm
+
+# Diagnostic only: reproduce strict adapter-local KVM synchronization.
+./run-dual-native.sh --profile kvm --sync
+```
+
+The synchronized override is intentionally not the default. With a 100-ns
+lookahead it bounds `ArmV8KvmCPU` to roughly 200-ns KVM slices; each exit may
+also trigger expensive ARM `KVM_GET_ONE_REG` state recovery. It is useful for
+debugging that integration, not for routine execution.
+
 The launcher checks `/dev/kvm`, host architecture, and gem5's generated
 `USE_KVM=1` / `KVM_ISA="arm"` headers before starting any processes. KVM mode
 is restricted to one vCPU because multi-vCPU host event queues have not been
-validated with distributed UB synchronization.
-
-The adapter synchronizer is active from tick zero and exclusively drains the
-cross-process peer ring, waking the UDMA worker when DATA arrives. Therefore an
-empty peer ring no longer creates a second 10-ns (or 1-ms) periodic DMA-worker
-event. `OPENURMA_UDMA_POLL_INTERVAL` remains only for guest-level RNR retry and
-for transports that do not use the synchronized switch adapter.
+validated with the SystemC UB device model. In default unsynchronized mode the
+UDMA worker polls the receive ring at `OPENURMA_UDMA_POLL_INTERVAL` (1 ms for
+the KVM profile). When synchronization is explicitly enabled, the adapter
+event owns ring progress and wakes the worker when DATA arrives.
 
 ## Timer topology
 

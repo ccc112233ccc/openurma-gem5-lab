@@ -140,7 +140,12 @@ UB link:
                                 (tp-context|legacy-hash; default: tp-context)
   --peer-latency-ns NS          OPENURMA_PEER_LATENCY_NS
   --sync-quantum-ns NS          OPENURMA_SYNC_QUANTUM_NS (default: lookahead)
+  --sync                        force inter-simulator virtual-time sync on
+  --no-sync                     force inter-simulator virtual-time sync off
+                                OPENURMA_SYNC=(auto|on|off; default: auto;
+                                off for KVM CPUs, on otherwise)
   --sync-mode MODE              OPENURMA_SYNC_MODE
+                                mechanism used when synchronization is on
                                 (global-barrier|adapter-local; default:
                                 adapter-local)
   --peer-link-rate-gbps N       OPENURMA_PEER_LINK_RATE_GBPS
@@ -277,6 +282,7 @@ cli_peer_port_map=""
 cli_peer_port_selection=""
 cli_peer_latency_ns=""
 cli_sync_quantum_ns=""
+cli_sync=""
 cli_sync_mode=""
 cli_peer_link_rate_gbps=""
 cli_peer_serialization_stages=""
@@ -503,6 +509,8 @@ while (( $# > 0 )); do
         --peer-latency-ns=*) cli_peer_latency_ns=${1#*=}; shift ;;
         --sync-quantum-ns) need_value "$@"; cli_sync_quantum_ns=$2; shift 2 ;;
         --sync-quantum-ns=*) cli_sync_quantum_ns=${1#*=}; shift ;;
+        --sync) cli_sync=on; shift ;;
+        --no-sync) cli_sync=off; shift ;;
         --sync-mode) need_value "$@"; cli_sync_mode=$2; shift 2 ;;
         --sync-mode=*) cli_sync_mode=${1#*=}; shift ;;
         --peer-link-rate-gbps) need_value "$@"; cli_peer_link_rate_gbps=$2; shift 2 ;;
@@ -906,6 +914,7 @@ peer_port_map="${OPENURMA_PEER_PORT_MAP:-$profile_peer_port_map}"
 peer_port_selection="${OPENURMA_PEER_PORT_SELECTION:-$profile_peer_port_selection}"
 peer_latency_ns="${OPENURMA_PEER_LATENCY_NS:-100}"
 sync_quantum_ns="${OPENURMA_SYNC_QUANTUM_NS:-$peer_latency_ns}"
+sync_request="${OPENURMA_SYNC:-auto}"
 sync_mode="${OPENURMA_SYNC_MODE:-adapter-local}"
 peer_link_rate_gbps="${OPENURMA_PEER_LINK_RATE_GBPS:-$profile_peer_link_rate_gbps}"
 peer_serialization_stages="${OPENURMA_PEER_SERIALIZATION_STAGES:-$profile_peer_serialization_stages}"
@@ -1023,6 +1032,7 @@ provider="${OPENURMA_PROVIDER:-$profile_provider}"
 [[ -n "$cli_peer_port_selection" ]] && peer_port_selection=$cli_peer_port_selection
 [[ -n "$cli_peer_latency_ns" ]] && peer_latency_ns=$cli_peer_latency_ns
 [[ -n "$cli_sync_quantum_ns" ]] && sync_quantum_ns=$cli_sync_quantum_ns
+[[ -n "$cli_sync" ]] && sync_request=$cli_sync
 [[ -n "$cli_sync_mode" ]] && sync_mode=$cli_sync_mode
 [[ -n "$cli_peer_link_rate_gbps" ]] && peer_link_rate_gbps=$cli_peer_link_rate_gbps
 [[ -n "$cli_peer_serialization_stages" ]] && peer_serialization_stages=$cli_peer_serialization_stages
@@ -1115,6 +1125,23 @@ else
         kvm) m5ops_mode=addr ;;
         *) m5ops_mode=inst ;;
     esac
+fi
+
+case "$sync_request" in
+    auto)
+        case "$cpu_mode" in
+            kvm|kvm_server_o3) sync_enabled=0 ;;
+            *) sync_enabled=1 ;;
+        esac
+        ;;
+    on|1|true|yes) sync_enabled=1 ;;
+    off|0|false|no) sync_enabled=0 ;;
+    *) die "OPENURMA_SYNC must be auto, on, or off" ;;
+esac
+if (( sync_enabled )); then
+    synchronization=enabled
+else
+    synchronization=disabled
 fi
 
 lab_host="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1378,9 +1405,12 @@ case "$sync_mode" in
     global-barrier|adapter-local) ;;
     *) die "sync mode must be global-barrier or adapter-local" ;;
 esac
-if [[ "$sync_mode" == adapter-local ]]; then
+if (( sync_enabled )) && [[ "$sync_mode" == adapter-local ]]; then
     [[ "$ub_transport" == switch-adapter ]] ||
         die "adapter-local sync requires --ub-transport switch-adapter"
+fi
+if (( ! sync_enabled )) && [[ "$network_backend" != builtin ]]; then
+    die "unsynchronized adapter execution currently requires --network-backend builtin"
 fi
 if [[ "$ub_transport" == switch-adapter && "$peer_topology" != l1-switch ]]; then
     die "switch-adapter requires --peer-topology l1-switch"
@@ -1537,6 +1567,8 @@ memory_controller_backend_latency=$mem_ctrl_backend_latency
 memory_controller_command_window=$mem_ctrl_command_window
 peer_latency_ns=$peer_latency_ns
 sync_quantum_ns=$sync_quantum_ns
+sync_request=$sync_request
+virtual_time_synchronization=$synchronization
 sync_mode=$sync_mode
 ub_port_count=$ub_port_count
 ub_transport=$ub_transport
@@ -1740,7 +1772,7 @@ else
 fi
 
 actual_dist_port=""
-if [[ "$sync_mode" == global-barrier ]]; then
+if (( sync_enabled )) && [[ "$sync_mode" == global-barrier ]]; then
     # Compatibility/reference mode: the stock dist-gem5 switch owns a global
     # conservative barrier while UB DATA still traverses ub-switch-sim.
     ou_exec_detached \
@@ -1768,14 +1800,19 @@ if [[ "$ub_transport" == switch-adapter ]]; then
     if [[ "$network_backend" == ns3ub-native ]]; then
         ub_switch_mode=--native-multi
     fi
+    ub_switch_args=()
+    if (( ! sync_enabled )); then
+        ub_switch_args+=(--unsynchronized)
+    fi
+    ub_switch_args+=("$ub_switch_mode" "$ub_port_count"
+        "${peer_latency_ns}ns" "$peer_switch_delay"
+        "$peer_link_rate_gbps" "$peer_link_overhead_bytes"
+        "${peer_port_map:-}" "$peer_serialization_stages"
+        "$endpoint_eids" "${ring_paths[@]}")
     ou_exec_detached \
         bash "$lab/tools/run-background.sh" \
         "$run_root/ub-switch/gem5.pid" "$run_root/ub-switch/gem5.log" \
-        "$ub_switch_binary" "$ub_switch_mode" "$ub_port_count" \
-        "${peer_latency_ns}ns" "$peer_switch_delay" \
-        "$peer_link_rate_gbps" "$peer_link_overhead_bytes" \
-        "${peer_port_map:-}" "$peer_serialization_stages" \
-        "$endpoint_eids" "${ring_paths[@]}"
+        "$ub_switch_binary" "${ub_switch_args[@]}"
     for _ in $(seq 1 100); do
         if ou_exec grep -q "$ub_switch_ready_pattern" \
             "$run_root/ub-switch/gem5.log" 2>/dev/null; then
@@ -1803,7 +1840,13 @@ launch_node() {
     fi
     sync_args=()
     adapter_sync_env=0
-    if [[ "$sync_mode" == adapter-local ]]; then
+    if (( ! sync_enabled )); then
+        sync_args+=(--dist-size=0)
+        # Patched perftest binaries may still issue the legacy dist-toggle
+        # pseudo-op. There is no DistIface in functional adapter mode, so keep
+        # the adapter compatibility no-op enabled without starting its event.
+        adapter_sync_env=1
+    elif [[ "$sync_mode" == adapter-local ]]; then
         sync_args+=(--adapter-local-sync --dist-size=0)
         adapter_sync_env=1
     else
@@ -1981,7 +2024,9 @@ echo "  UB link model: ${ub_port_count} physical port(s), ${peer_link_rate_gbps}
 echo "  UB topology: $peer_topology (source-to-destination port map: ${peer_port_map:-identity})"
 echo "  UB egress selection: $peer_port_selection"
 echo "  UB switch service delay: $peer_switch_delay"
-if [[ "$sync_mode" == adapter-local ]]; then
+if (( ! sync_enabled )); then
+    echo "  synchronization: disabled (${sync_request}; CPU mode $cpu_mode)"
+elif [[ "$sync_mode" == adapter-local ]]; then
     echo "  synchronization: lifetime per-link Adapter DATA/SYNC (switch is a virtual-time participant)"
 else
     echo "  synchronization: dist-gem5 global barrier at localhost:$actual_dist_port (${sync_quantum_ns} ns quantum)"

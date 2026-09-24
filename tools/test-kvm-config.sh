@@ -16,10 +16,24 @@ grep -qx 'm5ops_mode=addr' "$tmp/kvm"
 grep -qx 'cpu_count=1' "$tmp/kvm"
 grep -qx 'udma_poll_interval=1ms' "$tmp/kvm"
 grep -qx 'kvm_host_cpu_contract=portable_udma_provider' "$tmp/kvm"
+grep -qx 'sync_request=auto' "$tmp/kvm"
+grep -qx 'virtual_time_synchronization=disabled' "$tmp/kvm"
+grep -qx 'sync_mode=adapter-local' "$tmp/kvm"
+
+OPENURMA_EXECUTION_MODE=native "$lab/run-dual.sh" --profile kvm --sync \
+    --print-config >"$tmp/kvm-sync"
+grep -qx 'sync_request=on' "$tmp/kvm-sync"
+grep -qx 'virtual_time_synchronization=enabled' "$tmp/kvm-sync"
 
 OPENURMA_EXECUTION_MODE=native "$lab/run-dual.sh" --profile fast \
     --print-config >"$tmp/fast"
 grep -qx 'udma_poll_interval=10ns' "$tmp/fast"
+grep -qx 'virtual_time_synchronization=enabled' "$tmp/fast"
+
+OPENURMA_EXECUTION_MODE=native "$lab/run-dual.sh" --profile fast --no-sync \
+    --print-config >"$tmp/fast-unsync"
+grep -qx 'sync_request=off' "$tmp/fast-unsync"
+grep -qx 'virtual_time_synchronization=disabled' "$tmp/fast-unsync"
 
 OPENURMA_EXECUTION_MODE=native "$lab/run-dual.sh" --profile fast \
     --cpu-mode kvm --print-config >"$tmp/kvm-override"

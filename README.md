@@ -65,6 +65,11 @@ cd openurma-gem5-lab
 双节点空 ring 轮询退避、官方 provider 的宿主 CPU/KSVA 差异和诊断方法见
 [`docs/kvm-functional-mode.md`](docs/kvm-functional-mode.md)。
 
+KVM 默认关闭跨进程虚拟时间同步，只保留 adapter 数据通路和链路时间戳，用于
+快速启动及功能验证；Atomic/Timing/O3 默认开启同步。`--sync` 和 `--no-sync`
+可显式覆盖自动策略，`--sync-mode` 仅在同步开启时选择 `adapter-local` 或
+`global-barrier`。无同步 KVM 的跨进程时延数值不能作为性能结果。
+
 原有 `./setup.sh` 保留为 `setup-docker.sh` 的兼容入口。Docker 包装层完成以下工作：
 
 1. 构建 Ubuntu 22.04 ARM64 工具容器；
@@ -372,11 +377,15 @@ they map `/tmp/openurma-dual.node0.adapter` and
 The common 64-byte Adapter header supports versioned `DATA` and `SYNC` records.
 `DATA` carries source/destination EIDs for switch routing; `SYNC` is link-local
 control and deliberately carries neither EID nor TP/application identity.
-With the default two nodes, `adapter-local` therefore has exactly three timed
-simulator processes: gem5 node 0, the UB switch, and gem5 node 1. An N-node run
-has N gem5 processes plus the same switch process; there is no dist-gem5
-switch. `--sync-mode global-barrier` retains that extra global synchronization
-process as an explicit compatibility/reference mode.
+With synchronization enabled, the default two-node `adapter-local` run has
+exactly three timed simulator processes: gem5 node 0, the UB switch, and gem5
+node 1. An N-node run has N gem5 processes plus the same switch process; there
+is no dist-gem5 switch. `--sync-mode global-barrier` retains that extra global
+synchronization process as an explicit compatibility/reference mode. The
+launcher resolves `OPENURMA_SYNC=auto` to disabled for KVM CPU modes and
+enabled for the interpreted CPUs. In unsynchronized KVM mode, the same adapter
+still routes DATA and models its wire timestamp, but neither endpoint nor
+switch publishes SYNC records.
 
 The default one-way UB propagation delay is 100 ns. It is also the positive
 lookahead: every Adapter DATA record carries a `receive_tick`, and a receiver
@@ -386,7 +395,7 @@ Every point-to-point Adapter gives each direction and physical port its own
 64-slot FIFO. Every record carries explicit source and destination port IDs.
 The receiver merges ready queue heads by virtual arrival time, so a delayed
 packet on one port cannot block an already-arrived packet on another port.
-From tick zero, each endpoint publishes `SYNC` null-message promises on the
+When synchronization is enabled, each endpoint publishes `SYNC` null-message promises on the
 same per-port FIFO as `DATA`. The switch is an independent virtual-time
 participant: it advances only to the minimum promise across every physical
 ingress link, processes causally ready DATA, then publishes a promise on every
@@ -616,10 +625,11 @@ result directory.
 
 Both wrappers still set `OPENURMA_DIST_SYNC=1` for compatibility with the
 patched perftest. In `adapter-local` mode those guest toggle operations are
-no-ops: synchronization has already been active since simulator startup and is
-independent of TCP setup, peer EIDs and the measured loop. The same guest
-command selects the legacy dist-gem5 implementation when the launcher is run
-with `--sync-mode global-barrier`.
+no-ops: synchronization state is owned by the launcher and is independent of
+TCP setup, peer EIDs and the measured loop. This also prevents a functional
+unsynchronized KVM run from calling dist-gem5 without a `DistIface`. The same
+guest command selects the legacy dist-gem5 implementation when synchronization
+is enabled with `--sync-mode global-barrier`.
 
 The original Python-stepped comparison is retained in
 [`results/sync-ab-20260921/REPORT.md`](results/sync-ab-20260921/REPORT.md), and

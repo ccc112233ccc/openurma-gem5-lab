@@ -130,6 +130,7 @@ struct Switch {
     uint64_t rate_gbps;
     uint32_t overhead_bytes;
     uint32_t serialization_stages;
+    bool synchronized;
     std::vector<uint32_t> port_map;
     std::vector<std::vector<std::vector<uint64_t>>> egress_free;
     std::vector<std::vector<uint64_t>> last_output_timestamp;
@@ -145,11 +146,12 @@ struct Switch {
            std::vector<uint32_t> eids, uint32_t p,
            uint64_t latency, uint64_t delay, uint64_t rate,
            uint32_t overhead, std::vector<uint32_t> mapping,
-           uint32_t stages)
+           uint32_t stages, bool sync)
       : endpoint_eids(std::move(eids)), ports(p),
         link_latency_ticks(latency), switch_delay_ticks(delay),
         rate_gbps(rate), overhead_bytes(overhead),
-        serialization_stages(stages), port_map(std::move(mapping)),
+        serialization_stages(stages), synchronized(sync),
+        port_map(std::move(mapping)),
         egress_free(paths.size(), std::vector<std::vector<uint64_t>>(
             p, std::vector<uint64_t>(stages))),
         last_output_timestamp(paths.size(), std::vector<uint64_t>(p)),
@@ -214,8 +216,10 @@ struct Switch {
             throw std::runtime_error("adapter protocol version mismatch");
         if (source->source_port != source_port)
             throw std::runtime_error("message published on wrong ingress port");
-        if (source->receive_tick > virtual_time)
+        if (synchronized && source->receive_tick > virtual_time)
             return false;
+        if (!synchronized)
+            virtual_time = std::max(virtual_time, source->receive_tick);
 
         const auto type = static_cast<oa::MessageType>(source->type);
         input_grant[source_link][source_port] = std::max(
@@ -350,7 +354,8 @@ struct Switch {
                   << " ports=" << ports
                   << " rate_gbps=" << rate_gbps
                   << " link_latency_ticks=" << link_latency_ticks
-                  << " switch_delay_ticks=" << switch_delay_ticks << '\n';
+                  << " switch_delay_ticks=" << switch_delay_ticks
+                  << " synchronized=" << (synchronized ? 1 : 0) << '\n';
         while (!stop_requested) {
             bool progress = false;
             // Consume every event that is now causally executable. SYNC is
@@ -368,24 +373,27 @@ struct Switch {
             // The switch is an independent conservative simulator. It may
             // advance only to the minimum next-message/null-message timestamp
             // across every physical ingress link.
-            const uint64_t safe = safeTime();
-            if (safe > virtual_time) {
-                virtual_time = safe;
-                virtual_time_started = true;
-                progress = true;
-                continue;
+            if (synchronized) {
+                const uint64_t safe = safeTime();
+                if (safe > virtual_time) {
+                    virtual_time = safe;
+                    virtual_time_started = true;
+                    progress = true;
+                    continue;
+                }
+
+                // Advertise the switch's new safe time independently on every
+                // egress link. This is link control, never an EID-routed packet.
+                if (virtual_time_started) {
+                    for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint)
+                        for (uint32_t port = 0; port < ports; ++port)
+                            progress |= publishSync(endpoint, port);
+                }
             }
 
-            // Advertise the switch's new safe time independently on every
-            // egress link.  This is link control, never an EID-routed packet.
-            if (virtual_time_started) {
-                for (uint32_t endpoint = 0; endpoint < links.size(); ++endpoint)
-                    for (uint32_t port = 0; port < ports; ++port)
-                        progress |= publishSync(endpoint, port);
-            }
-
-            // Like the SimBricks proxy, synchronized operation busy-polls its
-            // shared-memory queues; virtual time, not host sleep, gates work.
+            // Both modes poll the shared-memory queue directly. In synchronized
+            // mode virtual time gates work; functional mode consumes arrivals
+            // without waiting for null-message promises.
             if (!progress)
                 std::this_thread::yield();
         }
@@ -446,41 +454,52 @@ std::vector<uint32_t> parseEndpointEids(const std::string &text)
 
 int main(int argc, char **argv)
 {
-    const bool multi = argc >= 2 && std::string_view(argv[1]) == "--multi";
-    if ((!multi && argc != 10) || (multi && argc < 12)) {
-        std::cerr << "usage: ub-switch-sim RING0 RING1 PORTS LINK_LATENCY "
+    std::vector<std::string_view> args;
+    for (int index = 1; index < argc; ++index)
+        args.emplace_back(argv[index]);
+    bool synchronized = true;
+    if (!args.empty() && args.front() == "--unsynchronized") {
+        synchronized = false;
+        args.erase(args.begin());
+    }
+    const bool multi = !args.empty() && args.front() == "--multi";
+    if ((!multi && args.size() != 9) || (multi && args.size() < 11)) {
+        std::cerr << "usage: ub-switch-sim [--unsynchronized] "
+                     "RING0 RING1 PORTS LINK_LATENCY "
                      "SWITCH_DELAY RATE_GBPS OVERHEAD_BYTES PORT_MAP "
                      "SERIALIZATION_STAGES\n"
-                     "   or: ub-switch-sim --multi PORTS LINK_LATENCY "
+                     "   or: ub-switch-sim [--unsynchronized] --multi "
+                     "PORTS LINK_LATENCY "
                      "SWITCH_DELAY RATE_GBPS OVERHEAD_BYTES PORT_MAP "
                      "SERIALIZATION_STAGES ENDPOINT_EIDS RING...\n";
         return 2;
     }
     try {
-        const int base = multi ? 2 : 3;
+        const std::size_t base = multi ? 1 : 2;
         const uint32_t ports = static_cast<uint32_t>(
-            parseUnsigned(argv[base], "ports"));
+            parseUnsigned(args[base].data(), "ports"));
         if (ports == 0 || ports > oa::MaxPorts)
             throw std::runtime_error("ports must be in [1,16]");
         std::vector<std::string> paths;
         std::vector<uint32_t> peers;
         if (multi) {
-            peers = parseEndpointEids(argv[9]);
-            for (int index = 10; index < argc; ++index)
-                paths.emplace_back(argv[index]);
+            peers = parseEndpointEids(std::string(args[8]));
+            for (std::size_t index = 9; index < args.size(); ++index)
+                paths.emplace_back(args[index]);
         } else {
-            paths = {argv[1], argv[2]};
+            paths = {std::string(args[0]), std::string(args[1])};
             peers = {0x100, 0x101};
         }
         Switch model(paths, std::move(peers), ports,
-            parseTimeTicks(argv[base + 1], "link latency"),
-            parseTimeTicks(argv[base + 2], "switch delay"),
-            parseUnsigned(argv[base + 3], "rate"),
+            parseTimeTicks(args[base + 1].data(), "link latency"),
+            parseTimeTicks(args[base + 2].data(), "switch delay"),
+            parseUnsigned(args[base + 3].data(), "rate"),
             static_cast<uint32_t>(
-                parseUnsigned(argv[base + 4], "overhead")),
-            parseMap(argv[base + 5], ports),
+                parseUnsigned(args[base + 4].data(), "overhead")),
+            parseMap(std::string(args[base + 5]), ports),
             static_cast<uint32_t>(
-                parseUnsigned(argv[base + 6], "serialization stages")));
+                parseUnsigned(args[base + 6].data(), "serialization stages")),
+            synchronized);
         std::signal(SIGINT, stopHandler);
         std::signal(SIGTERM, stopHandler);
         model.run();
