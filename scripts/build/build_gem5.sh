@@ -118,6 +118,12 @@ scaffold_src="$openurma_root/eval/twonode/gem5_scaffold/src"
 scaffold_extra="$lab_dir/artifacts/gem5-openurma-scaffold"
 mkdir -p "$scaffold_extra"
 rsync -a --delete "$scaffold_src/" "$scaffold_extra/"
+adapter_overlay="$lab_dir/integrations/gem5/ub_host_adapter"
+[[ -f "$adapter_overlay/SConscript" ]] ||
+    die "UB-HOST gem5 adapter overlay is missing: $adapter_overlay"
+rsync -a --delete "$adapter_overlay/" "$scaffold_extra/ub_host_adapter/"
+sed -i '$a SConscript("ub_host_adapter/SConscript", exports="*")' \
+    "$scaffold_extra/SConscript"
 find "$scaffold_extra" -type f \
     -exec sed -i \
         -e "s#/home/ubuntu/OpenURMA#$openurma_root#g" \
@@ -159,6 +165,7 @@ note "building gem5.opt with gold low-memory linking, OpenURMA EXTRAS, and JOBS=
     cd "$gem5_root"
     export OPENURMA_ROOT="$openurma_root"
     export OPENCLICKNP_ROOT="$openclicknp_root"
+    export OPENURMA_LAB_ROOT="$lab_dir"
     # SCons deliberately does not follow src/ directory symlinks while walking
     # the built-in source tree.  Keep the canonical symlink for the checked-in
     # configuration's imports, but register the scaffold explicitly as EXTRAS

@@ -38,6 +38,21 @@ The gem5 and QEMU adapters expose only generic host/device operations:
 They must not decode UDMA WQEs, choose an egress UB port, synthesize CQEs, or
 implement RMA semantics. Those are device behaviors.
 
+The first gem5 implementation is
+`integrations/gem5/ub_host_adapter/UbHostAdapter.*`. It is a native gem5
+`DmaDevice`: guest PIO becomes `UB-HOST` MMIO, device-originated requests use
+gem5's DMA port, and protocol interrupts drive an `ArmInterruptPin`. It has no
+UDMA descriptor or packet logic. The reproducible gem5 builder overlays this
+source into its generated EXTRAS tree, leaving the pinned OpenURMA checkout
+unchanged.
+
+This adapter currently represents the new functional control path and keeps
+UB-HOST synchronization disabled. It is not yet selected by the default
+full-system configuration: the official-driver discovery/register map still
+needs to be extracted from `NICTopologySC` into the standalone model first.
+This explicit gate prevents silently replacing a bootable official-driver
+configuration with the temporary extraction descriptor.
+
 ### UDMA device model
 
 `components/udma-model/` owns the hardware-visible behavior:
@@ -127,7 +142,8 @@ ownership, timestamp, or synchronization implementation.
 2. Run the core as an independent process over SimBricks shared-memory queues
    using mock host and network peers. **Complete.**
 3. Replace one gem5 control path at a time: discovery/MMIO, DMA, interrupt,
-   SEND, then READ/WRITE and receive queues.
+   SEND, then READ/WRITE and receive queues. The thin MMIO/DMA/IRQ adapter is
+   implemented; migration of the official register/WQE behavior is in progress.
 4. Connect ns-3-UB at the frame boundary and remove transaction shortcuts.
 5. Add a QEMU adapter that implements the same `UB-HOST` protocol; the device
    and network processes remain unchanged.

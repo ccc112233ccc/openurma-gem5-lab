@@ -32,4 +32,4 @@ static int openurma_accept4(int socket_fd, struct sockaddr *address,
 #define accept4 openurma_accept4
 #endif
 
-#include SIMBRICKS_BASE_SOURCE
+#include <simbricks/base/if.c>

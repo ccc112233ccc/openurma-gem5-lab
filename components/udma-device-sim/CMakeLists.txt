@@ -13,8 +13,6 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../udma-model"
 add_library(simbricks_base STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/simbricks_base_portable.c")
 target_include_directories(simbricks_base SYSTEM PUBLIC "${SIMBRICKS_ROOT}/lib")
-target_compile_definitions(simbricks_base PRIVATE
-    SIMBRICKS_BASE_SOURCE="${SIMBRICKS_ROOT}/lib/simbricks/base/if.c")
 target_compile_options(simbricks_base PRIVATE -Wall -Wextra)
 
 add_executable(udma-device-sim src/main.cc)

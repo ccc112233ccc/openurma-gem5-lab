@@ -85,6 +85,7 @@ scripts/
 tools/               switch simulator, guest helpers, profiling, and tests
 official-udma/       official-driver build and contract evidence
 integrations/ns3ub/  complete ns-3-UB adapter source and upstream overlay
+integrations/gem5/   thin UB-HOST adapter overlay for gem5 builds
 overlay/             files installed into the guest initramfs
 patches/             reviewed changes applied to pinned upstream sources
 docker/              reproducible ARM64 Ubuntu build image
