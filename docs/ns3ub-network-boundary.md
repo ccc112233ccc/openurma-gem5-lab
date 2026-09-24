@@ -43,7 +43,7 @@ physical port has independent ingress and egress FIFO state.
 
 ## Adapter contract
 
-The initial implementation retains adapter protocol version 3 so the current
+The checked-in implementation uses adapter protocol version 4 so the current
 gem5 endpoint can be tested without changing the official software path.
 Each fixed-size record has a 64-byte header followed by either:
 
@@ -62,6 +62,11 @@ This makes the boundary timestamp directly usable as a native `UbSwitch`
 ingress event. The `ns3ub-compat` mode retains arithmetic switch/egress timing;
 `ns3ub-native` replaces that arithmetic with the production `UbSwitch`, VOQ,
 allocator, `UbPort`, and `UbLink` path.
+
+The complete process and protocol implementation is reviewable in
+`integrations/ns3ub/ub-gem5-adapter.cc` and
+`integrations/ns3ub/ub-external-adapter-protocol.h`. The public ns-3-UB source
+tree is a pinned generated dependency, not the owner of this lab-specific ABI.
 
 ## Virtual time
 

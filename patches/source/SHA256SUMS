@@ -2,7 +2,6 @@
 5f249337a758384bfc3aa02f278f7f52f2dc0c042e33744642afa526ec60c3c7  patches/source/gem5/0002-Enforce-distributed-synchronization-wake-deadlines.patch
 2108ae9cce3348fc6cf4756dc5220e04a148d2e5f38789b9a4ab877472d82b0d  patches/source/gem5/0003-Route-sync-toggles-to-adapter-simulation-loop.patch
 d5eff1732ddbbdf0a482efe5fd1bbc094e12fc965117ba3999568a5607b45ea5  patches/source/gem5/0004-Ignore-guest-sync-toggles-in-lifetime-adapter-mode.patch
-d42b4cb09539b43c5059a648ae40b56be636455a767e3dcc650d66b5eecfb8eb  patches/source/ns3ub/0001-Synchronize-external-adapters-for-simulation-lifetim.patch
 a3e6faedc980738e13c6193e7737a45a4acd347142e3fd37bec3846705863ed0  patches/source/openurma/0001-sim-checkpoint-dual-node-and-official-UBUS-discovery.patch
 f13cc57bfb759b98c5f065a6ec391088123c6cc7b2b4a764e422b6f2462d1e63  patches/source/openurma/0002-Model-UBASE-command-queue-and-USI-capability.patch
 e53f899eacde498cea8b32c2a990ff24954b9c640b26633a715b2358e0ea14b8  patches/source/openurma/0003-Model-UBASE-CtrlQ-responses-and-Type-1-MSI-delivery.patch

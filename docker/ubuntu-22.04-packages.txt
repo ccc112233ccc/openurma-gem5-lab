@@ -11,6 +11,7 @@ cmake
 cpio
 curl
 device-tree-compiler
+debootstrap
 flex
 g++-aarch64-linux-gnu
 gcc-aarch64-linux-gnu

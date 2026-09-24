@@ -11,6 +11,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="${OPENURMA_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 UMDK_SRC="${UMDK_SRC:-$LAB_DIR/sources/OpenURMA/integration/umdk/vendor/umdk}"
 TARGET_ARCH="${OPENURMA_TARGET_ARCH:-arm64}"
+BUILD_MODE="${OPENURMA_BUILD_MODE:-auto}"
+ARM64_SYSROOT="${OPENURMA_ARM64_SYSROOT:-}"
 JOBS="${JOBS:-2}"
 BUILD_STOCK_UDMA="${BUILD_STOCK_UDMA:-disable}"
 ALLOW_DIRTY_UMDK="${ALLOW_DIRTY_UMDK:-disable}"
@@ -27,11 +29,13 @@ die() {
 usage() {
     cat <<'EOF'
 Usage: ./lab build umdk [--target-arch arm64|x86_64]
+       [--build-mode auto|native|cross] [--arm64-sysroot PATH]
 
 Build the unmodified UMDK userspace stack for the selected Linux ABI. ARM64 is
 the complete full-system target. x86_64 builds UMDK and its provider on native
 x86_64 Linux; the official OLK UB/UMMU kernel stack and gem5 machine remain
-ARM64-only.
+ARM64-only. On x86_64 Linux, ARM64 can be cross-built directly with an ARM64
+sysroot; no ARM64 container is required.
 EOF
 }
 
@@ -46,6 +50,18 @@ while (( $# > 0 )); do
             TARGET_ARCH=${1#*=}
             shift
             ;;
+        --build-mode)
+            (( $# >= 2 )) || die "--build-mode requires a value"
+            BUILD_MODE=$2
+            shift 2
+            ;;
+        --build-mode=*) BUILD_MODE=${1#*=}; shift ;;
+        --arm64-sysroot)
+            (( $# >= 2 )) || die "--arm64-sysroot requires a value"
+            ARM64_SYSROOT=$2
+            shift 2
+            ;;
+        --arm64-sysroot=*) ARM64_SYSROOT=${1#*=}; shift ;;
         -h|--help)
             usage
             exit 0
@@ -62,7 +78,6 @@ case "$TARGET_ARCH" in
         M5_ABI=arm64
         default_build_dir="$LAB_DIR/artifacts/umdk-build"
         default_cross_compile=aarch64-linux-gnu-
-        required_host_arch=aarch64
         ;;
     x86_64|amd64)
         TARGET_ARCH=x86_64
@@ -71,7 +86,6 @@ case "$TARGET_ARCH" in
         M5_ABI=x86
         default_build_dir="$LAB_DIR/artifacts/umdk-build-x86_64"
         default_cross_compile=
-        required_host_arch=x86_64
         ;;
     *) die "target architecture must be arm64 or x86_64" ;;
 esac
@@ -83,8 +97,29 @@ CROSS_COMPILE="${CROSS_COMPILE-$default_cross_compile}"
 GEM5_M5_LIB="${GEM5_M5_LIB:-$GEM5_ROOT/util/m5/build/$M5_ABI/out/libm5.a}"
 
 [[ "$(uname -s)" == "Linux" ]] || die "UMDK target builds require Linux"
-[[ "$(uname -m)" == "$required_host_arch" ]] || \
-    die "$TARGET_ARCH requires a native $required_host_arch Linux builder; use the ARM64 Docker runtime on other hosts"
+host_arch="$(uname -m)"
+case "$BUILD_MODE" in
+    auto)
+        if [[ "$TARGET_ARCH" == arm64 && "$host_arch" == x86_64 ]]; then
+            BUILD_MODE=cross
+        else
+            BUILD_MODE=native
+        fi
+        ;;
+    native|cross) ;;
+    *) die "build mode must be auto, native, or cross" ;;
+esac
+if [[ "$TARGET_ARCH" == x86_64 ]]; then
+    [[ "$host_arch" == x86_64 && "$BUILD_MODE" == native ]] || \
+        die "x86_64 UMDK currently requires a native x86_64 Linux builder"
+elif [[ "$BUILD_MODE" == native ]]; then
+    [[ "$host_arch" == aarch64 ]] || die "native ARM64 UMDK requires an aarch64 Linux builder"
+else
+    [[ "$host_arch" == x86_64 ]] || die "ARM64 cross-build is supported from x86_64 Linux"
+    [[ -n "$ARM64_SYSROOT" && -d "$ARM64_SYSROOT/usr/include" ]] || \
+        die "ARM64 cross-build requires --arm64-sysroot PATH"
+    export OPENURMA_ARM64_SYSROOT="$ARM64_SYSROOT"
+fi
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 [[ "$BUILD_STOCK_UDMA" == "enable" || "$BUILD_STOCK_UDMA" == "disable" ]] || \
     die "BUILD_STOCK_UDMA must be 'enable' or 'disable'"
@@ -98,6 +133,22 @@ GEM5_M5_LIB="${GEM5_M5_LIB:-$GEM5_ROOT/util/m5/build/$M5_ABI/out/libm5.a}"
 command -v scons >/dev/null || die "scons is required to build libm5"
 command -v "${CROSS_COMPILE}gcc" >/dev/null || \
     die "target compiler not found: ${CROSS_COMPILE}gcc"
+
+cmake_cross_args=()
+if [[ "$BUILD_MODE" == cross ]]; then
+    compiler="$LAB_DIR/tools/aarch64-umdk-cc.py"
+    [[ -x "$compiler" ]] || die "UMDK cross-compiler launcher is missing: $compiler"
+    cmake_cross_args=(
+        -DCMAKE_SYSTEM_NAME=Linux
+        -DCMAKE_SYSTEM_PROCESSOR=aarch64
+        -DCMAKE_C_COMPILER="$compiler"
+        -DCROSS_COMPILE="$compiler"
+        -DCMAKE_FIND_ROOT_PATH="$ARM64_SYSROOT"
+        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
+        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
+        -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY
+    )
+fi
 
 actual_sha="$(git -C "$UMDK_SRC" rev-parse HEAD)"
 [[ "$actual_sha" == "$PINNED_UMDK_SHA" ]] || \
@@ -119,7 +170,7 @@ else
     git -C "$UMDK_SRC" diff --cached --quiet -- || die "UMDK worktree has staged source changes"
 fi
 
-echo "Building UMDK $PINNED_UMDK_SHA for $TARGET_ARCH with JOBS=$JOBS, stock UDMA=$BUILD_STOCK_UDMA"
+echo "Building UMDK $PINNED_UMDK_SHA for $TARGET_ARCH ($BUILD_MODE) with JOBS=$JOBS, stock UDMA=$BUILD_STOCK_UDMA"
 rm -rf -- "$BUILD_DIR"
 
 echo "Building gem5 address/instruction pseudo-op library"
@@ -140,11 +191,17 @@ if [[ "$BUILD_STOCK_UDMA" == "enable" ]]; then
     echo "Building simulation-only libummu.so.1 ABI shim"
     rm -rf -- "$UMMU_SHIM_BUILD_DIR"
     cmake -S "$UMMU_SHIM_SRC" -B "$UMMU_SHIM_BUILD_DIR" \
+        "${cmake_cross_args[@]}" \
         -DUMMU_API_INCLUDE_DIR="$UMMU_DEPS/include" \
         -DUMMU_UAPI_INCLUDE_DIR="$UMMU_DEPS/kernel_headers" \
+        -DBUILD_TESTING="$([[ "$BUILD_MODE" == cross ]] && echo OFF || echo ON)" \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
     cmake --build "$UMMU_SHIM_BUILD_DIR" --parallel "$JOBS"
-    ctest --test-dir "$UMMU_SHIM_BUILD_DIR" --output-on-failure
+    if [[ "$BUILD_MODE" == native ]]; then
+        ctest --test-dir "$UMMU_SHIM_BUILD_DIR" --output-on-failure
+    else
+        echo "Skipping target execution of the ARM64 UMMU self-test during cross-build"
+    fi
 
     # The pinned UMDK build uses plain <ummu_api.h> and -lummu.  Supplying
     # compiler/linker search paths keeps the vendored source unmodified.
@@ -153,6 +210,7 @@ if [[ "$BUILD_STOCK_UDMA" == "enable" ]]; then
 fi
 
 cmake -S "$UMDK_SRC/src" -B "$BUILD_DIR" \
+    "${cmake_cross_args[@]}" \
     -DBUILD_ALL=disable \
     -DBUILD_URMA=enable \
     -DBUILD_UDMA="$BUILD_STOCK_UDMA" \

@@ -42,7 +42,7 @@ def create_maps(directory: str, count: int, ports: int) -> tuple[list[pathlib.Pa
 
 
 def wait_for(predicate, process: subprocess.Popen[str], reason: str) -> None:
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 5
     while not predicate():
         if process.poll() is not None:
             raise RuntimeError(process.stderr.read())

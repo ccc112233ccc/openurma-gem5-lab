@@ -22,6 +22,8 @@ readonly UMMU_URL=https://gitee.com/openeuler/ummu.git
 readonly UMMU_TARGET=f1930d006e08bbe96dfa6fa037ff8a386f535425
 readonly KERNEL_URL=https://gitee.com/openeuler/kernel.git
 readonly KERNEL_TARGET=5078a3a23a1e1825ec136485173ec98668cdd640
+readonly NS3UB_URL=https://gitcode.com/open-usim/ns-3-ub.git
+readonly NS3UB_TARGET=d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b
 readonly ARM_TARBALL_SHA=1e49513d680ccd3c0dd32cbfcf7d3421b4bf8bb35f7c8467de9c863cf7cc1344
 readonly ARM_TARBALL_URL=https://dist.gem5.org/dist/v22-0/arm/aarch-system-20220707.tar.bz2
 
@@ -82,6 +84,7 @@ fetch_with_bundle UMDK "$UMDK_URL" "$umdk" "$UMDK_BASE" "$UMDK_TARGET" \
 fetch_plain OpenClickNP "$OPENCLICKNP_URL" "$sources/OpenClickNP" "$OPENCLICKNP_TARGET"
 fetch_plain UMMU "$UMMU_URL" "$lab/deps/ummu" "$UMMU_TARGET"
 fetch_plain OLK-6.6 "$KERNEL_URL" "$kernel_root" "$KERNEL_TARGET"
+fetch_plain ns-3-UB "$NS3UB_URL" "$sources/ns-3-ub" "$NS3UB_TARGET"
 
 archive="$lab/downloads/aarch-system-20220707.tar.bz2"
 if [[ ! -f "$archive" ]] || ! echo "$ARM_TARBALL_SHA  $archive" | sha256sum -c - >/dev/null 2>&1; then

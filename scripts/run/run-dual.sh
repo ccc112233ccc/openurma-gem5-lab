@@ -1160,7 +1160,7 @@ config="${OPENURMA_CONFIG:-$lab/configs/single_node_fs_openurma.py}"
 switch_config="${OPENURMA_SWITCH_CONFIG:-$lab/gem5/configs/dist/sw.py}"
 ub_switch_source="${OPENURMA_UB_SWITCH_SOURCE:-$lab/tools/ub_switch_sim.cc}"
 if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
-    ns3ub_root="${OPENURMA_NS3UB_ROOT:-$(dirname "$lab")/ns-3-ub}"
+    ns3ub_root="${OPENURMA_NS3UB_ROOT:-$lab/sources/ns-3-ub}"
     ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-gem5-adapter}"
     if [[ -z "${OPENURMA_UB_SWITCH_BINARY:-}" && ! -x "$ub_switch_binary" && \
           -x /tmp/ns3ub-native-build/scratch/ns3.44-ub-gem5-adapter ]]; then
@@ -1759,7 +1759,7 @@ if [[ "$ub_transport" == switch-adapter ]]; then
     done
     if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
         ou_exec test -x "$ub_switch_binary" ||
-            die "missing ns-3-UB adapter binary: $ub_switch_binary; run scripts/build-ns3ub-adapter.sh"
+            die "missing ns-3-UB adapter binary: $ub_switch_binary; run './lab build ns3ub'"
     else
         ou_exec test -r "$ub_switch_source" ||
             die "missing UB switch source: $ub_switch_source"

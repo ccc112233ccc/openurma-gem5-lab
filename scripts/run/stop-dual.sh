@@ -26,7 +26,7 @@ manifest="$run_root/run-manifest.txt"
 network_backend="$(ou_exec awk -F= \
     '$1 == "network_backend" { print $2; exit }' "$manifest" 2>/dev/null || true)"
 if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
-    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$(dirname "$lab")/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
+    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/sources/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
 else
     ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
 fi

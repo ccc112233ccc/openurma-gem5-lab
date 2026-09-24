@@ -1,0 +1,12 @@
+diff --git a/src/unified-bus/CMakeLists.txt b/src/unified-bus/CMakeLists.txt
+index 6732da83..66bd1b87 100644
+--- a/src/unified-bus/CMakeLists.txt
++++ b/src/unified-bus/CMakeLists.txt
+@@ -121,6 +121,7 @@ build_lib(
+ 	model/ub-tag.h
+ 	model/ub-fault.h
+ 	model/ub-link-fault-schedule.h
++	model/ub-external-adapter-protocol.h
+   LIBRARIES_TO_LINK ${libnetwork}
+                     ${libinternet}
+                     ${libapplications}

@@ -8,6 +8,18 @@ openurma="$lab/sources/OpenURMA"
 openclicknp="$lab/sources/OpenClickNP"
 kernel_root="${KSRC:-$lab/oe66}"
 jobs="${JOBS:-2}"
+build_mode="${OPENURMA_BUILD_MODE:-native}"
+arm64_sysroot="${OPENURMA_ARM64_SYSROOT:-}"
+
+if [[ "$build_mode" == cross ]]; then
+    [[ -n "$arm64_sysroot" && -x "$arm64_sysroot/bin/busybox" ]] || {
+        echo "[build-all] cross-build requires an ARM64 sysroot with static BusyBox" >&2
+        exit 2
+    }
+    busybox_arm64="$arm64_sysroot/bin/busybox"
+else
+    busybox_arm64=/bin/busybox
+fi
 
 export OPENURMA_LAB_ROOT="$lab"
 export OPENURMA_ROOT="$openurma"
@@ -29,11 +41,13 @@ echo "[build-all] OLK-6.6 and official kernel drivers"
 echo "[build-all] official UBUS/UMMU/UBASE/UDMA modules"
 "$lab/official-udma/build_modules.sh"
 echo "[build-all] official UDMA initramfs"
-KSRC="$kernel_root" ARM_BUILD="$UMDK_BUILD_DIR" BUSYBOX_ARM64=/bin/busybox \
+KSRC="$kernel_root" ARM_BUILD="$UMDK_BUILD_DIR" BUSYBOX_ARM64="$busybox_arm64" \
+    OPENURMA_ARM64_SYSROOT="$arm64_sysroot" \
     OUT="$lab/out/official-udma.cpio.gz" \
     "$lab/official-udma/build_initramfs.sh"
 echo "[build-all] interactive initramfs"
-KSRC="$kernel_root" ARM_BUILD="$UMDK_BUILD_DIR" BUSYBOX_ARM64=/bin/busybox \
+KSRC="$kernel_root" ARM_BUILD="$UMDK_BUILD_DIR" BUSYBOX_ARM64="$busybox_arm64" \
+    OPENURMA_ARM64_SYSROOT="$arm64_sysroot" \
     OUT="$lab/out/openurma-interactive.cpio.gz" \
     "$lab/scripts/build/build-interactive-initramfs.sh"
 

@@ -29,7 +29,7 @@ readonly UMDK_COMMIT=f84b90b8ddd8173b851334f55d332783d248bfc7
     die "run this on Linux (native Ubuntu or the build container)"
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 
-for tool in ar bash cmp g++ git install ln make mkdir readlink scons; do
+for tool in ar bash cmp find g++ git install make mkdir readlink rsync scons sed; do
     command -v "$tool" >/dev/null 2>&1 || die "required command is missing: $tool"
 done
 
@@ -49,33 +49,6 @@ require_commit() {
     [[ "$actual" == "$expected" ]] ||
         die "$label is at $actual; expected $expected"
     note "$label commit verified: $actual"
-}
-
-ensure_link() {
-    local link=$1
-    local target=$2
-    local actual expected
-
-    [[ -e "$target" ]] || die "symlink target is missing: $target"
-    expected=$(readlink -f "$target")
-    if [[ -L "$link" ]]; then
-        actual=$(readlink -f "$link" 2>/dev/null || true)
-        [[ "$actual" == "$expected" ]] ||
-            die "$link points to ${actual:-a missing target}; expected $expected"
-        note "symlink verified: $link -> $target"
-        return
-    fi
-    if [[ -e "$link" ]]; then
-        actual=$(readlink -f "$link" 2>/dev/null || true)
-        [[ "$actual" == "$expected" ]] ||
-            die "$link already exists and is not the expected target"
-        note "path verified: $link"
-        return
-    fi
-
-    mkdir -p "$(dirname "$link")"
-    ln -s "$target" "$link"
-    note "symlink created: $link -> $target"
 }
 
 install_fixed_topology() {
@@ -135,16 +108,21 @@ if command -v pgrep >/dev/null 2>&1 &&
     die "another gem5 SCons build is already running; wait for it to finish"
 fi
 
-# OpenURMA's configuration and a few include paths intentionally use these
-# canonical container locations. Never replace a conflicting real path.
-ensure_link /home/ubuntu/gem5 "$gem5_root"
-ensure_link /home/ubuntu/OpenURMA "$openurma_root"
-ensure_link /home/ubuntu/OpenClickNP "$openclicknp_root"
-
 scaffold_src="$openurma_root/eval/twonode/gem5_scaffold/src"
-ensure_link "$gem5_root/src/dev/openurma" "$scaffold_src"
 [[ -f "$scaffold_src/SConscript" ]] || die "OpenURMA SConscript is missing"
-scaffold_extra=/home/ubuntu/OpenURMA/eval/twonode/gem5_scaffold/src
+
+# The upstream experiment scaffold contains historical /home/ubuntu paths.
+# Create a generated build view with those paths rewritten instead of requiring
+# root-owned symlinks on every native Linux builder. The source checkout stays
+# unchanged and EXTRAS registers this view directly with SCons.
+scaffold_extra="$lab_dir/artifacts/gem5-openurma-scaffold"
+mkdir -p "$scaffold_extra"
+rsync -a --delete "$scaffold_src/" "$scaffold_extra/"
+find "$scaffold_extra" -type f \
+    -exec sed -i \
+        -e "s#/home/ubuntu/OpenURMA#$openurma_root#g" \
+        -e "s#/home/ubuntu/OpenClickNP#$openclicknp_root#g" \
+        -e "s#/home/ubuntu/gem5#$gem5_root#g" {} +
 [[ -f "$scaffold_extra/SConscript" ]] ||
     die "OpenURMA SConscript is not reachable through $scaffold_extra"
 

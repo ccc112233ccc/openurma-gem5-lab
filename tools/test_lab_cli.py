@@ -9,6 +9,11 @@ from openurma_lab import cli
 
 
 class LabCliTest(unittest.TestCase):
+    @mock.patch("openurma_lab.cli.platform.machine", return_value="x86_64")
+    @mock.patch("openurma_lab.cli.platform.system", return_value="Linux")
+    def test_auto_runtime_uses_native_on_x86_linux(self, _system, _machine):
+        self.assertEqual(cli._runtime("auto"), "native")
+
     def test_help_lists_lifecycle(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

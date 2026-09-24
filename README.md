@@ -18,8 +18,8 @@ On macOS or another Docker host:
 ./lab attach 0
 ```
 
-In a prepared ARM64 Ubuntu 22.04 environment, select native execution once on
-each command (or export `OPENURMA_EXECUTION_MODE=native`):
+In a prepared ARM64 or x86_64 Ubuntu 22.04 environment, select native execution
+once on each command (or export `OPENURMA_EXECUTION_MODE=native`):
 
 ```bash
 ./lab --runtime native setup --jobs 8
@@ -29,8 +29,8 @@ each command (or export `OPENURMA_EXECUTION_MODE=native`):
 ./lab --runtime native attach 0
 ```
 
-`auto` is the default runtime: ARM64 Linux uses native mode and other hosts use
-Docker.  Stop the current experiment with `./lab stop`.
+`auto` is the default runtime: supported Linux hosts use native mode and macOS
+uses Docker. Stop the current experiment with `./lab stop`.
 
 ## Command model
 
@@ -80,6 +80,7 @@ scripts/
   runtime.sh         shared native-versus-Docker execution adapter
 tools/               switch simulator, guest helpers, profiling, and tests
 official-udma/       official-driver build and contract evidence
+integrations/ns3ub/  complete ns-3-UB adapter source and upstream overlay
 overlay/             files installed into the guest initramfs
 patches/             reviewed changes applied to pinned upstream sources
 docker/              reproducible ARM64 Ubuntu build image
@@ -130,9 +131,18 @@ automation.
 
 ## Architecture targets
 
-Host architecture and guest architecture are separate. An x86 host can run the
-existing ARM64 Docker image through container emulation, while native x86_64
-Linux can also build the official UMDK userspace ABI directly:
+Host architecture and guest architecture are separate. A native x86_64 Ubuntu
+22.04 host can directly build the complete ARM64 full-system experiment. The
+setup creates an extraction-only ARM64 sysroot, cross-builds guest software,
+and builds an x86_64-host gem5 executable with the ARM ISA model:
+
+```bash
+./lab --runtime native setup --target-arch arm64 --jobs 8
+./lab --runtime native start --nodes 2 --profile fast --provider official
+```
+
+This does not execute ARM code during the build and does not require an ARM64
+Docker container. The separate native x86_64 UMDK ABI target remains available:
 
 ```bash
 ./lab --runtime native setup --target-arch x86_64
@@ -148,3 +158,15 @@ uses ARM64 system registers and page-table APIs. The current gem5 platform also
 uses ArmSystem, GIC interrupts, and an ARM64 page-table walker. Consequently,
 `build kernel|initramfs|all --target-arch x86_64` is rejected instead of
 silently producing a nonfunctional full-system image.
+
+## ns-3-UB adapter source
+
+The complete external-process adapter is checked in under
+`integrations/ns3ub/`; it is not hidden in a sibling development checkout.
+`./lab setup --sources-only` fetches the pinned public ns-3-UB baseline into
+`sources/ns-3-ub`, and the build command installs the reviewed adapter overlay:
+
+```bash
+./lab build ns3ub
+./lab start --network-backend ns3ub-native
+```

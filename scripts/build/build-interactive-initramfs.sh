@@ -19,6 +19,7 @@ OUT="${OUT:-$LAB_DIR/out/openurma-interactive.cpio.gz}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 EXTRA_BINS="${EXTRA_BINS:-}"
 EXTRA_LIBRARY_DIRS="${EXTRA_LIBRARY_DIRS:-}"
+ARM64_SYSROOT="${OPENURMA_ARM64_SYSROOT:-}"
 EXTRA_MODULES="${EXTRA_MODULES:-}"
 STOCK_UDMA_PROVIDER="${STOCK_UDMA_PROVIDER:-}"
 UMMU_SHIM="${UMMU_SHIM:-}"
@@ -395,6 +396,15 @@ SEARCH_DIRS=(
     /usr/lib/aarch64-linux-gnu
     /lib/aarch64-linux-gnu
 )
+if [[ -n "$ARM64_SYSROOT" ]]; then
+    SEARCH_DIRS=(
+        "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu"
+        "$ARM64_SYSROOT/lib/aarch64-linux-gnu"
+        "$ARM64_SYSROOT/usr/lib"
+        "$ARM64_SYSROOT/lib"
+        "${SEARCH_DIRS[@]}"
+    )
+fi
 for extra_lib_dir in $EXTRA_LIBRARY_DIRS; do
     [[ -d "$extra_lib_dir" ]] || die "EXTRA_LIBRARY_DIRS entry not found: $extra_lib_dir"
     SEARCH_DIRS+=("$extra_lib_dir")

@@ -72,14 +72,16 @@ def _usage(stream=None) -> None:
         "  validate-server   validate the instantiated server profile\n"
         "  start-single      start the legacy single-node environment\n\n"
         "Use './lab COMMAND --help' for backend-specific options. Runtime\n"
-        "defaults to native on ARM64 Linux and Docker elsewhere.",
+        "defaults to native on supported Linux hosts and Docker elsewhere.",
         file=stream,
     )
 
 
 def _runtime(value: str) -> str:
     if value == "auto":
-        if platform.system() == "Linux" and platform.machine() in {"aarch64", "arm64"}:
+        if platform.system() == "Linux" and platform.machine() in {
+            "aarch64", "arm64", "x86_64", "amd64"
+        }:
             return "native"
         return "docker"
     if value not in {"docker", "native"}:

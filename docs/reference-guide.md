@@ -14,14 +14,15 @@ bonding 逻辑设备数据面。
 
 ## 从零开始
 
-正式支持两种入口：ARM64 Ubuntu 22.04 原生运行，以及 Apple Silicon Mac 上的
-Docker Desktop。两者使用同一套源码获取、构建和校验脚本；Docker 只提供固定的
-Ubuntu 环境，不包含另一套实验实现。至少预留约 8 GiB 内存、80 GiB 磁盘空间。
+正式支持三种入口：ARM64 Ubuntu 22.04 原生构建、x86_64 Ubuntu 22.04 直接
+交叉构建 ARM64 guest，以及 Apple Silicon Mac 上的 Docker Desktop。它们使用
+同一套源码获取、构建和校验脚本；Docker 只提供固定的 Ubuntu 环境，不包含另一
+套实验实现。至少预留约 8 GiB 内存、80 GiB 磁盘空间。
 首次构建需要下载 gem5、OpenURMA、
 OpenClickNP、openEuler UMDK/UMMU/OLK 和 gem5 ARM 固件，并编译内核与 gem5，
 因此会花较长时间。后续执行是增量的。
 
-### ARM64 Ubuntu 22.04 原生模式
+### Ubuntu 22.04 原生模式
 
 ```bash
 git clone https://github.com/ccc112233ccc/openurma-gem5-lab.git
@@ -43,6 +44,15 @@ cd openurma-gem5-lab
 `./lab --runtime native setup --skip-deps`。停止实验使用
 `./lab --runtime native stop`；批量测试统一使用 `./lab --runtime native latency`、
 `latency-pairs` 和 `sweep-latency` 子命令。
+
+在 x86_64 Ubuntu 上，同一条 setup 命令会自动进入直接交叉编译模式：gem5
+本身编译为 x86_64 宿主程序，但配置 ARM ISA；OLK、官方驱动、UMDK 和 initramfs
+编译为 ARM64 guest ABI。脚本通过 `debootstrap --foreign` 只下载并解包 ARM64
+sysroot，不执行 ARM 指令，因此不需要 ARM64 Docker 或 qemu-user：
+
+```bash
+./lab --runtime native setup --target-arch arm64 --jobs 8
+```
 
 ### Docker 模式
 
@@ -217,29 +227,24 @@ outside the measured interval.
 ### ns-3-UB network-process bring-up
 
 The ns-3-UB integration can replace the built-in L1 switch process while
-preserving the current version-4 physical-port Adapter ABI. The build helper
-idempotently applies the pinned lifetime-synchronization patch shipped in this
-repository because the public ns-3-UB remote is read-only for this workspace. The
-official guest software, UDMA queues, DMA and completion semantics remain in
-gem5; the independent ns-3 process uses ns-3 packet/time primitives for the
-compatibility fabric and keeps EID
-routing outside either endpoint.
+preserving the current version-4 physical-port Adapter ABI. The complete
+lab-owned adapter and shared-memory protocol are checked in under
+`integrations/ns3ub/`; they are not unpublished files in a sibling checkout.
+The bootstrap fetches the public fabric baseline at the pinned revision under
+`sources/ns-3-ub`, then the build overlays and compiles the adapter. Official
+guest software, UDMA queues, DMA and completion semantics remain in gem5.
 
-Clone `ns-3-UB` next to this repository, initialize its submodules, then build
-the Linux/aarch64 adapter in the existing OpenURMA container:
+Fetch the pinned sources and build the adapter through the unified CLI:
 
 ```bash
-git clone https://gitcode.com/open-usim/ns-3-ub.git ../ns-3-ub
-git -C ../ns-3-ub submodule update --init --recursive
-OPENURMA_CONTAINER=openurma-repro-20260909 \
-  ./scripts/build-ns3ub-adapter.sh
+./lab setup --sources-only
+./lab build ns3ub
 ```
 
 Start two guests with the compatibility bridge:
 
 ```bash
-OPENURMA_CONTAINER=openurma-repro-20260909 \
-  ./lab start --network-backend ns3ub-compat
+./lab start --network-backend ns3ub-compat
 ```
 
 `ns3ub-compat` is deliberately named as a transition mode.  It validates the
@@ -248,8 +253,7 @@ its forwarding core is still arithmetic. The native-switch milestone is
 available with:
 
 ```bash
-OPENURMA_CONTAINER=openurma-repro-20260909 \
-  ./lab start --network-backend ns3ub-native
+./lab start --network-backend ns3ub-native
 ```
 
 `ns3ub-native` keeps the official software, UDMA device behaviour, source NIC
