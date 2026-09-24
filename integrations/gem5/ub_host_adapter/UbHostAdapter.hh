@@ -7,6 +7,7 @@
 #include "protocol/ub_host/if.h"
 #include "sim/eventq.hh"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -58,7 +59,7 @@ class UbHostAdapter final : public DmaDevice
     const Tick pioLatency;
     const Tick pollInterval;
     const std::string socketPath;
-    ArmInterruptPin *interrupt;
+    std::array<ArmInterruptPin *, 3> interrupts{};
     openurma::proto::host::Interface interface{};
     openurma::proto::host::DeviceIntro deviceIntro{};
     uint64_t nextRequest{1};

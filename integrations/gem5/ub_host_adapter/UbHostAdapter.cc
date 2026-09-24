@@ -40,7 +40,10 @@ UbHostAdapter::DmaOperation::DmaOperation(
 UbHostAdapter::UbHostAdapter(const Params &params)
     : DmaDevice(params), pioAddr(params.pio_addr), pioSize(params.pio_size),
       pioLatency(params.pio_latency), pollInterval(params.poll_interval),
-      socketPath(params.socket_path), interrupt(params.interrupt->get()),
+      socketPath(params.socket_path),
+      interrupts{params.interrupt_misc ? params.interrupt_misc->get() : nullptr,
+                 params.interrupt_aeq ? params.interrupt_aeq->get() : nullptr,
+                 params.interrupt_ceq ? params.interrupt_ceq->get() : nullptr},
       pollEvent([this] { pollDevice(); }, name() + ".poll")
 {
 }
@@ -238,8 +241,10 @@ void
 UbHostAdapter::handleInterrupt(
     const volatile host_proto::Interrupt &interrupt_message)
 {
-    if (!interrupt)
+    if (interrupt_message.vector >= interrupts.size())
         return;
+    ArmInterruptPin *interrupt = interrupts[interrupt_message.vector];
+    if (!interrupt) return;
     const auto action = static_cast<host_proto::InterruptAction>(
         interrupt_message.action);
     if (action == host_proto::InterruptAction::Lower)

@@ -30,6 +30,8 @@ struct Options {
     std::string shm_path;
     std::uint64_t link_latency_ps{100000};
     std::uint64_t sync_interval_ps{100000};
+    std::uint64_t endpoint_eid{0x100};
+    std::uint64_t port_count{2};
     SimbricksBaseIfSyncMode sync_mode{kSimbricksBaseIfSyncOptional};
     bool extraction_test_abi{false};
 };
@@ -62,6 +64,12 @@ bool ParseOptions(int argc, char** argv, Options& options)
             else if (mode == "optional") options.sync_mode = kSimbricksBaseIfSyncOptional;
             else if (mode == "required") options.sync_mode = kSimbricksBaseIfSyncRequired;
             else return false;
+        } else if (arg == "--eid" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.endpoint_eid) ||
+                options.endpoint_eid > 0xcffff) return false;
+        } else if (arg == "--ports" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.port_count) ||
+                options.port_count > 255) return false;
         } else if (arg == "--test-abi") {
             options.extraction_test_abi = true;
         } else {
@@ -334,12 +342,13 @@ int Run(const Options& options)
     host_proto::DeviceIntro device_intro{};
     device_intro.version = host_proto::kVersion;
     device_intro.region_count = 1;
-    device_intro.irq_count = 1;
-    device_intro.port_count = 2;
+    device_intro.irq_count = 3;
+    device_intro.port_count = static_cast<std::uint32_t>(options.port_count);
     device_intro.device_id = device::UdmaModel::kIdentity;
     device_intro.regions[0].size = device::UdmaModel::kOfficialApertureBytes;
     host_proto::HostIntro host_intro{};
-    net_proto::Intro net_intro{net_proto::kVersion, 2, 16384, 32, 0};
+    net_proto::Intro net_intro{net_proto::kVersion,
+        static_cast<std::uint32_t>(options.port_count), 16384, 32, 0};
     net_proto::Intro peer_net_intro{};
     SimBricksBaseIfEstablishData establish[] = {
         {&host_if.base, &device_intro, sizeof(device_intro), &host_intro, sizeof(host_intro)},
@@ -355,6 +364,7 @@ int Run(const Options& options)
     device::UdmaModel::Config model_config{};
     model_config.mmio_base = host_intro.mmio_base;
     model_config.port_count = device_intro.port_count;
+    model_config.endpoint_eid = static_cast<std::uint32_t>(options.endpoint_eid);
     model_config.extraction_test_abi = options.extraction_test_abi;
     device::UdmaModel model(host, network, model_config);
     host.Attach(&model);
@@ -388,6 +398,7 @@ int main(int argc, char** argv)
         std::cerr << "usage: udma-device-sim --host-socket PATH --net-socket PATH "
                      "--shm PATH [--sync off|optional|required] "
                      "[--link-latency-ps N] [--sync-interval-ps N] "
+                     "[--eid N] [--ports N] "
                      "[--test-abi]\n";
         return 2;
     }

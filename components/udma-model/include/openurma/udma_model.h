@@ -78,6 +78,7 @@ class UdmaModel {
     struct Config {
         std::uint64_t mmio_base{};
         std::uint32_t port_count{2};
+        std::uint32_t endpoint_eid{0x100};
         // Temporary descriptor ABI used only by the extraction contract test.
         // Production device processes leave this false.
         bool extraction_test_abi{false};

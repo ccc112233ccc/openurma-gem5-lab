@@ -177,3 +177,7 @@ bootstrap slice:
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in
 official-aperture mode; test-only registers no longer overlap production MMIO.
+The feature-by-feature extraction status is tracked in
+[`device-model-migration.md`](device-model-migration.md); “migrated” there
+means the behavior is executed by the standalone model through UB-HOST, not by
+the legacy in-gem5 implementation.

@@ -20,4 +20,6 @@ class UbHostAdapter(DmaDevice):
     pio_latency = Param.Latency("100ns", "PIO response latency")
     socket_path = Param.String("UB-HOST SimBricks socket")
     poll_interval = Param.Latency("1us", "Idle device-message poll interval")
-    interrupt = Param.ArmInterruptPin(NULL, "Device interrupt output")
+    interrupt_misc = Param.ArmInterruptPin(NULL, "UBASE misc interrupt")
+    interrupt_aeq = Param.ArmInterruptPin(NULL, "UBASE asynchronous-event interrupt")
+    interrupt_ceq = Param.ArmInterruptPin(NULL, "UDMA completion-event interrupt")
