@@ -39,7 +39,7 @@ uses Docker. Stop the current experiment with `./lab stop`.
 
 Lifecycle:   setup, start, status, sync, attach NODE, stop
 Experiments: latency, latency-pair, latency-pairs, sweep-latency
-Build:       build all|gem5|kernel|umdk|initramfs|ns3ub|mooncake
+Build:       build all|gem5|kernel|umdk|initramfs|ns3ub|mooncake|udma-model
 Validation:  validate-server, start-single
 ```
 
@@ -73,6 +73,9 @@ reclaims only a stale `m5term` client for that node; it does not stop gem5.
 lab                  Python CLI; the only supported host entry point
 openurma_lab/        CLI routing, runtime selection, and node addressing
 configs/             gem5 full-system machine and OpenURMA device topology
+protocol/            simulator-neutral UB-HOST and UB-NET wire protocols
+components/
+  udma-model/         simulator-neutral UDMA device behavior and unit tests
 scripts/
   build/             heavyweight gem5/kernel/UMDK/initramfs builders
   run/               internal launch, lifecycle, synchronization, benchmarks
@@ -96,8 +99,12 @@ The separation is intentional:
 - `openurma_lab/` is the control plane and stable interface.
 - `scripts/run/` contains simulator orchestration that still benefits from
   Bash process control, but users do not call it directly.
-- `configs/` and the C++ code in `tools/` implement the modeled hardware and
-  network boundary.
+- `protocol/` is the stable process boundary. `UB-HOST` carries MMIO, DMA and
+  interrupts; `UB-NET` carries only wire-visible frames and link events.
+- `components/udma-model/` owns device behavior without gem5, QEMU, or ns-3
+  types. The current gem5 model is being migrated behind that boundary.
+- `configs/` and the C++ code in `tools/` contain the existing integrated model
+  and network implementations while that migration is in progress.
 - official Linux/UMDK code remains under the pinned upstream source trees;
   reproducible patches live under `patches/`.
 
@@ -112,6 +119,7 @@ selected by `./lab start` options; they are not encoded in wrapper scripts.
 
 For the complete model knobs, evidence, source revisions, and troubleshooting,
 see [the reference guide](docs/reference-guide.md),
+[modular simulator architecture](docs/modular-simulator-architecture.md),
 [KVM functional mode](docs/kvm-functional-mode.md), and
 [Mooncake bring-up](docs/mooncake-urma-bringup.md).
 
@@ -122,6 +130,7 @@ The CLI and host helpers use only the Python standard library:
 ```bash
 PYTHONPATH=tools:. python3 -m unittest tools.test_lab_cli tools.test_ethernet_relay tools.test_ub_switch_sim
 bash -n scripts/run/*.sh scripts/build/*.sh scripts/*.sh
+./lab --runtime native build udma-model
 ./lab --runtime native start --profile kvm --print-config
 ```
 

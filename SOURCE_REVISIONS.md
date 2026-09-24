@@ -12,6 +12,7 @@ changes code in one of those repositories.
 | OpenEuler OLK 6.6 | `./oe66` | `5078a3a23a1e1825ec136485173ec98668cdd640` | unchanged; local case-folding noise is not committed |
 | UMMU userspace dependency | `./deps/ummu` | `f1930d006e08bbe96dfa6fa037ff8a386f535425` | unchanged |
 | ns-3-UB fabric | `sources/ns-3-ub` | `d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b` | unchanged; complete lab adapter is under `integrations/ns3ub/` |
+| SimBricks transport ABI | `sources/simbricks` | `ac9ff10e40b20588914ab41e4ce3b7dce950655c` | unchanged; UB-HOST/UB-NET protocols use its base ring ABI |
 | Mooncake native URMA benchmark | sibling `../Mooncake` | `1a0c0a44214ff61a8a4b2e9d90dfb023dd4703ed` | unchanged; built out of tree with `USE_UB=ON` |
 
 The current checkpoint was runtime-validated with four full-system nodes,
