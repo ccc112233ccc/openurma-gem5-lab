@@ -173,6 +173,9 @@ bootstrap slice:
 - asynchronous UBASE mailbox DMA now captures the official driver's AEQ, CEQ,
   JFC, JFR, JFS, and Jetty contexts, handles context query/destruction, and
   publishes mailbox completion through the architected AEQ before vector 1.
+- UE2UE CtrlQ requests are assembled from the official multi-descriptor CSQ
+  format; QoS, SEID and TP lifecycle responses are published through CRQ.
+  Each TP is assigned to a physical port at allocation and retains that route.
 
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in

@@ -111,6 +111,17 @@ class UdmaModel {
     std::size_t jfc_count() const { return jfc_contexts_.size(); }
     std::size_t jfr_count() const { return jfr_contexts_.size(); }
     std::size_t jetty_count() const { return jetty_contexts_.size(); }
+    std::size_t tp_count() const { return tp_routes_.size(); }
+    bool tp_active(std::uint32_t id) const
+    {
+        const auto found = tp_routes_.find(id);
+        return found != tp_routes_.end() && found->second.active;
+    }
+    std::uint32_t tp_port(std::uint32_t id) const
+    {
+        const auto found = tp_routes_.find(id);
+        return found == tp_routes_.end() ? UINT32_MAX : found->second.port;
+    }
 
   private:
     void FetchDescriptor(std::uint64_t address);
@@ -136,6 +147,15 @@ class UdmaModel {
     void HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor);
     void HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
                             std::uint32_t descriptor_count);
+    void HandleCtrlq(std::vector<std::uint8_t> descriptor,
+                     std::uint32_t descriptor_count);
+    void ApplyCtrlq(std::vector<std::uint8_t> descriptor,
+                    std::uint32_t descriptor_count,
+                    std::vector<std::uint8_t> request);
+    bool BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
+                            std::vector<std::uint8_t>& event);
+    void EmitCtrlqResponse(std::vector<std::uint8_t> event,
+                           Completion completion);
     void ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
                            std::uint32_t descriptor_count,
                            std::vector<std::uint8_t> context);
@@ -184,6 +204,17 @@ class UdmaModel {
     std::unordered_map<std::uint32_t, QueueContext> jfc_contexts_;
     std::unordered_map<std::uint32_t, QueueContext> jfr_contexts_;
     std::unordered_map<std::uint32_t, QueueContext> jetty_contexts_;
+    struct TpRoute {
+        std::uint32_t id{};
+        std::uint32_t tpn{};
+        std::uint32_t local_eid{};
+        std::uint32_t remote_eid{};
+        std::uint32_t port{};
+        bool active{};
+    };
+    std::unordered_map<std::uint32_t, TpRoute> tp_routes_;
+    std::uint32_t next_tp_id_{1};
+    std::uint32_t next_tp_port_{};
     std::uint64_t next_sequence_{1};
     std::uint64_t submitted_{0};
     std::uint64_t completed_{0};

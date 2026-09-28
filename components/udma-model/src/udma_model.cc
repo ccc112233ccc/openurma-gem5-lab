@@ -681,11 +681,197 @@ UdmaModel::HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor)
         HandleUbaseMailbox(std::move(descriptor), count);
         return;
     }
+    if (opcode == 0xf00e) {
+        HandleCtrlq(std::move(descriptor), count);
+        return;
+    }
     if (opcode != 0x0030 && opcode != 0x0002 && opcode != 0x6200 &&
         opcode != 0x0001 && opcode != 0x7001)
         return FailUbase();
     FinishUbaseDescriptor(std::move(descriptor), opcode, count,
                           BuildUbaseResponse(opcode));
+}
+
+void
+UdmaModel::HandleCtrlq(std::vector<std::uint8_t> descriptor,
+                       std::uint32_t descriptor_count)
+{
+    constexpr std::size_t BaseLow = 0x00 / 4;
+    constexpr std::size_t BaseHigh = 0x04 / 4;
+    constexpr std::size_t Depth = 0x08 / 4;
+    constexpr std::size_t Head = 0x14 / 4;
+    const std::uint32_t depth = ubase_command_queue_registers_[Depth] << 3;
+    const std::uint32_t head = ubase_command_queue_registers_[Head] % depth;
+    const std::uint64_t base = ubase_command_queue_registers_[BaseLow] |
+        (std::uint64_t(ubase_command_queue_registers_[BaseHigh]) << 32);
+    auto request = std::make_shared<std::vector<std::uint8_t>>(
+        descriptor.begin() + 8, descriptor.end());
+    auto index = std::make_shared<std::uint32_t>(1);
+    auto read_next = std::make_shared<std::function<void()>>();
+    *read_next = [this, descriptor = std::move(descriptor), descriptor_count,
+                  depth, head, base, request, index, read_next]() mutable {
+        if (*index >= descriptor_count) {
+            ApplyCtrlq(std::move(descriptor), descriptor_count,
+                       std::move(*request));
+            return;
+        }
+        const std::uint64_t address =
+            base + std::uint64_t((head + *index) % depth) * 32;
+        ++*index;
+        host_.DmaReadIoVirtual(address, 32,
+            [this, request, read_next](bool ok,
+                                      std::vector<std::uint8_t> continuation) {
+                if (!ok || continuation.size() != 32) return FailUbase();
+                request->insert(request->end(), continuation.begin(),
+                                continuation.end());
+                (*read_next)();
+            });
+    };
+    (*read_next)();
+}
+
+bool
+UdmaModel::BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
+                              std::vector<std::uint8_t>& event)
+{
+    constexpr std::size_t Outer = 16;
+    constexpr std::size_t Ctrl = 12;
+    if (request.size() < Outer + Ctrl ||
+        LoadLe<std::uint16_t>(request.data() + 4) != 3) return false;
+    const std::uint8_t service = request[Outer + 1];
+    const std::uint8_t opcode = request[Outer + 3];
+    const bool query_sl = service == 4 && opcode == 2;
+    const bool query_vl = service == 4 && opcode == 1;
+    const bool init = service == 2 && opcode == 0x15;
+    const bool query_seid = service == 2 && opcode == 0x01;
+    const bool get_tp = service == 1 && opcode == 0x21;
+    const bool activate = service == 1 && opcode == 0x22;
+    const bool deactivate = service == 1 && opcode == 0x23;
+    if (!query_sl && !query_vl && !init && !query_seid && !get_tp &&
+        !activate && !deactivate) return false;
+    const std::size_t output = query_sl || query_vl ? 20 :
+        LoadLe<std::uint16_t>(request.data() + 12);
+    event.assign(Outer + Ctrl + output, 0);
+    std::memcpy(event.data(), request.data(), Outer + Ctrl);
+    StoreLe<std::uint16_t>(event, 10, static_cast<std::uint16_t>(output));
+    StoreLe<std::uint16_t>(event, 12, 0);
+    event[14] = 1U << 1;
+    std::uint8_t* response = event.data() + Outer + Ctrl;
+    if (query_sl) {
+        response[0] = response[4] = response[6] = 1;
+        response[3] = 4;
+    } else if (query_vl) {
+        response[0] = 1;
+    } else if (query_seid && output >= 100) {
+        response[0] = 4;
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            const std::uint32_t eid = config_.endpoint_eid + i * 0x10000;
+            std::uint8_t* entry = response + 4 + i * 24;
+            StoreLe<std::uint32_t>(event, entry - event.data(), i);
+            entry[4] = static_cast<std::uint8_t>(eid);
+            entry[5] = static_cast<std::uint8_t>(eid >> 8);
+            entry[6] = static_cast<std::uint8_t>(eid >> 16);
+            StoreLe<std::uint32_t>(event, entry - event.data() + 20, 0x7fff);
+        }
+    } else if (get_tp && output >= 44 && request.size() >= Outer + Ctrl + 36) {
+        std::uint32_t id = next_tp_id_;
+        for (std::uint32_t attempts = 0; attempts < 1023; ++attempts) {
+            if (++next_tp_id_ >= 1024) next_tp_id_ = 1;
+            if (!tp_routes_.count(id)) break;
+            id = next_tp_id_;
+        }
+        const std::uint8_t* cfg = request.data() + Outer + Ctrl;
+        TpRoute route{id, id, LoadLe<std::uint32_t>(cfg) & 0xfffffU,
+                      LoadLe<std::uint32_t>(cfg + 16) & 0xfffffU,
+                      config_.port_count ? next_tp_port_++ % config_.port_count : 0,
+                      false};
+        if (!route.local_eid || !route.remote_eid || tp_routes_.count(id))
+            return false;
+        tp_routes_[id] = route;
+        StoreLe<std::uint32_t>(event, response - event.data(), 1);
+        StoreLe<std::uint32_t>(event, response - event.data() + 4,
+                               id | (1U << 24));
+        StoreLe<std::uint32_t>(event, response - event.data() + 8, id);
+    } else if ((activate || deactivate) &&
+               request.size() >= Outer + Ctrl + 8) {
+        const std::uint8_t* cfg = request.data() + Outer + Ctrl;
+        const std::uint32_t id = LoadLe<std::uint32_t>(cfg) & 0xffffffU;
+        auto found = tp_routes_.find(id);
+        if (found == tp_routes_.end()) return false;
+        found->second.active = activate;
+        if (activate && output >= 8) std::memcpy(response, cfg, 8);
+    }
+    return true;
+}
+
+void
+UdmaModel::ApplyCtrlq(std::vector<std::uint8_t> descriptor,
+                      std::uint32_t descriptor_count,
+                      std::vector<std::uint8_t> request)
+{
+    std::vector<std::uint8_t> response;
+    if (!BuildCtrlqResponse(request, response)) return FailUbase();
+    FinishUbaseDescriptor(std::move(descriptor), 0xf00e, descriptor_count, {},
+        [this, response = std::move(response)]() mutable {
+            EmitCtrlqResponse(std::move(response), [this](bool ok) {
+                if (!ok) ++ubase_errors_;
+            });
+        });
+}
+
+void
+UdmaModel::EmitCtrlqResponse(std::vector<std::uint8_t> event,
+                             Completion completion)
+{
+    constexpr std::size_t BaseLow = 0x18 / 4;
+    constexpr std::size_t BaseHigh = 0x1c / 4;
+    constexpr std::size_t Depth = 0x20 / 4;
+    constexpr std::size_t Tail = 0x24 / 4;
+    const std::uint64_t base = ubase_command_queue_registers_[BaseLow] |
+        (std::uint64_t(ubase_command_queue_registers_[BaseHigh]) << 32);
+    const std::uint32_t depth = ubase_command_queue_registers_[Depth] << 3;
+    if (!base || !depth) return completion(false);
+    const std::uint32_t count = static_cast<std::uint32_t>((event.size() + 39) / 32);
+    auto writes = std::make_shared<std::vector<std::pair<std::uint64_t,
+                                                         std::vector<std::uint8_t>>>>();
+    std::uint32_t tail = ubase_command_queue_registers_[Tail] % depth;
+    std::size_t offset = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::vector<std::uint8_t> desc(32, 0);
+        std::size_t start = 0;
+        if (i == 0) {
+            desc[0] = 0x0e; desc[1] = 0xf0; desc[2] = 1U << 1;
+            desc[3] = static_cast<std::uint8_t>(count); start = 8;
+        }
+        const std::size_t chunk = std::min(desc.size() - start,
+                                           event.size() - offset);
+        std::memcpy(desc.data() + start, event.data() + offset, chunk);
+        offset += chunk;
+        writes->push_back({base + std::uint64_t(tail) * 32, std::move(desc)});
+        tail = (tail + 1) % depth;
+    }
+    auto cursor = std::make_shared<std::size_t>(0);
+    auto done = std::make_shared<Completion>(std::move(completion));
+    auto issue = std::make_shared<std::function<void()>>();
+    *issue = [this, writes, cursor, issue, tail, done]() mutable {
+        if (*cursor == writes->size()) {
+            ubase_command_queue_registers_[0x24 / 4] = tail;
+            ubase_command_source_ |= 1U << 1;
+            host_.PulseInterrupt(0);
+            (*done)(true);
+            return;
+        }
+        auto& write = writes->at((*cursor)++);
+        host_.DmaWriteIoVirtual(write.first, std::move(write.second),
+            [issue, done](bool ok) {
+                if (!ok) {
+                    (*done)(false);
+                    return;
+                }
+                (*issue)();
+            });
+    };
+    (*issue)();
 }
 
 void

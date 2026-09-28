@@ -283,6 +283,87 @@ int main()
     assert(official_model.WriteMmio(0x318410, 4, 3));
     assert(official_model.ReadMmio(0x318414, 4, value) && value == 3);
     assert(official_model.jfc_count() == 1);
+
+    constexpr std::uint64_t crq_iova = 0xd0000;
+    assert(official_model.WriteMmio(0x318418, 4, crq_iova));
+    assert(official_model.WriteMmio(0x31841c, 4, crq_iova >> 32));
+    assert(official_model.WriteMmio(0x318420, 4, 1));
+    std::vector<std::uint8_t> ctrlq_request(56, 0);
+    ctrlq_request[4] = 3;
+    ctrlq_request[12] = 20;
+    ctrlq_request[16 + 1] = 4; // QoS service
+    ctrlq_request[16 + 3] = 2; // QUERY_SL
+    std::vector<std::uint8_t> ctrlq_first(32, 0);
+    ctrlq_first[0] = 0x0e;
+    ctrlq_first[1] = 0xf0;
+    ctrlq_first[3] = 2;
+    std::memcpy(ctrlq_first.data() + 8, ctrlq_request.data(), 24);
+    std::vector<std::uint8_t> ctrlq_continuation(32, 0);
+    std::memcpy(ctrlq_continuation.data(), ctrlq_request.data() + 24, 32);
+    host.Store(ubase_csq + 96, ctrlq_first);
+    host.Store(ubase_csq + 128, ctrlq_continuation);
+    assert(official_model.WriteMmio(0x318410, 4, 5));
+    assert(official_model.ReadMmio(0x318414, 4, value) && value == 5);
+    assert(official_model.ReadMmio(0x318424, 4, value) && value == 2);
+    assert(official_model.ReadMmio(0x318004, 4, value) && (value & 2));
+    const auto& ctrlq_response_first = host.Load(crq_iova);
+    const auto& ctrlq_response_second = host.Load(crq_iova + 32);
+    assert(ctrlq_response_first[0] == 0x0e && ctrlq_response_first[1] == 0xf0);
+    assert(ctrlq_response_first[3] == 2);
+    assert(ctrlq_response_second[4] == 1); // unic_sl_bitmap
+    assert(ctrlq_response_second[8] == 1); // UDMA TP SL bitmap
+    assert(ctrlq_response_second[10] == 1); // UDMA CTP SL bitmap
+    assert(host.irq_vector == 0 && host.irq_pulses == 2);
+
+    std::vector<std::uint8_t> get_tp_request(88, 0);
+    get_tp_request[4] = 3;
+    get_tp_request[12] = 44;
+    get_tp_request[16 + 1] = 1;
+    get_tp_request[16 + 3] = 0x21;
+    store32(get_tp_request, 28, 0x100);
+    store32(get_tp_request, 44, 0x200);
+    std::vector<std::uint8_t> get_tp_first(32, 0);
+    get_tp_first[0] = 0x0e;
+    get_tp_first[1] = 0xf0;
+    get_tp_first[3] = 3;
+    std::memcpy(get_tp_first.data() + 8, get_tp_request.data(), 24);
+    std::vector<std::uint8_t> get_tp_second(32, 0);
+    std::vector<std::uint8_t> get_tp_third(32, 0);
+    std::memcpy(get_tp_second.data(), get_tp_request.data() + 24, 32);
+    std::memcpy(get_tp_third.data(), get_tp_request.data() + 56, 32);
+    host.Store(ubase_csq + 160, get_tp_first);
+    host.Store(ubase_csq + 192, get_tp_second);
+    host.Store(ubase_csq + 224, get_tp_third);
+    assert(official_model.WriteMmio(0x318410, 4, 0));
+    assert(official_model.tp_count() == 1);
+    const auto& get_tp_response_second = host.Load(crq_iova + 3 * 32);
+    std::uint32_t tp_count{};
+    std::uint32_t tp_id_and_count{};
+    std::memcpy(&tp_count, get_tp_response_second.data() + 4, 4);
+    std::memcpy(&tp_id_and_count, get_tp_response_second.data() + 8, 4);
+    assert(tp_count == 1);
+    const std::uint32_t tp_id = tp_id_and_count & 0xffffffU;
+    assert(tp_id != 0 && !official_model.tp_active(tp_id));
+    assert(official_model.tp_port(tp_id) == 0);
+
+    std::vector<std::uint8_t> activate_request(56, 0);
+    activate_request[4] = 3;
+    activate_request[12] = 8;
+    activate_request[16 + 1] = 1;
+    activate_request[16 + 3] = 0x22;
+    store32(activate_request, 28, tp_id | (1U << 24));
+    store32(activate_request, 32, tp_id);
+    std::vector<std::uint8_t> activate_first(32, 0);
+    activate_first[0] = 0x0e;
+    activate_first[1] = 0xf0;
+    activate_first[3] = 2;
+    std::memcpy(activate_first.data() + 8, activate_request.data(), 24);
+    std::vector<std::uint8_t> activate_second(32, 0);
+    std::memcpy(activate_second.data(), activate_request.data() + 24, 32);
+    host.Store(ubase_csq, activate_first);
+    host.Store(ubase_csq + 32, activate_second);
+    assert(official_model.WriteMmio(0x318410, 4, 2));
+    assert(official_model.tp_active(tp_id));
     assert(!official_model.ReadMmio(
         device::UdmaModel::kOfficialApertureBytes, 1, value));
 

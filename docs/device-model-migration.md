@@ -15,13 +15,14 @@ migrated merely because an old in-gem5 fallback still implements it.
 | UBASE mailbox and AEQ completion | migrated | AEQ/JFC mailbox test, vector-1 delivery |
 | JFC/JFR/JFS/Jetty context capture/destruction | migrated | context maps owned by `UdmaModel` |
 | misc/AEQ/CEQ interrupt separation | migrated boundary | UB-HOST vector mapped to three gem5 pins |
-| UE2UE CtrlQ/CRQ and TP lifecycle | pending | move from `NICTopologySC::ubase_emit_ue2ue_ctrlq_response` |
+| UE2UE CtrlQ/CRQ and TP lifecycle | migrated | QoS/SEID/TP response, allocation and activation tests |
 | Type-1 MSI address/data programming | pending | replace pin-only compatibility delivery |
 | UMMU translation tables and invalidation | pending | implement in device or negotiate translated DMA service |
 | official SQ doorbell and WQE decode | pending | SEND/READ/WRITE paths still in legacy model |
 | payload DMA and remote memory semantics | pending | UB-NET request/response protocol extension required |
 | CQE creation, CEQ production and moderation | pending | resource contexts are captured but not consumed yet |
-| multi-port TP selection/failover | pending | TP-to-port state belongs in device control plane |
+| multi-port TP selection | migrated | control-plane round-robin TP-to-port binding |
+| multi-port failover | pending | link-state event and TP rebinding policy required |
 | ns-3-UB packet transport and switch model | adapter exists; integration pending | UB-NET v1 adapter source |
 | QEMU host adapter | pending | implement the same UB-HOST v1 contract, no model fork |
 
