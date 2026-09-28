@@ -239,8 +239,19 @@ class UdmaModel {
     void ReceiveWriteAck(Frame frame);
     void ReceiveReadResponse(Frame frame);
     using TranslateCompletion = std::function<void(bool, std::uint64_t)>;
-    void TranslateToken(std::uint32_t token, std::uint64_t address,
+    void TranslateToken(std::uint32_t token, std::uint64_t address, bool write,
                         TranslateCompletion completion);
+    void CheckMapt(std::vector<std::uint8_t> context,
+                   std::uint64_t address, bool write,
+                   TranslateCompletion completion);
+    void WalkMaptTable(std::uint64_t block_table, std::uint64_t block,
+                       std::uint64_t level_base, std::uint64_t address, bool write,
+                       std::uint32_t level,
+                       TranslateCompletion completion);
+    void CheckMaptNode(std::uint64_t block_table, std::uint64_t block,
+                       std::uint64_t level_base, std::uint64_t address, bool write,
+                       std::uint32_t level,
+                       TranslateCompletion completion);
     void WalkTokenPageTable(std::uint64_t table, std::uint64_t address,
                             std::uint32_t level,
                             TranslateCompletion completion);

@@ -22,7 +22,7 @@ migrated merely because an old in-gem5 fallback still implements it.
 | official SQ doorbell and WQE decode | SEND migrated | direct SQE and ring doorbell, official owner/opcode/SGE fields |
 | SEND transmit and receive payload DMA | migrated | SQ SGE/inline DMA plus JFR PI/index/SGE receive DMA |
 | WRITE/READ request-response state machines | migrated | WRITE-after-remote-DMA ACK and READ response-to-local-SGE tests |
-| UMMU MAPT permission enforcement | pending | token translation is enforced; grant permission format remains |
+| UMMU MAPT permission enforcement | migrated | official entry/table node layouts, range and read/write permission checks; token-protected grants fail closed until wire credentials are modeled |
 | CQE creation and CEQ production | SEND TX/RX migrated | CI check, owner bit, 64-byte CQE, CEQE and vector 2 |
 | completion count moderation | migrated | official JFC count threshold gates CEQ/MSI |
 | completion period moderation | pending | virtual-time timer integration required |

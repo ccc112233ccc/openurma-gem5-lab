@@ -425,6 +425,7 @@ int main()
     constexpr std::uint64_t tct_iova = 0x02010000;
     constexpr std::uint64_t l0_iova = 0x02020000;
     constexpr std::uint64_t l1_iova = 0x02030000;
+    constexpr std::uint64_t mapt_iova = 0x02040000;
     const auto store64 = [](std::vector<std::uint8_t>& bytes,
                             std::size_t offset, std::uint64_t word) {
         for (std::size_t i = 0; i < 8; ++i)
@@ -436,10 +437,22 @@ int main()
     host.Store(tect_iova, tect);
     for (const std::uint32_t token : {0U, 9U}) {
         std::vector<std::uint8_t> tct(64, 0);
-        store64(tct, 0, 1);
+        // Official TCT: valid + MAPT table mode + MAPT enabled.
+        store64(tct, 0, 1 | (1U << 16) | (1U << 19));
         store64(tct, 16, l0_iova);
+        store64(tct, 24, mapt_iova);
         host.Store(tct_iova + std::uint64_t(token) * 64, tct);
     }
+    // The root points to a second level block in the same 64 KiB MAPT block;
+    // its leaf grants RW over the low 1 GiB. Layout and bit positions are the
+    // official OLK perm_table.h format.
+    std::vector<std::uint8_t> mapt_root(32, 0);
+    store32(mapt_root, 0, 1U | (512U << 12));
+    host.Store(mapt_iova, mapt_root);
+    std::vector<std::uint8_t> mapt_leaf(32, 0);
+    store32(mapt_leaf, 0, 1U | (1U << 1) | (3U << 4));
+    store32(mapt_leaf, 16, 0x3fffffffU);
+    host.Store(mapt_iova + 512U * 32U, mapt_leaf);
     std::vector<std::uint8_t> l0_entry(8, 0);
     store64(l0_entry, 0, l1_iova | 3U);
     host.Store(l0_iova, l0_entry);

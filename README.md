@@ -39,7 +39,7 @@ uses Docker. Stop the current experiment with `./lab stop`.
 
 Lifecycle:   setup, start, status, sync, attach NODE, stop
 Experiments: latency, latency-pair, latency-pairs, sweep-latency
-Build:       build all|gem5|kernel|umdk|initramfs|ns3ub|mooncake|udma-model|udma-device
+Build:       build all|gem5|kernel|umdk|initramfs|ns3ub|mooncake|udma-model|udma-device|ub-switch
 Validation:  validate-server, start-single
 ```
 
@@ -77,6 +77,7 @@ protocol/            simulator-neutral UB-HOST and UB-NET wire protocols
 components/
   udma-model/         simulator-neutral UDMA device behavior and unit tests
   udma-device-sim/    standalone SimBricks host/network device process
+  ub-switch-sim/      simulator-neutral multi-endpoint UB-NET switch process
 scripts/
   build/             heavyweight gem5/kernel/UMDK/initramfs builders
   run/               internal launch, lifecycle, synchronization, benchmarks
@@ -134,6 +135,7 @@ PYTHONPATH=tools:. python3 -m unittest tools.test_lab_cli tools.test_ethernet_re
 bash -n scripts/run/*.sh scripts/build/*.sh scripts/*.sh
 ./lab --runtime native build udma-model
 ./lab --runtime native build udma-device
+./lab --runtime native build ub-switch
 ctest --test-dir artifacts/udma-device-sim-build --output-on-failure
 ./lab --runtime native start --profile kvm --print-config
 ```

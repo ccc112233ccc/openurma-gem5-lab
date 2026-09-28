@@ -1427,7 +1427,7 @@ UdmaModel::ContinueMsi(std::shared_ptr<MsiState> state)
     if (state->index >= state->tokens.size())
         return state->completion(false);
     const std::uint32_t token = state->tokens[state->index++];
-    TranslateToken(token, state->address,
+    TranslateToken(token, state->address, true,
         [this, state = std::move(state)](bool ok, std::uint64_t physical) mutable {
             if (!ok || !physical) return ContinueMsi(std::move(state));
             msi_iova_ = state->address;
@@ -1438,7 +1438,7 @@ UdmaModel::ContinueMsi(std::shared_ptr<MsiState> state)
 }
 
 void
-UdmaModel::TranslateToken(std::uint32_t token, std::uint64_t address,
+UdmaModel::TranslateToken(std::uint32_t token, std::uint64_t address, bool write,
                           TranslateCompletion completion)
 {
     constexpr std::uint64_t AddressMask = 0x0000fffffffff000ULL;
@@ -1448,7 +1448,7 @@ UdmaModel::TranslateToken(std::uint32_t token, std::uint64_t address,
         LoadLe<std::uint64_t>(ummu_registers_.data() + 0x70) & AddressMask;
     if (!tect) return completion(false, 0);
     host_.DmaRead(tect, 64,
-        [this, token, address, completion = std::move(completion)]
+        [this, token, address, write, completion = std::move(completion)]
         (bool ok, std::vector<std::uint8_t> entry) mutable {
             constexpr std::uint64_t AddressMask = 0x0000fffffffff000ULL;
             if (!ok || entry.size() != 64 ||
@@ -1458,18 +1458,151 @@ UdmaModel::TranslateToken(std::uint32_t token, std::uint64_t address,
                 LoadLe<std::uint64_t>(entry.data() + 8) & AddressMask;
             if (!tct) return completion(false, 0);
             host_.DmaRead(tct + std::uint64_t(token) * 64, 64,
-                [this, address, completion = std::move(completion)]
+                [this, address, write, completion = std::move(completion)]
                 (bool tct_ok, std::vector<std::uint8_t> context) mutable {
-                    constexpr std::uint64_t AddressMask =
-                        0x0000fffffffff000ULL;
                     if (!tct_ok || context.size() != 64 ||
                         !(LoadLe<std::uint64_t>(context.data()) & 1U))
                         return completion(false, 0);
-                    const std::uint64_t root =
-                        LoadLe<std::uint64_t>(context.data() + 16) & AddressMask;
-                    if (!root) return completion(false, 0);
-                    WalkTokenPageTable(root, address, 0,
-                                       std::move(completion));
+                    CheckMapt(std::move(context), address, write,
+                        [this, address, completion = std::move(completion)]
+                        (bool permitted, std::uint64_t root) mutable {
+                            if (!permitted || !root)
+                                return completion(false, 0);
+                            WalkTokenPageTable(root, address, 0,
+                                               std::move(completion));
+                        });
+                });
+        });
+}
+
+void
+UdmaModel::CheckMapt(std::vector<std::uint8_t> context,
+                     std::uint64_t address, bool write,
+                     TranslateCompletion completion)
+{
+    constexpr std::uint64_t AddressMask = 0x0000fffffffff000ULL;
+    constexpr std::uint64_t MaptAddressMask = 0x0000ffffffffffe0ULL;
+    const std::uint64_t control = LoadLe<std::uint64_t>(context.data());
+    const std::uint64_t root =
+        LoadLe<std::uint64_t>(context.data() + 16) & AddressMask;
+    if (!(control & (std::uint64_t{1} << 19)))
+        return completion(true, root);
+
+    const std::uint64_t block =
+        LoadLe<std::uint64_t>(context.data() + 24) & MaptAddressMask;
+    if (!block) return completion(false, 0);
+    if (!(control & (std::uint64_t{1} << 16))) {
+        host_.DmaRead(block, 32,
+            [root, address, write, completion = std::move(completion)]
+            (bool ok, std::vector<std::uint8_t> node) mutable {
+                if (!ok || node.size() != 32)
+                    return completion(false, 0);
+                const std::uint32_t word0 = LoadLe<std::uint32_t>(node.data());
+                const std::uint64_t base =
+                    LoadLe<std::uint32_t>(node.data() + 8) |
+                    (std::uint64_t(LoadLe<std::uint32_t>(node.data() + 12) &
+                                   0xffffU) << 32);
+                const std::uint64_t limit =
+                    LoadLe<std::uint32_t>(node.data() + 16) |
+                    (std::uint64_t(LoadLe<std::uint32_t>(node.data() + 20) &
+                                   0xffffU) << 32);
+                const std::uint32_t permission = (word0 >> 4) & 0x3fU;
+                const bool allowed = write ? (permission & 1U)
+                                           : (permission & 2U);
+                const bool token_check =
+                    (LoadLe<std::uint32_t>(node.data() + 12) >> 31) != 0;
+                completion((word0 & 1U) && !token_check && allowed &&
+                           address >= base && address <= limit,
+                           root);
+            });
+        return;
+    }
+    const std::uint64_t block_table =
+        LoadLe<std::uint64_t>(context.data() + 32) & MaptAddressMask;
+    WalkMaptTable(block_table, block, block, address, write, 0,
+        [root, completion = std::move(completion)]
+        (bool allowed, std::uint64_t) mutable {
+            completion(allowed, root);
+        });
+}
+
+void
+UdmaModel::WalkMaptTable(std::uint64_t block_table, std::uint64_t block,
+                         std::uint64_t level_base, std::uint64_t address, bool write,
+                         std::uint32_t level,
+                         TranslateCompletion completion)
+{
+    if (level >= 4 || !block)
+        return completion(false, 0);
+    CheckMaptNode(block_table, block, level_base, address, write, level,
+                  std::move(completion));
+}
+
+void
+UdmaModel::CheckMaptNode(std::uint64_t block_table, std::uint64_t block,
+                         std::uint64_t level_base, std::uint64_t address, bool write,
+                         std::uint32_t level,
+                         TranslateCompletion completion)
+{
+    constexpr std::array<std::uint32_t, 4> Shift{39, 30, 21, 12};
+    const std::uint64_t index = (address >> Shift[level]) & 0x1ffU;
+    const std::uint32_t shift = Shift[level];
+    host_.DmaRead(level_base + index * 32, 32,
+        [this, block_table, block, address, write, level, shift,
+         completion = std::move(completion)]
+        (bool ok, std::vector<std::uint8_t> node) mutable {
+            if (!ok || node.size() != 32)
+                return completion(false, 0);
+            const std::uint32_t word0 = LoadLe<std::uint32_t>(node.data());
+            const std::uint32_t word1 = LoadLe<std::uint32_t>(node.data() + 4);
+            if (!(word0 & 1U)) return completion(false, 0);
+            if (word0 & 2U) {
+                const std::uint64_t mask =
+                    (std::uint64_t{1} << shift) - 1U;
+                const std::uint64_t base =
+                    LoadLe<std::uint32_t>(node.data() + 8) |
+                    (std::uint64_t(LoadLe<std::uint32_t>(node.data() + 12) &
+                                   0x7fU) << 32);
+                const std::uint64_t limit =
+                    LoadLe<std::uint32_t>(node.data() + 16) |
+                    (std::uint64_t(LoadLe<std::uint32_t>(node.data() + 20) &
+                                   0x7fU) << 32);
+                const std::uint32_t permission = (word0 >> 4) & 0x3fU;
+                const bool allowed = write ? (permission & 1U)
+                                           : (permission & 2U);
+                const bool token_check =
+                    (LoadLe<std::uint32_t>(node.data() + 12) >> 31) != 0;
+                const std::uint64_t within = address & mask;
+                return completion(!token_check && allowed && within >= base &&
+                                  within <= limit, 0);
+            }
+            const std::uint32_t next_offset =
+                ((word1 & 0x3ffU) << 20) | (word0 >> 12);
+            const bool crosses_block = (word0 & (1U << 2)) != 0;
+            const std::uint32_t next_block_index = word1 >> 16;
+            auto continue_walk =
+                [this, block_table, address, write, level, next_offset,
+                 completion = std::move(completion)]
+                (bool valid, std::uint64_t next_base) mutable {
+                    if (!valid || !next_base)
+                        return completion(false, 0);
+                    WalkMaptTable(block_table, next_base,
+                                  next_base + std::uint64_t(next_offset) * 32,
+                                  address, write, level + 1,
+                                  std::move(completion));
+                };
+            if (!crosses_block)
+                return continue_walk(true, block);
+            if (!block_table) return continue_walk(false, 0);
+            host_.DmaRead(block_table + std::uint64_t(next_block_index) * 8, 8,
+                [continue_walk = std::move(continue_walk)]
+                (bool table_ok, std::vector<std::uint8_t> descriptor) mutable {
+                    if (!table_ok || descriptor.size() != 8)
+                        return continue_walk(false, 0);
+                    const std::uint64_t value =
+                        LoadLe<std::uint64_t>(descriptor.data());
+                    continue_walk(value & 1U,
+                                  value & 0x0000ffffffffffe0ULL);
                 });
         });
 }
@@ -1524,7 +1657,7 @@ UdmaModel::ContinueTokenRead(std::shared_ptr<TokenReadState> state)
     const std::uint64_t current = state->address + state->offset;
     const std::size_t chunk = std::min<std::size_t>(
         state->length - state->offset, 4096 - (current & 0xfffU));
-    TranslateToken(state->token, current,
+    TranslateToken(state->token, current, false,
         [this, state = std::move(state), chunk]
         (bool ok, std::uint64_t physical) mutable {
             if (!ok || !physical) return state->completion(false, {});
@@ -1560,7 +1693,7 @@ UdmaModel::ContinueTokenWrite(std::shared_ptr<TokenWriteState> state)
     const std::uint64_t current = state->address + state->offset;
     const std::size_t chunk = std::min<std::size_t>(
         state->bytes.size() - state->offset, 4096 - (current & 0xfffU));
-    TranslateToken(state->token, current,
+    TranslateToken(state->token, current, true,
         [this, state = std::move(state), chunk]
         (bool ok, std::uint64_t physical) mutable {
             if (!ok || !physical) return state->completion(false);

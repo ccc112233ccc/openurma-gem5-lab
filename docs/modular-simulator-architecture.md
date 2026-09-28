@@ -136,6 +136,20 @@ base implementation directly. On macOS it supplies equivalents for Linux-only
 `accept4` and `MAP_POPULATE`; it does not replace the shared-memory queue,
 ownership, timestamp, or synchronization implementation.
 
+`components/ub-switch-sim/` is the simulator-neutral reference fabric. It is
+a third process, connects any number of UB-NET endpoints, publishes physical
+port link state, routes frames by destination EID, and retains queued frames
+under output backpressure. Its contract test uses two independent listening
+endpoint processes and proves request/reply traffic crosses the switch in both
+directions:
+
+```bash
+./lab --runtime native build ub-switch
+```
+
+The ns-3-UB backend must implement this same UB-NET boundary. The old mmap
+ring-v4 adapter remains a compatibility path only and is not the target API.
+
 ## Migration sequence
 
 1. Freeze and test `UB-HOST`/`UB-NET` layouts and the simulator-neutral core.
