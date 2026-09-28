@@ -42,11 +42,28 @@ class HostInterface {
 };
 
 struct Frame {
+    enum class Operation : std::uint8_t {
+        Raw = 0xff,
+        Send = 0,
+        SendImmediate = 1,
+        Write = 3,
+        ReadRequest = 6,
+        WriteAck = 0x83,
+        ReadResponse = 0x85,
+    };
     std::uint64_t sequence{};
     std::uint32_t source_eid{};
     std::uint32_t destination_eid{};
     std::uint16_t source_port{};
     std::uint16_t destination_port{};
+    Operation operation{Operation::Raw};
+    std::uint32_t source_jetty{};
+    std::uint32_t destination_jetty{};
+    std::uint32_t tpn{};
+    std::uint32_t segment{};
+    std::uint64_t remote_address{};
+    std::uint64_t immediate{};
+    std::uint64_t request_id{};
     std::vector<std::uint8_t> bytes;
 };
 
@@ -156,6 +173,25 @@ class UdmaModel {
                             std::vector<std::uint8_t>& event);
     void EmitCtrlqResponse(std::vector<std::uint8_t> event,
                            Completion completion);
+    bool HandleJettyMmio(std::uint64_t offset, std::uint32_t length,
+                         std::uint64_t value);
+    void ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
+                   std::vector<std::uint8_t> direct = {});
+    void HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
+                     std::vector<std::uint8_t> raw);
+    void SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
+                         std::vector<std::uint8_t> raw,
+                         std::vector<std::uint8_t> payload);
+    void CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
+                    std::uint32_t wqebbs, std::uint16_t completed_index,
+                    std::uint8_t opcode, std::uint32_t byte_count,
+                    std::uint64_t immediate, bool completion_enabled);
+    void WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
+                  std::uint8_t opcode, std::uint16_t entry_index,
+                  std::uint32_t local_id, std::uint32_t byte_count,
+                  std::uint64_t user_data, std::uint64_t immediate,
+                  Completion completion);
+    void EmitCompletionEvent(std::uint32_t jfc_id, Completion completion);
     void ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
                            std::uint32_t descriptor_count,
                            std::vector<std::uint8_t> context);
@@ -194,6 +230,20 @@ class UdmaModel {
         std::uint32_t depth{};
         std::uint32_t completion_queue{};
         std::uint32_t token{};
+        std::uint32_t payload_token{};
+        std::uint32_t receive_queue{};
+        std::uint32_t receive_completion_queue{};
+        std::uint32_t eid_index{};
+        std::uint64_t user_queue{};
+        std::uint64_t device_page_offset{};
+        std::uint64_t producer{};
+        std::uint64_t consumer{};
+        bool is_jetty{true};
+        bool busy{};
+        bool direct_pending{};
+        std::uint32_t target_producer{};
+        std::array<std::uint8_t, 64> direct_wqe{};
+        std::uint64_t direct_valid{};
     };
     std::uint64_t aeq_iova_{};
     std::uint32_t aeq_depth_{};

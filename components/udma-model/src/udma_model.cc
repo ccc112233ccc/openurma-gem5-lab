@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "openurma/udma_model.h"
+#include "openurma/udma_abi.h"
 
 #include <algorithm>
 #include <cstring>
@@ -276,6 +277,7 @@ UdmaModel::WriteMmio(std::uint64_t offset, std::uint32_t length,
         ubase_command_source_ &= ~static_cast<std::uint32_t>(value);
         return true;
     }
+    if (HandleJettyMmio(offset, length, value)) return true;
     return offset + length <= kOfficialApertureBytes;
 }
 
@@ -988,6 +990,14 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
         queue.depth = sq_shift < 31 ? 1U << sq_shift : 0;
         queue.completion_queue = dw(4) & 0x000fffffU;
         queue.token = ((dw(1) & 0xffU) << 12) | ((dw(0) >> 20) & 0xfffU);
+        queue.payload_token = (dw(9) >> 2) & 0x000fffffU;
+        queue.receive_queue = ((dw(5) & 0xffU) << 12) | (dw(4) >> 20);
+        queue.receive_completion_queue = dw(5) >> 12;
+        queue.eid_index = dw(6) & 0x3ffU;
+        queue.user_queue = std::uint64_t(dw(7)) | (std::uint64_t(dw(8)) << 32);
+        queue.device_page_offset = abi::kUdmaMemoryOffset +
+            abi::kHardwarePageBytes + std::uint64_t(tag) * abi::kHardwarePageBytes;
+        queue.is_jetty = ((dw(0) >> 19) & 1U) != 0;
         if (!queue.queue_iova || !queue.depth) return FailUbase();
         jetty_contexts_[tag] = queue;
     }
@@ -1023,6 +1033,254 @@ UdmaModel::EmitMailboxEvent(std::uint16_t sequence, Completion completion)
                 ubase_command_source_ |= 1U << 1;
                 host_.PulseInterrupt(1);
             }
+            completion(ok);
+        });
+}
+
+bool
+UdmaModel::HandleJettyMmio(std::uint64_t offset, std::uint32_t length,
+                           std::uint64_t value)
+{
+    if (!length || length > 8) return false;
+    for (auto& [id, jetty] : jetty_contexts_) {
+        if (offset >= jetty.device_page_offset &&
+            offset + length <= jetty.device_page_offset + abi::kWqebbBytes) {
+            const std::uint32_t begin =
+                static_cast<std::uint32_t>(offset - jetty.device_page_offset);
+            for (std::uint32_t i = 0; i < length; ++i) {
+                jetty.direct_wqe[begin + i] =
+                    static_cast<std::uint8_t>(value >> (8 * i));
+                jetty.direct_valid |= std::uint64_t{1} << (begin + i);
+            }
+            if (jetty.direct_valid == ~std::uint64_t{0}) {
+                jetty.direct_valid = 0;
+                jetty.direct_pending = true;
+                const std::uint32_t low = abi::Load32(jetty.direct_wqe.data()) & 0xffffU;
+                std::uint32_t producer =
+                    (static_cast<std::uint32_t>(jetty.consumer) & ~0xffffU) | low;
+                if (producer < jetty.consumer) producer += 0x10000U;
+                ProcessSq(id, producer,
+                    std::vector<std::uint8_t>(jetty.direct_wqe.begin(),
+                                              jetty.direct_wqe.end()));
+            }
+            return true;
+        }
+        if (offset == jetty.device_page_offset + abi::kDoorbellOffset &&
+            length == 4) {
+            ProcessSq(id, static_cast<std::uint32_t>(value));
+            return true;
+        }
+    }
+    return false;
+}
+
+void
+UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
+                     std::vector<std::uint8_t> direct)
+{
+    auto found = jetty_contexts_.find(jetty_id);
+    if (found == jetty_contexts_.end()) return;
+    QueueContext& jetty = found->second;
+    jetty.target_producer = producer;
+    if (!direct.empty()) {
+        if (direct.size() != abi::kWqebbBytes) return;
+        std::copy(direct.begin(), direct.end(), jetty.direct_wqe.begin());
+        jetty.direct_pending = true;
+    }
+    if (jetty.busy) return;
+    if (jetty.consumer == jetty.target_producer) {
+        jetty.direct_pending = false;
+        return;
+    }
+    const std::uint32_t outstanding =
+        jetty.target_producer - static_cast<std::uint32_t>(jetty.consumer);
+    if (!jetty.depth || outstanding > jetty.depth) return;
+    jetty.busy = true;
+    if (jetty.direct_pending && jetty.consumer + 1 == jetty.target_producer) {
+        jetty.direct_pending = false;
+        HandleSqWqe(jetty_id, producer,
+            std::vector<std::uint8_t>(jetty.direct_wqe.begin(),
+                                      jetty.direct_wqe.end()));
+        return;
+    }
+    const std::uint64_t address = jetty.queue_iova +
+        (jetty.consumer & (jetty.depth - 1U)) * abi::kWqebbBytes;
+    host_.DmaReadIoVirtual(address, abi::kWqebbBytes,
+        [this, jetty_id, producer](bool ok, std::vector<std::uint8_t> raw) {
+            if (!ok || raw.size() != abi::kWqebbBytes) {
+                auto found = jetty_contexts_.find(jetty_id);
+                if (found != jetty_contexts_.end()) found->second.busy = false;
+                ++ubase_errors_;
+                return;
+            }
+            HandleSqWqe(jetty_id, producer, std::move(raw));
+        });
+}
+
+void
+UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
+                       std::vector<std::uint8_t> raw)
+{
+    auto fail = [this, jetty_id]() {
+        auto found = jetty_contexts_.find(jetty_id);
+        if (found != jetty_contexts_.end()) found->second.busy = false;
+        ++ubase_errors_;
+    };
+    auto found = jetty_contexts_.find(jetty_id);
+    if (found == jetty_contexts_.end() || raw.size() != abi::kWqebbBytes)
+        return fail();
+    std::array<std::uint8_t, abi::kWqebbBytes> bytes{};
+    std::copy(raw.begin(), raw.end(), bytes.begin());
+    const abi::SqWqe wqe(bytes);
+    QueueContext& jetty = found->second;
+    const bool expected_owner = ((jetty.consumer / jetty.depth) & 1U) == 0;
+    if (wqe.owner() != expected_owner || wqe.wqebb_count() != 1 ||
+        (wqe.opcode() != 0 && wqe.opcode() != 1)) return fail();
+    const auto route = tp_routes_.find(wqe.tpn());
+    if (route == tp_routes_.end() || !route->second.active) return fail();
+    if (wqe.inline_payload()) {
+        if (wqe.inline_length() > 16) return fail();
+        SubmitSqPayload(jetty_id, producer, std::move(raw),
+            std::vector<std::uint8_t>(bytes.begin() + 48,
+                                      bytes.begin() + 48 + wqe.inline_length()));
+        return;
+    }
+    if (wqe.sge_count() != 1) return fail();
+    const abi::Sge sge = wqe.first_sge();
+    if (!sge.address || !sge.length) return fail();
+    host_.DmaReadIoVirtual(sge.address, sge.length,
+        [this, jetty_id, producer, raw = std::move(raw), expected = sge.length]
+        (bool ok, std::vector<std::uint8_t> payload) mutable {
+            if (!ok || payload.size() != expected) {
+                auto found = jetty_contexts_.find(jetty_id);
+                if (found != jetty_contexts_.end()) found->second.busy = false;
+                ++ubase_errors_;
+                return;
+            }
+            SubmitSqPayload(jetty_id, producer, std::move(raw),
+                            std::move(payload));
+        });
+}
+
+void
+UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
+                           std::vector<std::uint8_t> raw,
+                           std::vector<std::uint8_t> payload)
+{
+    auto found = jetty_contexts_.find(jetty_id);
+    if (found == jetty_contexts_.end()) return;
+    std::array<std::uint8_t, abi::kWqebbBytes> bytes{};
+    std::copy(raw.begin(), raw.end(), bytes.begin());
+    const abi::SqWqe wqe(bytes);
+    const QueueContext jetty = found->second;
+    const auto route = tp_routes_.find(wqe.tpn());
+    if (route == tp_routes_.end()) return;
+    Frame frame{};
+    frame.sequence = next_sequence_++;
+    frame.source_eid = config_.endpoint_eid + jetty.eid_index * 0x10000U;
+    frame.destination_eid = route->second.remote_eid;
+    frame.source_port = static_cast<std::uint16_t>(route->second.port);
+    frame.destination_port = UINT16_MAX;
+    frame.operation = wqe.opcode() == 0 ? Frame::Operation::Send :
+                                           Frame::Operation::SendImmediate;
+    frame.source_jetty = jetty_id;
+    frame.destination_jetty = wqe.remote_jetty();
+    frame.tpn = wqe.tpn();
+    frame.immediate = wqe.immediate();
+    frame.bytes = std::move(payload);
+    const std::uint32_t count = static_cast<std::uint32_t>(frame.bytes.size());
+    const std::uint16_t completed_index = static_cast<std::uint16_t>(
+        jetty.consumer & (jetty.depth - 1U));
+    network_.Send(std::move(frame),
+        [this, jetty_id, producer, completed_index, opcode = wqe.opcode(),
+         count, immediate = wqe.immediate(), completion = wqe.completion()]
+        (bool ok) {
+            if (!ok) {
+                auto found = jetty_contexts_.find(jetty_id);
+                if (found != jetty_contexts_.end()) found->second.busy = false;
+                ++ubase_errors_;
+                return;
+            }
+            CompleteSq(jetty_id, producer, 1, completed_index, opcode, count,
+                       immediate, completion);
+        });
+}
+
+void
+UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
+                      std::uint32_t wqebbs, std::uint16_t completed_index,
+                      std::uint8_t opcode, std::uint32_t byte_count,
+                      std::uint64_t immediate, bool completion_enabled)
+{
+    auto finish = [this, jetty_id, producer, wqebbs](bool ok) {
+        auto found = jetty_contexts_.find(jetty_id);
+        if (found == jetty_contexts_.end()) return;
+        if (!ok) { found->second.busy = false; ++ubase_errors_; return; }
+        found->second.consumer += wqebbs;
+        found->second.busy = false;
+        ProcessSq(jetty_id, producer);
+    };
+    const auto found = jetty_contexts_.find(jetty_id);
+    if (found == jetty_contexts_.end()) return;
+    if (!completion_enabled) return finish(true);
+    WriteCqe(found->second.completion_queue, false, found->second.is_jetty,
+             opcode, completed_index, jetty_id, byte_count,
+             found->second.user_queue, immediate, std::move(finish));
+}
+
+void
+UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
+                    std::uint8_t opcode, std::uint16_t entry_index,
+                    std::uint32_t local_id, std::uint32_t byte_count,
+                    std::uint64_t user_data, std::uint64_t immediate,
+                    Completion completion)
+{
+    auto found = jfc_contexts_.find(jfc_id);
+    if (found == jfc_contexts_.end()) return completion(false);
+    const std::uint64_t ci = found->second.index_iova;
+    host_.DmaReadIoVirtual(ci, 4,
+        [this, jfc_id, receive, jetty, opcode, entry_index, local_id,
+         byte_count, user_data, immediate, completion = std::move(completion)]
+        (bool ok, std::vector<std::uint8_t> consumer_bytes) mutable {
+            auto found = jfc_contexts_.find(jfc_id);
+            if (!ok || consumer_bytes.size() != 4 ||
+                found == jfc_contexts_.end()) return completion(false);
+            QueueContext& jfc = found->second;
+            const std::uint32_t consumer = abi::Load32(consumer_bytes.data()) & 0x3fffffU;
+            const std::uint32_t producer = static_cast<std::uint32_t>(jfc.producer) & 0x3fffffU;
+            if (((producer - consumer) & 0x3fffffU) >= jfc.depth)
+                return completion(false);
+            const bool owner = ((jfc.producer / jfc.depth) & 1U) == 0;
+            const auto cqe = abi::MakeCqe(receive, jetty, owner, opcode,
+                entry_index, local_id, byte_count, user_data, immediate);
+            const std::uint64_t address = jfc.queue_iova +
+                (jfc.producer & (jfc.depth - 1U)) * abi::kCqeBytes;
+            host_.DmaWriteIoVirtual(address,
+                std::vector<std::uint8_t>(cqe.begin(), cqe.end()),
+                [this, jfc_id, completion = std::move(completion)](bool write_ok) mutable {
+                    auto found = jfc_contexts_.find(jfc_id);
+                    if (!write_ok || found == jfc_contexts_.end())
+                        return completion(false);
+                    ++found->second.producer;
+                    EmitCompletionEvent(jfc_id, std::move(completion));
+                });
+        });
+}
+
+void
+UdmaModel::EmitCompletionEvent(std::uint32_t jfc_id, Completion completion)
+{
+    if (!ceq_iova_ || !ceq_depth_ || (ceq_depth_ & (ceq_depth_ - 1)))
+        return completion(false);
+    std::vector<std::uint8_t> event(64, 0);
+    std::uint32_t word = jfc_id & 0xfffffU;
+    if (!(ceq_producer_ & ceq_depth_)) word |= 1U << 31;
+    StoreLe<std::uint32_t>(event, 0, word);
+    const std::uint32_t slot = ceq_producer_ & (ceq_depth_ - 1);
+    host_.DmaWriteIoVirtual(ceq_iova_ + std::uint64_t(slot) * 64,
+                            std::move(event),
+        [this, completion = std::move(completion)](bool ok) mutable {
+            if (ok) { ++ceq_producer_; host_.PulseInterrupt(2); }
             completion(ok);
         });
 }

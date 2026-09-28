@@ -176,6 +176,9 @@ bootstrap slice:
 - UE2UE CtrlQ requests are assembled from the official multi-descriptor CSQ
   format; QoS, SEID and TP lifecycle responses are published through CRQ.
   Each TP is assigned to a physical port at allocation and retains that route.
+- the first official data-plane slice consumes direct SQE or ring doorbells,
+  decodes the stock SEND/SEND_IMM WQE, performs payload DMA, emits a typed UDMA
+  wire envelope through UB-NET, and produces the stock CQE plus CEQ interrupt.
 
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in

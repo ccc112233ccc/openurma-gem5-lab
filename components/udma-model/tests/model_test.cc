@@ -364,6 +364,64 @@ int main()
     host.Store(ubase_csq + 32, activate_second);
     assert(official_model.WriteMmio(0x318410, 4, 2));
     assert(official_model.tp_active(tp_id));
+
+    constexpr std::uint64_t ceq_context_iova = 0xe0000;
+    constexpr std::uint64_t ceq_iova = 0xf0000;
+    std::vector<std::uint8_t> ceq_context(64, 0);
+    store32(ceq_context, 8, static_cast<std::uint32_t>(ceq_iova));
+    host.Store(ceq_context_iova, ceq_context);
+    std::vector<std::uint8_t> create_ceq(32, 0);
+    create_ceq[0] = 0x00; create_ceq[1] = 0x70; create_ceq[3] = 1;
+    store32(create_ceq, 8, ceq_context_iova);
+    store32(create_ceq, 16, 0x44);
+    host.Store(ubase_csq + 64, create_ceq);
+    assert(official_model.WriteMmio(0x318410, 4, 3));
+
+    constexpr std::uint64_t jetty_context_iova = 0x100000;
+    constexpr std::uint64_t sq_iova = 0x110000;
+    std::vector<std::uint8_t> jetty_context(128, 0);
+    store32(jetty_context, 0, 1U << 19); // JETTY mode, one WQEBB
+    store32(jetty_context, 4, static_cast<std::uint32_t>(sq_iova));
+    store32(jetty_context, 4 * 4, 7); // send JFC
+    store32(jetty_context, 7 * 4, 0x1234); // user queue
+    host.Store(jetty_context_iova, jetty_context);
+    std::vector<std::uint8_t> create_jetty(32, 0);
+    create_jetty[0] = 0x00; create_jetty[1] = 0x70; create_jetty[3] = 1;
+    store32(create_jetty, 8, jetty_context_iova);
+    store32(create_jetty, 16, (9U << 8) | 0x04);
+    host.Store(ubase_csq + 96, create_jetty);
+    assert(official_model.WriteMmio(0x318410, 4, 4));
+    assert(official_model.jetty_count() == 1);
+    host.Store(ci_iova, std::vector<std::uint8_t>(4, 0));
+
+    std::array<std::uint8_t, 64> send_wqe{};
+    const std::uint32_t send_flags = 1U | (0x60U << 16) | (1U << 31);
+    std::memcpy(send_wqe.data(), &send_flags, 4);
+    const std::uint32_t send_command = 3U << 22;
+    std::memcpy(send_wqe.data() + 4, &send_command, 4);
+    std::memcpy(send_wqe.data() + 8, &tp_id, 4);
+    const std::uint32_t remote_jetty = 55;
+    std::memcpy(send_wqe.data() + 12, &remote_jetty, 4);
+    send_wqe[48] = 'u'; send_wqe[49] = 'b'; send_wqe[50] = '!';
+    constexpr std::uint64_t jetty_page = 0x00200000 + 0x1000 + 9 * 0x1000;
+    for (std::size_t offset = 0; offset < send_wqe.size(); offset += 8) {
+        std::uint64_t word{};
+        std::memcpy(&word, send_wqe.data() + offset, 8);
+        assert(official_model.WriteMmio(jetty_page + offset, 8, word));
+    }
+    assert(network.frames.back().operation == device::Frame::Operation::Send);
+    assert(network.frames.back().source_eid == 0x100);
+    assert(network.frames.back().destination_eid == 0x200);
+    assert(network.frames.back().source_port == 0);
+    assert(network.frames.back().destination_jetty == remote_jetty);
+    assert(network.frames.back().bytes == std::vector<std::uint8_t>({'u','b','!'}));
+    const auto& send_cqe = host.Load(cq_iova);
+    assert(send_cqe.size() == 64);
+    assert((send_cqe[0] & 6) == 6); // Jetty + owner
+    assert(send_cqe[16] == 3);
+    const auto& completion_event = host.Load(ceq_iova);
+    assert((completion_event[0] & 0x7f) == 7);
+    assert(host.irq_vector == 2 && host.irq_pulses == 5);
     assert(!official_model.ReadMmio(
         device::UdmaModel::kOfficialApertureBytes, 1, value));
 

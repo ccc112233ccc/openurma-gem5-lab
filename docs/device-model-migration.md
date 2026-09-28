@@ -18,9 +18,10 @@ migrated merely because an old in-gem5 fallback still implements it.
 | UE2UE CtrlQ/CRQ and TP lifecycle | migrated | QoS/SEID/TP response, allocation and activation tests |
 | Type-1 MSI address/data programming | pending | replace pin-only compatibility delivery |
 | UMMU translation tables and invalidation | pending | implement in device or negotiate translated DMA service |
-| official SQ doorbell and WQE decode | pending | SEND/READ/WRITE paths still in legacy model |
-| payload DMA and remote memory semantics | pending | UB-NET request/response protocol extension required |
-| CQE creation, CEQ production and moderation | pending | resource contexts are captured but not consumed yet |
+| official SQ doorbell and WQE decode | SEND migrated | direct SQE and ring doorbell, official owner/opcode/SGE fields |
+| payload DMA and remote memory semantics | SEND migrated; RMA pending | UDMA wire envelope crosses UB-NET v1 |
+| CQE creation and CEQ production | SEND migrated | CI check, owner bit, 64-byte CQE, CEQE and vector 2 |
+| completion moderation | pending | model CEQ coalescing policy and timer |
 | multi-port TP selection | migrated | control-plane round-robin TP-to-port binding |
 | multi-port failover | pending | link-state event and TP rebinding policy required |
 | ns-3-UB packet transport and switch model | adapter exists; integration pending | UB-NET v1 adapter source |

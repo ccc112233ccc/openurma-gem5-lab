@@ -2,6 +2,7 @@
 #include "openurma/udma_model.h"
 #include "protocol/ub_host/if.h"
 #include "protocol/ub_net/if.h"
+#include "protocol/ub_net/udma_wire.h"
 
 #include <atomic>
 #include <csignal>
@@ -271,9 +272,29 @@ class NetworkPort final : public device::NetworkInterface {
 
     void Send(device::Frame frame, device::Completion completion) override
     {
+        std::vector<std::uint8_t> wire;
+        if (frame.operation != device::Frame::Operation::Raw) {
+            net_proto::UdmaWireHeader header{};
+            header.magic = net_proto::kUdmaWireMagic;
+            header.version = 1;
+            header.operation = static_cast<std::uint8_t>(frame.operation);
+            header.source_jetty = frame.source_jetty;
+            header.destination_jetty = frame.destination_jetty;
+            header.tpn = frame.tpn;
+            header.segment = frame.segment;
+            header.remote_address = frame.remote_address;
+            header.immediate = frame.immediate;
+            header.request_id = frame.request_id;
+            header.payload_length = static_cast<std::uint32_t>(frame.bytes.size());
+            const auto* first = reinterpret_cast<const std::uint8_t*>(&header);
+            wire.assign(first, first + sizeof(header));
+            wire.insert(wire.end(), frame.bytes.begin(), frame.bytes.end());
+        } else {
+            wire = std::move(frame.bytes);
+        }
         const std::size_t capacity = net_proto::UbNetOutMsgLen(&interface_) -
                                      sizeof(net_proto::Message);
-        auto* message = frame.bytes.size() <= capacity
+        auto* message = wire.size() <= capacity
                             ? net_proto::UbNetOutAlloc(&interface_, now_)
                             : nullptr;
         if (message == nullptr) {
@@ -282,14 +303,14 @@ class NetworkPort final : public device::NetworkInterface {
         }
         ZeroVolatile(message->frame);
         message->frame.sequence = frame.sequence;
-        message->frame.length = static_cast<std::uint32_t>(frame.bytes.size());
+        message->frame.length = static_cast<std::uint32_t>(wire.size());
         message->frame.source_eid = frame.source_eid;
         message->frame.destination_eid = frame.destination_eid;
         message->frame.source_port = frame.source_port;
         message->frame.destination_port = frame.destination_port;
         auto* destination = reinterpret_cast<volatile std::uint8_t*>(message) +
                             sizeof(net_proto::Message);
-        for (std::size_t i = 0; i < frame.bytes.size(); ++i) destination[i] = frame.bytes[i];
+        for (std::size_t i = 0; i < wire.size(); ++i) destination[i] = wire[i];
         net_proto::UbNetOutSend(&interface_, message,
             static_cast<std::uint8_t>(net_proto::MessageType::Frame));
         completion(true);
@@ -312,6 +333,25 @@ class NetworkPort final : public device::NetworkInterface {
             const auto* source = reinterpret_cast<volatile std::uint8_t*>(message) +
                                  sizeof(net_proto::Message);
             for (std::size_t i = 0; i < frame.bytes.size(); ++i) frame.bytes[i] = source[i];
+            if (frame.bytes.size() >= sizeof(net_proto::UdmaWireHeader)) {
+                net_proto::UdmaWireHeader header{};
+                std::memcpy(&header, frame.bytes.data(), sizeof(header));
+                if (header.magic == net_proto::kUdmaWireMagic &&
+                    header.version == 1 &&
+                    frame.bytes.size() == sizeof(header) + header.payload_length) {
+                    frame.operation = static_cast<device::Frame::Operation>(
+                        header.operation);
+                    frame.source_jetty = header.source_jetty;
+                    frame.destination_jetty = header.destination_jetty;
+                    frame.tpn = header.tpn;
+                    frame.segment = header.segment;
+                    frame.remote_address = header.remote_address;
+                    frame.immediate = header.immediate;
+                    frame.request_id = header.request_id;
+                    frame.bytes.erase(frame.bytes.begin(),
+                                      frame.bytes.begin() + sizeof(header));
+                }
+            }
             model_->Receive(std::move(frame));
         }
         net_proto::UbNetInDone(&interface_, message);
