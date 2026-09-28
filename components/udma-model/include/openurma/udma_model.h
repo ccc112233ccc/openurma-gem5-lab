@@ -53,6 +53,14 @@ class HostInterface {
         SetInterrupt(vector, true);
         SetInterrupt(vector, false);
     }
+    virtual void MsiWrite(std::uint64_t physical_address, std::uint32_t data,
+                          Completion completion)
+    {
+        std::vector<std::uint8_t> bytes(4);
+        for (std::uint32_t i = 0; i < 4; ++i)
+            bytes[i] = static_cast<std::uint8_t>(data >> (8 * i));
+        DmaWrite(physical_address, std::move(bytes), std::move(completion));
+    }
 };
 
 struct Frame {
@@ -208,6 +216,16 @@ class UdmaModel {
                   Completion completion, std::uint32_t remote_id = 0,
                   std::uint32_t remote_eid = 0, std::uint32_t tpn = 0);
     void EmitCompletionEvent(std::uint32_t jfc_id, Completion completion);
+    void RaiseInterrupt(std::uint32_t vector, Completion completion);
+    struct MsiState {
+        std::uint32_t vector{};
+        std::uint64_t address{};
+        std::uint32_t data{};
+        std::vector<std::uint32_t> tokens;
+        std::size_t index{};
+        Completion completion;
+    };
+    void ContinueMsi(std::shared_ptr<MsiState> state);
     void ProcessReceiveQueue();
     void ReceiveSend(std::shared_ptr<Frame> frame);
     void ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
@@ -277,6 +295,8 @@ class UdmaModel {
     std::uint32_t ubase_target_producer_{};
     bool ubase_busy_{};
     std::uint64_t ubase_errors_{};
+    std::uint64_t msi_iova_{};
+    std::uint64_t msi_physical_{};
     struct QueueContext {
         std::uint64_t queue_iova{};
         std::uint64_t index_iova{};

@@ -190,6 +190,9 @@ bootstrap slice:
   walks the current ARM64 guest page tables inside the device process. Invalid
   or absent tokens fail before host memory is touched; MAPT access permissions
   remain a separate migration item.
+- once the official UBUS code programs its Type-1 MSI tuple through UBIOS,
+  interrupt delivery translates the MSI IOVA through UMMU and issues the
+  programmed data as a host-bus write. Logical pin pulses are bootstrap-only.
 
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in

@@ -16,7 +16,7 @@ migrated merely because an old in-gem5 fallback still implements it.
 | JFC/JFR/JFS/Jetty context capture/destruction | migrated | context maps owned by `UdmaModel` |
 | misc/AEQ/CEQ interrupt separation | migrated boundary | UB-HOST vector mapped to three gem5 pins |
 | UE2UE CtrlQ/CRQ and TP lifecycle | migrated | QoS/SEID/TP response, allocation and activation tests |
-| Type-1 MSI address/data programming | pending | replace pin-only compatibility delivery |
+| Type-1 MSI address/data programming | migrated | official UBIOS tuple, UMMU translation and host bus-write test |
 | UMMU TECT/TCT and ARM64 page-table translation | migrated | token-indexed walk and invalid-token rejection test |
 | UMMU translation invalidation/cache | no cache required yet | every DMA walks current guest tables |
 | official SQ doorbell and WQE decode | SEND migrated | direct SQE and ring doorbell, official owner/opcode/SGE fields |

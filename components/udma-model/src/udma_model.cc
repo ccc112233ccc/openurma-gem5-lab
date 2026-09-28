@@ -859,8 +859,7 @@ UdmaModel::EmitCtrlqResponse(std::vector<std::uint8_t> event,
         if (*cursor == writes->size()) {
             ubase_command_queue_registers_[0x24 / 4] = tail;
             ubase_command_source_ |= 1U << 1;
-            host_.PulseInterrupt(0);
-            (*done)(true);
+            RaiseInterrupt(0, *done);
             return;
         }
         auto& write = writes->at((*cursor)++);
@@ -1035,9 +1034,10 @@ UdmaModel::EmitMailboxEvent(std::uint16_t sequence, Completion completion)
             if (ok) {
                 ++aeq_producer_;
                 ubase_command_source_ |= 1U << 1;
-                host_.PulseInterrupt(1);
+                RaiseInterrupt(1, std::move(completion));
+                return;
             }
-            completion(ok);
+            completion(false);
         });
 }
 
@@ -1338,8 +1338,79 @@ UdmaModel::EmitCompletionEvent(std::uint32_t jfc_id, Completion completion)
     host_.DmaWriteIoVirtual(ceq_iova_ + std::uint64_t(slot) * 64,
                             std::move(event),
         [this, completion = std::move(completion)](bool ok) mutable {
-            if (ok) { ++ceq_producer_; host_.PulseInterrupt(2); }
-            completion(ok);
+            if (ok) {
+                ++ceq_producer_;
+                RaiseInterrupt(2, std::move(completion));
+                return;
+            }
+            completion(false);
+        });
+}
+
+void
+UdmaModel::RaiseInterrupt(std::uint32_t vector, Completion completion)
+{
+    constexpr std::uint32_t Enable = 0x40c04;
+    constexpr std::uint32_t EnabledVectors = 0x40c0c;
+    constexpr std::uint32_t Data = 0x40c10;
+    constexpr std::uint32_t AddressLow = 0x40c14;
+    constexpr std::uint32_t AddressHigh = 0x40c18;
+    constexpr std::uint32_t Mask = 0x40c20;
+    const auto reg = [this](std::uint32_t address) {
+        const auto found = ubios_endpoint_config_.find(address);
+        return found == ubios_endpoint_config_.end() ? 0U : found->second;
+    };
+    const std::uint32_t enabled_log2 = reg(EnabledVectors);
+    const std::uint32_t count = enabled_log2 < 31 ? 1U << enabled_log2 : 0;
+    const std::uint64_t address = reg(AddressLow) |
+        (std::uint64_t(reg(AddressHigh)) << 32);
+    if (!(reg(Enable) & 1U) || !address) {
+        // Pre-MSI bootstrap compatibility: the host adapter exposes the same
+        // logical vector until the official UBUS code programs Type-1 MSI.
+        host_.PulseInterrupt(vector);
+        completion(true);
+        return;
+    }
+    if (vector >= count || (vector < 32 && (reg(Mask) & (1U << vector))))
+        return completion(false);
+    auto state = std::make_shared<MsiState>();
+    state->vector = vector;
+    state->address = address;
+    state->data = reg(Data) + vector;
+    state->completion = std::move(completion);
+    if (msi_iova_ == address && msi_physical_) {
+        host_.MsiWrite(msi_physical_, state->data,
+                       std::move(state->completion));
+        return;
+    }
+    state->tokens.push_back(0);
+    const auto add_token = [&state](const auto& contexts) {
+        for (const auto& [id, context] : contexts) {
+            (void)id;
+            if (std::find(state->tokens.begin(), state->tokens.end(),
+                          context.token) == state->tokens.end())
+                state->tokens.push_back(context.token);
+        }
+    };
+    add_token(jfc_contexts_);
+    add_token(jfr_contexts_);
+    add_token(jetty_contexts_);
+    ContinueMsi(std::move(state));
+}
+
+void
+UdmaModel::ContinueMsi(std::shared_ptr<MsiState> state)
+{
+    if (state->index >= state->tokens.size())
+        return state->completion(false);
+    const std::uint32_t token = state->tokens[state->index++];
+    TranslateToken(token, state->address,
+        [this, state = std::move(state)](bool ok, std::uint64_t physical) mutable {
+            if (!ok || !physical) return ContinueMsi(std::move(state));
+            msi_iova_ = state->address;
+            msi_physical_ = physical;
+            host_.MsiWrite(physical, state->data,
+                           std::move(state->completion));
         });
 }
 

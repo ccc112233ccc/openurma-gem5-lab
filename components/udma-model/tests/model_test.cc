@@ -446,6 +446,44 @@ int main()
     store64(l1_entry, 0, 1); // identity-mapped 1 GiB L1 block
     host.Store(l1_iova, l1_entry);
     assert(official_model.WriteMmio(0xf00070, 8, tect_iova));
+
+    // Program the Type-1 MSI tuple through the same UBIOS endpoint-config
+    // messages issued by the stock UBUS MSI code.
+    const auto submit_ubios = [&](std::uint32_t index, std::uint8_t task,
+                                  std::uint8_t opcode,
+                                  std::vector<std::uint8_t> payload) {
+        const std::uint32_t payload_offset = 0x400 + index * 0x100;
+        std::vector<std::uint8_t> sqe(16, 0);
+        store32(sqe, 0, (static_cast<std::uint32_t>(payload.size()) << 16) |
+                        (std::uint32_t(opcode) << 8) | task);
+        store32(sqe, 4, index + 10);
+        store32(sqe, 8, payload_offset);
+        host.Store(ubios_sq + std::uint64_t(index) * 16, sqe);
+        host.Store(ubios_sq + payload_offset, payload);
+        assert(official_model.WriteMmio(0x12008, 4, (index + 1) % 8));
+    };
+    std::vector<std::uint8_t> bind_endpoint(56, 0);
+    store32(bind_endpoint, 16, 1U << 8); // one endpoint hop
+    bind_endpoint[25] = 2;
+    store32(bind_endpoint, 52, 0x55);
+    submit_ubios(1, 1, 1, std::move(bind_endpoint));
+    const auto config_write = [&](std::uint32_t index, std::uint32_t reg,
+                                  std::uint32_t reg_value) {
+        std::vector<std::uint8_t> request(48, 0);
+        store32(request, 4, 0x55);
+        request[31] = 0x10;
+        store32(request, 32, 0xf0);
+        store32(request, 36, reg / 4);
+        store32(request, 44, reg_value);
+        submit_ubios(index, 0, 0x10, std::move(request));
+    };
+    constexpr std::uint64_t msi_address = 0x1a0000;
+    config_write(2, 0x40c04, 1);
+    config_write(3, 0x40c0c, 2);
+    config_write(4, 0x40c10, 0x40);
+    config_write(5, 0x40c14, static_cast<std::uint32_t>(msi_address));
+    config_write(6, 0x40c18, 0);
+    config_write(7, 0x40c20, 0);
     host.Store(ci_iova, std::vector<std::uint8_t>(4, 0));
 
     std::array<std::uint8_t, 64> send_wqe{};
@@ -475,7 +513,10 @@ int main()
     assert(send_cqe[16] == 3);
     const auto& completion_event = host.Load(ceq_iova);
     assert((completion_event[0] & 0x7f) == 7);
-    assert(host.irq_vector == 2 && host.irq_pulses == 5);
+    assert(host.irq_pulses == 4);
+    assert(host.Contains(msi_address));
+    const auto& send_msi = host.Load(msi_address);
+    assert(send_msi.size() == 4 && send_msi[0] == 0x42);
 
     constexpr std::uint64_t receive_buffer = 0x150000;
     std::vector<std::uint8_t> posted_index(4, 0);
@@ -495,7 +536,7 @@ int main()
     const auto& receive_cqe = host.Load(cq_iova + 64);
     assert((receive_cqe[0] & 7) == 7); // receive + Jetty + owner
     assert(receive_cqe[16] == 3);
-    assert(host.irq_vector == 2 && host.irq_pulses == 6);
+    assert(host.irq_pulses == 4 && host.Load(msi_address)[0] == 0x42);
 
     constexpr std::uint64_t write_source = 0x160000;
     constexpr std::uint64_t write_target = 0x170000;
@@ -553,7 +594,7 @@ int main()
     official_model.Receive(read_response);
     assert(host.Load(read_target) == std::vector<std::uint8_t>({'r','m','a','!'}));
     assert(host.Contains(cq_iova + 192));
-    assert(host.irq_vector == 2 && host.irq_pulses == 8);
+    assert(host.irq_pulses == 4 && host.Load(msi_address)[0] == 0x42);
 
     device::Frame invalid_token_write{};
     invalid_token_write.operation = device::Frame::Operation::Write;
