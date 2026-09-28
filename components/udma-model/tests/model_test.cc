@@ -78,6 +78,11 @@ class MockHost final : public device::HostInterface {
         return memory_.at(address);
     }
 
+    bool Contains(std::uint64_t address) const
+    {
+        return memory_.find(address) != memory_.end();
+    }
+
     std::vector<std::string> events;
     std::uint32_t irq_vector{};
     bool irq_asserted{};
@@ -377,20 +382,40 @@ int main()
     host.Store(ubase_csq + 64, create_ceq);
     assert(official_model.WriteMmio(0x318410, 4, 3));
 
-    constexpr std::uint64_t jetty_context_iova = 0x100000;
+    constexpr std::uint64_t jfr_context_iova = 0x100000;
+    constexpr std::uint64_t rq_iova = 0x120000;
+    constexpr std::uint64_t rq_index_iova = 0x130000;
+    constexpr std::uint64_t rq_producer_iova = 0x140000;
+    std::vector<std::uint8_t> jfr_context(128, 0);
+    store32(jfr_context, 4, static_cast<std::uint32_t>(rq_iova));
+    store32(jfr_context, 8 * 4, static_cast<std::uint32_t>(rq_index_iova >> 12));
+    store32(jfr_context, 9 * 4, 7U << 20);
+    store32(jfr_context, 10 * 4,
+            static_cast<std::uint32_t>((rq_producer_iova >> 6) << 8));
+    host.Store(jfr_context_iova, jfr_context);
+    std::vector<std::uint8_t> create_jfr(32, 0);
+    create_jfr[0] = 0x00; create_jfr[1] = 0x70; create_jfr[3] = 1;
+    store32(create_jfr, 8, jfr_context_iova);
+    store32(create_jfr, 16, (11U << 8) | 0x54);
+    host.Store(ubase_csq + 96, create_jfr);
+    assert(official_model.WriteMmio(0x318410, 4, 4));
+    assert(official_model.jfr_count() == 1);
+
+    constexpr std::uint64_t jetty_context_iova = 0x101000;
     constexpr std::uint64_t sq_iova = 0x110000;
     std::vector<std::uint8_t> jetty_context(128, 0);
     store32(jetty_context, 0, 1U << 19); // JETTY mode, one WQEBB
     store32(jetty_context, 4, static_cast<std::uint32_t>(sq_iova));
-    store32(jetty_context, 4 * 4, 7); // send JFC
+    store32(jetty_context, 4 * 4, 7 | (11U << 20)); // send JFC + JFR
+    store32(jetty_context, 5 * 4, 7U << 12); // receive JFC
     store32(jetty_context, 7 * 4, 0x1234); // user queue
     host.Store(jetty_context_iova, jetty_context);
     std::vector<std::uint8_t> create_jetty(32, 0);
     create_jetty[0] = 0x00; create_jetty[1] = 0x70; create_jetty[3] = 1;
     store32(create_jetty, 8, jetty_context_iova);
     store32(create_jetty, 16, (9U << 8) | 0x04);
-    host.Store(ubase_csq + 96, create_jetty);
-    assert(official_model.WriteMmio(0x318410, 4, 4));
+    host.Store(ubase_csq + 128, create_jetty);
+    assert(official_model.WriteMmio(0x318410, 4, 5));
     assert(official_model.jetty_count() == 1);
     host.Store(ci_iova, std::vector<std::uint8_t>(4, 0));
 
@@ -400,7 +425,7 @@ int main()
     const std::uint32_t send_command = 3U << 22;
     std::memcpy(send_wqe.data() + 4, &send_command, 4);
     std::memcpy(send_wqe.data() + 8, &tp_id, 4);
-    const std::uint32_t remote_jetty = 55;
+    const std::uint32_t remote_jetty = 9;
     std::memcpy(send_wqe.data() + 12, &remote_jetty, 4);
     send_wqe[48] = 'u'; send_wqe[49] = 'b'; send_wqe[50] = '!';
     constexpr std::uint64_t jetty_page = 0x00200000 + 0x1000 + 9 * 0x1000;
@@ -422,6 +447,26 @@ int main()
     const auto& completion_event = host.Load(ceq_iova);
     assert((completion_event[0] & 0x7f) == 7);
     assert(host.irq_vector == 2 && host.irq_pulses == 5);
+
+    constexpr std::uint64_t receive_buffer = 0x150000;
+    std::vector<std::uint8_t> posted_index(4, 0);
+    std::vector<std::uint8_t> posted_producer(4, 0);
+    posted_producer[0] = 1;
+    std::vector<std::uint8_t> posted_sge(16, 0);
+    store32(posted_sge, 0, 16);
+    std::uint64_t receive_address = receive_buffer;
+    std::memcpy(posted_sge.data() + 8, &receive_address, 8);
+    host.Store(rq_index_iova, posted_index);
+    host.Store(rq_producer_iova, posted_producer);
+    host.Store(rq_iova, posted_sge);
+    official_model.Receive(network.frames.back());
+    assert(host.Contains(receive_buffer));
+    assert(host.Load(receive_buffer) == std::vector<std::uint8_t>({'u','b','!'}));
+    assert(host.Contains(cq_iova + 64));
+    const auto& receive_cqe = host.Load(cq_iova + 64);
+    assert((receive_cqe[0] & 7) == 7); // receive + Jetty + owner
+    assert(receive_cqe[16] == 3);
+    assert(host.irq_vector == 2 && host.irq_pulses == 6);
     assert(!official_model.ReadMmio(
         device::UdmaModel::kOfficialApertureBytes, 1, value));
 

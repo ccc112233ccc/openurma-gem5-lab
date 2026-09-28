@@ -978,7 +978,11 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
             ((std::uint64_t(dw(12) & 3U) << 56) |
              (std::uint64_t(dw(11)) << 24) | (dw(10) >> 8)) << 6;
         queue.depth = rqe_shift < 31 ? 1U << rqe_shift : 0;
+        const std::uint32_t sge_shift = (dw(0) >> 4) & 0x7U;
+        queue.max_sge = 1U << sge_shift;
+        queue.entry_stride = queue.max_sge * abi::kSgeBytes;
         queue.token = ((dw(1) & 0x3fU) << 14) | ((dw(0) >> 18) & 0x3fffU);
+        queue.payload_token = (dw(3) >> 2) & 0x000fffffU;
         if (!queue.queue_iova || !queue.index_iova ||
             !queue.producer_iova || !queue.depth) return FailUbase();
         jfr_contexts_[tag] = queue;
@@ -1233,14 +1237,18 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                     std::uint8_t opcode, std::uint16_t entry_index,
                     std::uint32_t local_id, std::uint32_t byte_count,
                     std::uint64_t user_data, std::uint64_t immediate,
-                    Completion completion)
+                    Completion completion, std::uint32_t remote_id,
+                    std::uint32_t remote_eid, std::uint32_t tpn)
 {
     auto found = jfc_contexts_.find(jfc_id);
     if (found == jfc_contexts_.end()) return completion(false);
     const std::uint64_t ci = found->second.index_iova;
     host_.DmaReadIoVirtual(ci, 4,
         [this, jfc_id, receive, jetty, opcode, entry_index, local_id,
-         byte_count, user_data, immediate, completion = std::move(completion)]
+         byte_count, user_data, immediate, remote_id, remote_eid, tpn,
+         completion = std::move(completion)]
+        // remote identity is captured separately because it is produced by
+        // the peer packet rather than the local queue context.
         (bool ok, std::vector<std::uint8_t> consumer_bytes) mutable {
             auto found = jfc_contexts_.find(jfc_id);
             if (!ok || consumer_bytes.size() != 4 ||
@@ -1252,7 +1260,8 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                 return completion(false);
             const bool owner = ((jfc.producer / jfc.depth) & 1U) == 0;
             const auto cqe = abi::MakeCqe(receive, jetty, owner, opcode,
-                entry_index, local_id, byte_count, user_data, immediate);
+                entry_index, local_id, byte_count, user_data, immediate,
+                remote_id, remote_eid, tpn);
             const std::uint64_t address = jfc.queue_iova +
                 (jfc.producer & (jfc.depth - 1U)) * abi::kCqeBytes;
             host_.DmaWriteIoVirtual(address,
@@ -1415,10 +1424,140 @@ UdmaModel::Finish(std::uint64_t sequence, const Descriptor& descriptor,
 void
 UdmaModel::Receive(Frame frame)
 {
-    (void)frame;
-    // Receive queues are deliberately a separate extraction milestone. Keeping
-    // this entry point in the stable core API prevents the host adapters from
-    // acquiring receive-side device semantics in the meantime.
+    if (frame.operation != Frame::Operation::Send &&
+        frame.operation != Frame::Operation::SendImmediate) {
+        ++ubase_errors_;
+        return;
+    }
+    receive_frames_.push_back(std::move(frame));
+    ProcessReceiveQueue();
+}
+
+void
+UdmaModel::ProcessReceiveQueue()
+{
+    if (receive_busy_ || receive_frames_.empty()) return;
+    receive_busy_ = true;
+    auto frame = std::make_shared<Frame>(std::move(receive_frames_.front()));
+    receive_frames_.pop_front();
+    ReceiveSend(std::move(frame));
+}
+
+void
+UdmaModel::ReceiveSend(std::shared_ptr<Frame> frame)
+{
+    auto fail = [this]() {
+        ++ubase_errors_;
+        receive_busy_ = false;
+        ProcessReceiveQueue();
+    };
+    auto jetty = jetty_contexts_.find(frame->destination_jetty);
+    if (jetty == jetty_contexts_.end()) return fail();
+    auto jfr = jfr_contexts_.find(jetty->second.receive_queue);
+    if (jfr == jfr_contexts_.end() || !jfr->second.producer_iova)
+        return fail();
+    const std::uint32_t jfr_id = jfr->first;
+    const std::uint64_t pi = jfr->second.producer_iova;
+    host_.DmaReadIoVirtual(pi, 4,
+        [this, frame = std::move(frame), jfr_id]
+        (bool ok, std::vector<std::uint8_t> producer_bytes) mutable {
+            auto fail = [this]() {
+                ++ubase_errors_; receive_busy_ = false; ProcessReceiveQueue();
+            };
+            auto jfr = jfr_contexts_.find(jfr_id);
+            if (!ok || producer_bytes.size() != 4 || jfr == jfr_contexts_.end())
+                return fail();
+            const std::uint16_t producer =
+                static_cast<std::uint16_t>(abi::Load32(producer_bytes.data()));
+            if (static_cast<std::uint16_t>(jfr->second.consumer) == producer)
+                return fail();
+            const std::uint64_t address = jfr->second.index_iova +
+                (jfr->second.consumer & (jfr->second.depth - 1U)) * 4;
+            host_.DmaReadIoVirtual(address, 4,
+                [this, frame = std::move(frame), jfr_id]
+                (bool index_ok, std::vector<std::uint8_t> index_bytes) mutable {
+                    auto jfr = jfr_contexts_.find(jfr_id);
+                    if (!index_ok || index_bytes.size() != 4 ||
+                        jfr == jfr_contexts_.end()) {
+                        ++ubase_errors_; receive_busy_ = false;
+                        ProcessReceiveQueue(); return;
+                    }
+                    const std::uint32_t rqe = abi::Load32(index_bytes.data());
+                    if (rqe >= jfr->second.depth) {
+                        ++ubase_errors_; receive_busy_ = false;
+                        ProcessReceiveQueue(); return;
+                    }
+                    ReceiveSge(std::move(frame), jfr_id, rqe, 0, 0);
+                });
+        });
+}
+
+void
+UdmaModel::ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
+                      std::uint32_t rqe_index, std::uint32_t sge_index,
+                      std::uint32_t copied)
+{
+    auto jfr = jfr_contexts_.find(jfr_id);
+    if (jfr == jfr_contexts_.end()) return;
+    if (copied == frame->bytes.size())
+        return FinishReceive(std::move(frame), jfr_id, rqe_index);
+    if (sge_index >= jfr->second.max_sge) {
+        ++ubase_errors_; receive_busy_ = false; ProcessReceiveQueue(); return;
+    }
+    const std::uint64_t address = jfr->second.queue_iova +
+        std::uint64_t(rqe_index) * jfr->second.entry_stride +
+        std::uint64_t(sge_index) * abi::kSgeBytes;
+    host_.DmaReadIoVirtual(address, abi::kSgeBytes,
+        [this, frame = std::move(frame), jfr_id, rqe_index, sge_index, copied]
+        (bool ok, std::vector<std::uint8_t> bytes) mutable {
+            if (!ok || bytes.size() != abi::kSgeBytes) {
+                ++ubase_errors_; receive_busy_ = false;
+                ProcessReceiveQueue(); return;
+            }
+            const abi::Sge sge{abi::Load32(bytes.data()),
+                               abi::Load32(bytes.data() + 4),
+                               abi::Load64(bytes.data() + 8)};
+            const std::uint32_t chunk = std::min<std::uint32_t>(
+                sge.length, static_cast<std::uint32_t>(frame->bytes.size() - copied));
+            if (!chunk || !sge.address) {
+                ++ubase_errors_; receive_busy_ = false;
+                ProcessReceiveQueue(); return;
+            }
+            std::vector<std::uint8_t> payload(frame->bytes.begin() + copied,
+                                               frame->bytes.begin() + copied + chunk);
+            host_.DmaWriteIoVirtual(sge.address, std::move(payload),
+                [this, frame = std::move(frame), jfr_id, rqe_index,
+                 sge_index, copied, chunk](bool write_ok) mutable {
+                    if (!write_ok) {
+                        ++ubase_errors_; receive_busy_ = false;
+                        ProcessReceiveQueue(); return;
+                    }
+                    ReceiveSge(std::move(frame), jfr_id, rqe_index,
+                               sge_index + 1, copied + chunk);
+                });
+        });
+}
+
+void
+UdmaModel::FinishReceive(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
+                         std::uint32_t rqe_index)
+{
+    auto jfr = jfr_contexts_.find(jfr_id);
+    auto jetty = jetty_contexts_.find(frame->destination_jetty);
+    if (jfr == jfr_contexts_.end() || jetty == jetty_contexts_.end()) return;
+    const std::uint32_t jfc_id = jetty->second.receive_completion_queue ?
+        jetty->second.receive_completion_queue : jfr->second.completion_queue;
+    WriteCqe(jfc_id, true, true, static_cast<std::uint8_t>(frame->operation),
+             static_cast<std::uint16_t>(rqe_index), frame->destination_jetty,
+             static_cast<std::uint32_t>(frame->bytes.size()), 0,
+             frame->immediate,
+        [this, jfr_id](bool ok) {
+            auto jfr = jfr_contexts_.find(jfr_id);
+            if (ok && jfr != jfr_contexts_.end()) ++jfr->second.consumer;
+            if (!ok) ++ubase_errors_;
+            receive_busy_ = false;
+            ProcessReceiveQueue();
+        }, frame->source_jetty, frame->source_eid, frame->tpn);
 }
 
 } // namespace openurma::device

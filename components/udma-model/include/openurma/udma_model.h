@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <deque>
 #include <functional>
 #include <unordered_map>
 #include <utility>
@@ -190,8 +191,16 @@ class UdmaModel {
                   std::uint8_t opcode, std::uint16_t entry_index,
                   std::uint32_t local_id, std::uint32_t byte_count,
                   std::uint64_t user_data, std::uint64_t immediate,
-                  Completion completion);
+                  Completion completion, std::uint32_t remote_id = 0,
+                  std::uint32_t remote_eid = 0, std::uint32_t tpn = 0);
     void EmitCompletionEvent(std::uint32_t jfc_id, Completion completion);
+    void ProcessReceiveQueue();
+    void ReceiveSend(std::shared_ptr<Frame> frame);
+    void ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
+                    std::uint32_t rqe_index, std::uint32_t sge_index,
+                    std::uint32_t copied);
+    void FinishReceive(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
+                       std::uint32_t rqe_index);
     void ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
                            std::uint32_t descriptor_count,
                            std::vector<std::uint8_t> context);
@@ -242,6 +251,8 @@ class UdmaModel {
         bool busy{};
         bool direct_pending{};
         std::uint32_t target_producer{};
+        std::uint32_t max_sge{1};
+        std::uint32_t entry_stride{16};
         std::array<std::uint8_t, 64> direct_wqe{};
         std::uint64_t direct_valid{};
     };
@@ -269,6 +280,8 @@ class UdmaModel {
     std::uint64_t submitted_{0};
     std::uint64_t completed_{0};
     std::unordered_map<std::uint64_t, Descriptor> pending_;
+    std::deque<Frame> receive_frames_;
+    bool receive_busy_{};
 };
 
 } // namespace openurma::device

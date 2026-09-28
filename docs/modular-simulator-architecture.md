@@ -179,6 +179,9 @@ bootstrap slice:
 - the first official data-plane slice consumes direct SQE or ring doorbells,
   decodes the stock SEND/SEND_IMM WQE, performs payload DMA, emits a typed UDMA
   wire envelope through UB-NET, and produces the stock CQE plus CEQ interrupt.
+- the receive slice resolves the destination Jetty/JFR, consumes the official
+  RQ producer and index rings, scatters payload over posted SGEs, advances the
+  hardware consumer, and creates a receive CQE with peer identity metadata.
 
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in
