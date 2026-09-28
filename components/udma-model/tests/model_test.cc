@@ -417,6 +417,35 @@ int main()
     host.Store(ubase_csq + 128, create_jetty);
     assert(official_model.WriteMmio(0x318410, 4, 5));
     assert(official_model.jetty_count() == 1);
+
+    // A minimal official UMMU TECT/TCT plus ARM64 L0/L1 table maps the low
+    // 1 GiB IOVA range identity for the queue/payload tokens used below.
+    constexpr std::uint64_t tect_iova = 0x02000000;
+    constexpr std::uint64_t tct_iova = 0x02010000;
+    constexpr std::uint64_t l0_iova = 0x02020000;
+    constexpr std::uint64_t l1_iova = 0x02030000;
+    const auto store64 = [](std::vector<std::uint8_t>& bytes,
+                            std::size_t offset, std::uint64_t word) {
+        for (std::size_t i = 0; i < 8; ++i)
+            bytes[offset + i] = static_cast<std::uint8_t>(word >> (8 * i));
+    };
+    std::vector<std::uint8_t> tect(64, 0);
+    store64(tect, 0, 1);
+    store64(tect, 8, tct_iova);
+    host.Store(tect_iova, tect);
+    for (const std::uint32_t token : {0U, 9U}) {
+        std::vector<std::uint8_t> tct(64, 0);
+        store64(tct, 0, 1);
+        store64(tct, 16, l0_iova);
+        host.Store(tct_iova + std::uint64_t(token) * 64, tct);
+    }
+    std::vector<std::uint8_t> l0_entry(8, 0);
+    store64(l0_entry, 0, l1_iova | 3U);
+    host.Store(l0_iova, l0_entry);
+    std::vector<std::uint8_t> l1_entry(8, 0);
+    store64(l1_entry, 0, 1); // identity-mapped 1 GiB L1 block
+    host.Store(l1_iova, l1_entry);
+    assert(official_model.WriteMmio(0xf00070, 8, tect_iova));
     host.Store(ci_iova, std::vector<std::uint8_t>(4, 0));
 
     std::array<std::uint8_t, 64> send_wqe{};
@@ -525,6 +554,15 @@ int main()
     assert(host.Load(read_target) == std::vector<std::uint8_t>({'r','m','a','!'}));
     assert(host.Contains(cq_iova + 192));
     assert(host.irq_vector == 2 && host.irq_pulses == 8);
+
+    device::Frame invalid_token_write{};
+    invalid_token_write.operation = device::Frame::Operation::Write;
+    invalid_token_write.segment = 100;
+    invalid_token_write.remote_address = 0x190000;
+    invalid_token_write.transfer_length = 1;
+    invalid_token_write.bytes = {'x'};
+    official_model.Receive(std::move(invalid_token_write));
+    assert(!host.Contains(0x190000));
     assert(!official_model.ReadMmio(
         device::UdmaModel::kOfficialApertureBytes, 1, value));
 

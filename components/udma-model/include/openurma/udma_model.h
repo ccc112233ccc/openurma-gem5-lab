@@ -219,6 +219,33 @@ class UdmaModel {
     void ReceiveReadRequest(Frame frame);
     void ReceiveWriteAck(Frame frame);
     void ReceiveReadResponse(Frame frame);
+    using TranslateCompletion = std::function<void(bool, std::uint64_t)>;
+    void TranslateToken(std::uint32_t token, std::uint64_t address,
+                        TranslateCompletion completion);
+    void WalkTokenPageTable(std::uint64_t table, std::uint64_t address,
+                            std::uint32_t level,
+                            TranslateCompletion completion);
+    void ReadToken(std::uint32_t token, std::uint64_t address,
+                   std::size_t length, ReadCompletion completion);
+    void WriteToken(std::uint32_t token, std::uint64_t address,
+                    std::vector<std::uint8_t> data, Completion completion);
+    struct TokenReadState {
+        std::uint32_t token{};
+        std::uint64_t address{};
+        std::size_t length{};
+        std::size_t offset{};
+        std::vector<std::uint8_t> bytes;
+        ReadCompletion completion;
+    };
+    struct TokenWriteState {
+        std::uint32_t token{};
+        std::uint64_t address{};
+        std::size_t offset{};
+        std::vector<std::uint8_t> bytes;
+        Completion completion;
+    };
+    void ContinueTokenRead(std::shared_ptr<TokenReadState> state);
+    void ContinueTokenWrite(std::shared_ptr<TokenWriteState> state);
     void ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
                            std::uint32_t descriptor_count,
                            std::vector<std::uint8_t> context);

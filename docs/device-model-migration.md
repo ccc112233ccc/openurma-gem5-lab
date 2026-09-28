@@ -17,11 +17,12 @@ migrated merely because an old in-gem5 fallback still implements it.
 | misc/AEQ/CEQ interrupt separation | migrated boundary | UB-HOST vector mapped to three gem5 pins |
 | UE2UE CtrlQ/CRQ and TP lifecycle | migrated | QoS/SEID/TP response, allocation and activation tests |
 | Type-1 MSI address/data programming | pending | replace pin-only compatibility delivery |
-| UMMU translation tables and invalidation | pending | implement in device or negotiate translated DMA service |
+| UMMU TECT/TCT and ARM64 page-table translation | migrated | token-indexed walk and invalid-token rejection test |
+| UMMU translation invalidation/cache | no cache required yet | every DMA walks current guest tables |
 | official SQ doorbell and WQE decode | SEND migrated | direct SQE and ring doorbell, official owner/opcode/SGE fields |
 | SEND transmit and receive payload DMA | migrated | SQ SGE/inline DMA plus JFR PI/index/SGE receive DMA |
 | WRITE/READ request-response state machines | migrated | WRITE-after-remote-DMA ACK and READ response-to-local-SGE tests |
-| UMMU token permission enforcement | pending | UB-HOST carries PASID/token; gem5 adapter translation remains |
+| UMMU MAPT permission enforcement | pending | token translation is enforced; grant permission format remains |
 | CQE creation and CEQ production | SEND TX/RX migrated | CI check, owner bit, 64-byte CQE, CEQE and vector 2 |
 | completion moderation | pending | model CEQ coalescing policy and timer |
 | multi-port TP selection | migrated | control-plane round-robin TP-to-port binding |

@@ -1109,7 +1109,7 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
     }
     const std::uint64_t address = jetty.queue_iova +
         (jetty.consumer & (jetty.depth - 1U)) * abi::kWqebbBytes;
-    host_.DmaReadIoVirtual(address, abi::kWqebbBytes,
+    ReadToken(jetty.token, address, abi::kWqebbBytes,
         [this, jetty_id, producer](bool ok, std::vector<std::uint8_t> raw) {
             if (!ok || raw.size() != abi::kWqebbBytes) {
                 auto found = jetty_contexts_.find(jetty_id);
@@ -1152,7 +1152,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
             jetty.consumer & (jetty.depth - 1U));
         pending_rma_[request_id] = PendingRma{
             jetty_id, producer, completed_index, wqe.opcode(), local.length,
-            0, wqe.completion(), local.token, local.address};
+            0, wqe.completion(), jetty.payload_token, local.address};
         Frame frame{};
         frame.sequence = next_sequence_++;
         frame.source_eid = config_.endpoint_eid + jetty.eid_index * 0x10000U;
@@ -1186,7 +1186,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
     if (wqe.sge_count() != 1) return fail();
     const abi::Sge sge = wqe.first_sge();
     if (!sge.address || !sge.length) return fail();
-    host_.DmaReadIoVirtual(sge.address, sge.length,
+    ReadToken(jetty.payload_token, sge.address, sge.length,
         [this, jetty_id, producer, raw = std::move(raw), expected = sge.length]
         (bool ok, std::vector<std::uint8_t> payload) mutable {
             if (!ok || payload.size() != expected) {
@@ -1292,7 +1292,7 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
     auto found = jfc_contexts_.find(jfc_id);
     if (found == jfc_contexts_.end()) return completion(false);
     const std::uint64_t ci = found->second.index_iova;
-    host_.DmaReadIoVirtual(ci, 4,
+    ReadToken(found->second.token, ci, 4,
         [this, jfc_id, receive, jetty, opcode, entry_index, local_id,
          byte_count, user_data, immediate, remote_id, remote_eid, tpn,
          completion = std::move(completion)]
@@ -1313,7 +1313,7 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                 remote_id, remote_eid, tpn);
             const std::uint64_t address = jfc.queue_iova +
                 (jfc.producer & (jfc.depth - 1U)) * abi::kCqeBytes;
-            host_.DmaWriteIoVirtual(address,
+            WriteToken(jfc.token, address,
                 std::vector<std::uint8_t>(cqe.begin(), cqe.end()),
                 [this, jfc_id, completion = std::move(completion)](bool write_ok) mutable {
                     auto found = jfc_contexts_.find(jfc_id);
@@ -1340,6 +1340,145 @@ UdmaModel::EmitCompletionEvent(std::uint32_t jfc_id, Completion completion)
         [this, completion = std::move(completion)](bool ok) mutable {
             if (ok) { ++ceq_producer_; host_.PulseInterrupt(2); }
             completion(ok);
+        });
+}
+
+void
+UdmaModel::TranslateToken(std::uint32_t token, std::uint64_t address,
+                          TranslateCompletion completion)
+{
+    constexpr std::uint64_t AddressMask = 0x0000fffffffff000ULL;
+    constexpr std::uint32_t Entries = 1024;
+    if (token >= Entries) return completion(false, 0);
+    const std::uint64_t tect =
+        LoadLe<std::uint64_t>(ummu_registers_.data() + 0x70) & AddressMask;
+    if (!tect) return completion(false, 0);
+    host_.DmaRead(tect, 64,
+        [this, token, address, completion = std::move(completion)]
+        (bool ok, std::vector<std::uint8_t> entry) mutable {
+            constexpr std::uint64_t AddressMask = 0x0000fffffffff000ULL;
+            if (!ok || entry.size() != 64 ||
+                !(LoadLe<std::uint64_t>(entry.data()) & 1U))
+                return completion(false, 0);
+            const std::uint64_t tct =
+                LoadLe<std::uint64_t>(entry.data() + 8) & AddressMask;
+            if (!tct) return completion(false, 0);
+            host_.DmaRead(tct + std::uint64_t(token) * 64, 64,
+                [this, address, completion = std::move(completion)]
+                (bool tct_ok, std::vector<std::uint8_t> context) mutable {
+                    constexpr std::uint64_t AddressMask =
+                        0x0000fffffffff000ULL;
+                    if (!tct_ok || context.size() != 64 ||
+                        !(LoadLe<std::uint64_t>(context.data()) & 1U))
+                        return completion(false, 0);
+                    const std::uint64_t root =
+                        LoadLe<std::uint64_t>(context.data() + 16) & AddressMask;
+                    if (!root) return completion(false, 0);
+                    WalkTokenPageTable(root, address, 0,
+                                       std::move(completion));
+                });
+        });
+}
+
+void
+UdmaModel::WalkTokenPageTable(std::uint64_t table, std::uint64_t address,
+                              std::uint32_t level,
+                              TranslateCompletion completion)
+{
+    constexpr std::array<std::uint32_t, 4> Shift{39, 30, 21, 12};
+    if (level >= Shift.size()) return completion(false, 0);
+    const std::uint64_t index = (address >> Shift[level]) & 0x1ffU;
+    host_.DmaRead(table + index * 8, 8,
+        [this, address, level, completion = std::move(completion)]
+        (bool ok, std::vector<std::uint8_t> bytes) mutable {
+            constexpr std::array<std::uint32_t, 4> Shift{39, 30, 21, 12};
+            constexpr std::uint64_t AddressMask = 0x0000fffffffff000ULL;
+            if (!ok || bytes.size() != 8) return completion(false, 0);
+            const std::uint64_t descriptor = LoadLe<std::uint64_t>(bytes.data());
+            if (!(descriptor & 1U)) return completion(false, 0);
+            const std::uint64_t output = descriptor & AddressMask;
+            if (level == 3)
+                return completion(true, output | (address & 0xfffU));
+            if ((descriptor & 3U) == 1U && level != 0) {
+                const std::uint64_t block = std::uint64_t{1} << Shift[level];
+                return completion(true, (output & ~(block - 1U)) |
+                                         (address & (block - 1U)));
+            }
+            WalkTokenPageTable(output, address, level + 1,
+                               std::move(completion));
+        });
+}
+
+void
+UdmaModel::ReadToken(std::uint32_t token, std::uint64_t address,
+                     std::size_t length, ReadCompletion completion)
+{
+    auto state = std::make_shared<TokenReadState>();
+    state->token = token;
+    state->address = address;
+    state->length = length;
+    state->bytes.resize(length);
+    state->completion = std::move(completion);
+    ContinueTokenRead(std::move(state));
+}
+
+void
+UdmaModel::ContinueTokenRead(std::shared_ptr<TokenReadState> state)
+{
+    if (state->offset == state->length)
+        return state->completion(true, std::move(state->bytes));
+    const std::uint64_t current = state->address + state->offset;
+    const std::size_t chunk = std::min<std::size_t>(
+        state->length - state->offset, 4096 - (current & 0xfffU));
+    TranslateToken(state->token, current,
+        [this, state = std::move(state), chunk]
+        (bool ok, std::uint64_t physical) mutable {
+            if (!ok || !physical) return state->completion(false, {});
+            host_.DmaRead(physical, chunk,
+                [this, state = std::move(state), chunk]
+                (bool read_ok, std::vector<std::uint8_t> bytes) mutable {
+                    if (!read_ok || bytes.size() != chunk)
+                        return state->completion(false, {});
+                    std::copy(bytes.begin(), bytes.end(),
+                              state->bytes.begin() + state->offset);
+                    state->offset += chunk;
+                    ContinueTokenRead(std::move(state));
+                });
+        });
+}
+
+void
+UdmaModel::WriteToken(std::uint32_t token, std::uint64_t address,
+                      std::vector<std::uint8_t> data, Completion completion)
+{
+    auto state = std::make_shared<TokenWriteState>();
+    state->token = token;
+    state->address = address;
+    state->bytes = std::move(data);
+    state->completion = std::move(completion);
+    ContinueTokenWrite(std::move(state));
+}
+
+void
+UdmaModel::ContinueTokenWrite(std::shared_ptr<TokenWriteState> state)
+{
+    if (state->offset == state->bytes.size()) return state->completion(true);
+    const std::uint64_t current = state->address + state->offset;
+    const std::size_t chunk = std::min<std::size_t>(
+        state->bytes.size() - state->offset, 4096 - (current & 0xfffU));
+    TranslateToken(state->token, current,
+        [this, state = std::move(state), chunk]
+        (bool ok, std::uint64_t physical) mutable {
+            if (!ok || !physical) return state->completion(false);
+            std::vector<std::uint8_t> bytes(
+                state->bytes.begin() + state->offset,
+                state->bytes.begin() + state->offset + chunk);
+            host_.DmaWrite(physical, std::move(bytes),
+                [this, state = std::move(state), chunk](bool write_ok) mutable {
+                    if (!write_ok) return state->completion(false);
+                    state->offset += chunk;
+                    ContinueTokenWrite(std::move(state));
+                });
         });
 }
 
@@ -1497,7 +1636,7 @@ UdmaModel::ReceiveWrite(Frame frame)
         return;
     }
     const Frame reply_basis = frame;
-    host_.DmaWriteToken(frame.segment, frame.remote_address,
+    WriteToken(frame.segment, frame.remote_address,
                         std::move(frame.bytes),
         [this, reply_basis](bool ok) mutable {
             if (!ok) { ++ubase_errors_; return; }
@@ -1526,7 +1665,7 @@ UdmaModel::ReceiveReadRequest(Frame frame)
         return;
     }
     const Frame reply_basis = frame;
-    host_.DmaReadToken(frame.segment, frame.remote_address,
+    ReadToken(frame.segment, frame.remote_address,
                        frame.transfer_length,
         [this, reply_basis](bool ok, std::vector<std::uint8_t> payload) mutable {
             if (!ok || payload.size() != reply_basis.transfer_length) {
@@ -1578,7 +1717,7 @@ UdmaModel::ReceiveReadResponse(Frame frame)
     }
     const PendingRma pending = found->second;
     pending_rma_.erase(found);
-    host_.DmaWriteToken(pending.local_token, pending.local_address,
+    WriteToken(pending.local_token, pending.local_address,
                         std::move(frame.bytes),
         [this, pending](bool ok) {
             if (!ok) {
@@ -1619,7 +1758,7 @@ UdmaModel::ReceiveSend(std::shared_ptr<Frame> frame)
         return fail();
     const std::uint32_t jfr_id = jfr->first;
     const std::uint64_t pi = jfr->second.producer_iova;
-    host_.DmaReadIoVirtual(pi, 4,
+    ReadToken(jfr->second.token, pi, 4,
         [this, frame = std::move(frame), jfr_id]
         (bool ok, std::vector<std::uint8_t> producer_bytes) mutable {
             auto fail = [this]() {
@@ -1634,7 +1773,7 @@ UdmaModel::ReceiveSend(std::shared_ptr<Frame> frame)
                 return fail();
             const std::uint64_t address = jfr->second.index_iova +
                 (jfr->second.consumer & (jfr->second.depth - 1U)) * 4;
-            host_.DmaReadIoVirtual(address, 4,
+            ReadToken(jfr->second.token, address, 4,
                 [this, frame = std::move(frame), jfr_id]
                 (bool index_ok, std::vector<std::uint8_t> index_bytes) mutable {
                     auto jfr = jfr_contexts_.find(jfr_id);
@@ -1668,7 +1807,7 @@ UdmaModel::ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
     const std::uint64_t address = jfr->second.queue_iova +
         std::uint64_t(rqe_index) * jfr->second.entry_stride +
         std::uint64_t(sge_index) * abi::kSgeBytes;
-    host_.DmaReadIoVirtual(address, abi::kSgeBytes,
+    ReadToken(jfr->second.token, address, abi::kSgeBytes,
         [this, frame = std::move(frame), jfr_id, rqe_index, sge_index, copied]
         (bool ok, std::vector<std::uint8_t> bytes) mutable {
             if (!ok || bytes.size() != abi::kSgeBytes) {
@@ -1686,7 +1825,13 @@ UdmaModel::ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
             }
             std::vector<std::uint8_t> payload(frame->bytes.begin() + copied,
                                                frame->bytes.begin() + copied + chunk);
-            host_.DmaWriteIoVirtual(sge.address, std::move(payload),
+            auto jfr = jfr_contexts_.find(jfr_id);
+            if (jfr == jfr_contexts_.end()) {
+                ++ubase_errors_; receive_busy_ = false;
+                ProcessReceiveQueue(); return;
+            }
+            WriteToken(jfr->second.payload_token, sge.address,
+                       std::move(payload),
                 [this, frame = std::move(frame), jfr_id, rqe_index,
                  sge_index, copied, chunk](bool write_ok) mutable {
                     if (!write_ok) {

@@ -186,6 +186,10 @@ bootstrap slice:
   local SGE and token until the matching response is DMA-written. RMA packets
   carry transaction IDs, remote segment tokens, addresses, and lengths in the
   simulator-neutral UDMA wire header.
+- queue and payload token DMA now resolves the official TECT/TCT entry and
+  walks the current ARM64 guest page tables inside the device process. Invalid
+  or absent tokens fail before host memory is touched; MAPT access permissions
+  remain a separate migration item.
 
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in
