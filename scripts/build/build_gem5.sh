@@ -122,8 +122,9 @@ adapter_overlay="$lab_dir/integrations/gem5/ub_host_adapter"
 [[ -f "$adapter_overlay/SConscript" ]] ||
     die "UB-HOST gem5 adapter overlay is missing: $adapter_overlay"
 rsync -a --delete "$adapter_overlay/" "$scaffold_extra/ub_host_adapter/"
-sed -i '$a SConscript("ub_host_adapter/SConscript", exports="*")' \
-    "$scaffold_extra/SConscript"
+install -m 0644 \
+    "$lab_dir/components/udma-device-sim/simbricks_base_portable.c" \
+    "$scaffold_extra/ub_host_adapter/simbricks_base_portable.c"
 find "$scaffold_extra" -type f \
     -exec sed -i \
         -e "s#/home/ubuntu/OpenURMA#$openurma_root#g" \

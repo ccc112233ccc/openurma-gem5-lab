@@ -43,6 +43,9 @@ OFFICIAL_UDMA_V2M_BASE = 0x2C1C0000
 OFFICIAL_UDMA_V2M_SIZE = 0x1000
 OFFICIAL_UDMA_V2M_SPI_BASE = 256
 OFFICIAL_UDMA_V2M_SPI_COUNT = 64
+EXTERNAL_UDMA_MISC_SPI = 104
+EXTERNAL_UDMA_AEQ_SPI = 105
+EXTERNAL_UDMA_CEQ_SPI = 106
 
 
 spec = importlib.util.spec_from_file_location("openurma_fs_upstream", str(UPSTREAM))
@@ -162,6 +165,41 @@ def create_olk66_compatible(args):
     if args.official_udma_discovery:
         print("[openurma-fs-wrapper] official UDMA discovery DT enabled; "
               f"UBRT=0x{OFFICIAL_UDMA_UBRT:x}")
+    external_socket = os.environ.get("OPENURMA_UDMA_HOST_SOCKET", "")
+    if external_socket:
+        if not args.official_udma_discovery:
+            raise RuntimeError(
+                "OPENURMA_UDMA_HOST_SOCKET requires --official-udma-discovery"
+            )
+        # Keep the upstream SystemC object alive as a temporary compatibility
+        # child, but remove its CPU-visible aperture. The native DmaDevice
+        # adapter exclusively owns the official 16 MiB range and delegates all
+        # device semantics to the standalone UDMA process through UB-HOST v1.
+        system.db_bridge.addr_ranges = []
+        interrupt_pins = []
+        for spi in (
+            EXTERNAL_UDMA_MISC_SPI,
+            EXTERNAL_UDMA_AEQ_SPI,
+            EXTERNAL_UDMA_CEQ_SPI,
+        ):
+            pin = upstream.ArmSPI(num=spi)
+            pin.platform = system.realview
+            interrupt_pins.append(pin)
+        system.external_udma = upstream.UbHostAdapter(
+            pio_addr=upstream.IOMEM_BASE,
+            pio_size=upstream.OFFICIAL_UDMA_IOMEM_SIZE,
+            socket_path=external_socket,
+            poll_interval=os.environ.get(
+                "OPENURMA_UDMA_HOST_POLL_INTERVAL", "1us"
+            ),
+            interrupt_misc=interrupt_pins[0],
+            interrupt_aeq=interrupt_pins[1],
+            interrupt_ceq=interrupt_pins[2],
+        )
+        system.external_udma.pio = system.membus.mem_side_ports
+        system.external_udma.dma = system.iobus.cpu_side_ports
+        print("[openurma-fs-wrapper] external UB-HOST UDMA enabled: "
+              f"{external_socket}")
     return system
 
 

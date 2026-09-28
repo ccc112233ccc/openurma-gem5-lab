@@ -124,8 +124,35 @@ def _script(relative: str, args: Sequence[str], runtime: str) -> int:
         return 2
     env = os.environ.copy()
     env["OPENURMA_EXECUTION_MODE"] = runtime
-    env.setdefault("OPENURMA_LAB_ROOT", str(ROOT))
+    env["OPENURMA_LAB_ROOT"] = (
+        env.get("OPENURMA_CONTAINER_LAB_ROOT", "/workspace/openurma-gem5-lab")
+        if runtime == "docker" else str(ROOT)
+    )
     return subprocess.run(["bash", str(path), *args], env=env).returncode
+
+
+def _build(target: str, args: Sequence[str], runtime: str) -> int:
+    relative = BUILD_TARGETS[target]
+    # Most component build scripts are intentionally Linux-native.  Make the
+    # public CLI perform the container boundary instead of requiring callers
+    # to know an internal docker-exec incantation.  The few orchestrator
+    # scripts below already use scripts/runtime.sh and must remain on the host.
+    host_orchestrated = {"ns3ub", "mooncake", "mooncake-initramfs"}
+    if runtime != "docker" or target in host_orchestrated:
+        return _script(relative, args, runtime)
+
+    container = os.environ.get("OPENURMA_CONTAINER", "openurma-gem5-lab")
+    container_root = os.environ.get(
+        "OPENURMA_CONTAINER_LAB_ROOT", "/workspace/openurma-gem5-lab"
+    )
+    command = [
+        "docker", "exec",
+        "-e", "OPENURMA_EXECUTION_MODE=native",
+        "-e", f"OPENURMA_LAB_ROOT={container_root}",
+        container,
+        "bash", f"{container_root}/{relative}", *args,
+    ]
+    return subprocess.run(command).returncode
 
 
 def _requested_target_arch(args: Sequence[str]) -> str | None:
@@ -151,7 +178,10 @@ def _attach(args: Sequence[str], runtime: str) -> int:
     env = os.environ.copy()
     env.setdefault("OPENURMA_M5TERM_PORT", str(uart0 + node * stride))
     env["OPENURMA_EXECUTION_MODE"] = runtime
-    env.setdefault("OPENURMA_LAB_ROOT", str(ROOT))
+    env["OPENURMA_LAB_ROOT"] = (
+        env.get("OPENURMA_CONTAINER_LAB_ROOT", "/workspace/openurma-gem5-lab")
+        if runtime == "docker" else str(ROOT)
+    )
     return subprocess.run(["bash", str(ROOT / "scripts/run/attach.sh")], env=env).returncode
 
 
@@ -192,7 +222,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        return _script(BUILD_TARGETS[tail[0]], tail[1:], runtime)
+        return _build(tail[0], tail[1:], runtime)
     if command in COMMANDS:
         return _script(COMMANDS[command].script, tail, runtime)
 

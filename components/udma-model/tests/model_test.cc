@@ -163,6 +163,7 @@ int main()
     device::UdmaModel::Config official_config{};
     official_config.mmio_base = 0x2d000000;
     official_config.port_count = 2;
+    official_config.identity_iova_test_mode = true;
     device::UdmaModel official_model(host, network, official_config);
     std::uint64_t value{};
     const std::string ubios("ubios");

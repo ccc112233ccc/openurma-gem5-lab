@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstring>
@@ -239,7 +240,8 @@ class UbNetFabric {
                 progress = Flush(endpoint, now) || progress;
             if (all_terminated && scheduled_packets_ == 0 && OutputsEmpty()) break;
             if (!OutputsEmpty()) {
-                if (!progress) std::this_thread::yield();
+                if (!progress)
+                    std::this_thread::sleep_for(std::chrono::microseconds(50));
                 continue;
             }
             for (auto& endpoint : endpoints_)
@@ -265,7 +267,8 @@ class UbNetFabric {
                 AdvanceTo(now + options_.sync_interval_ps);
                 progress = true;
             }
-            if (!progress) std::this_thread::yield();
+            if (!progress)
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
         std::cerr << "[NS3_UB_NET_STATS] forwarded=" << forwarded_
                   << " delivered=" << delivered_ << " payload_bytes="

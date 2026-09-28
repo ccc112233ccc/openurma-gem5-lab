@@ -128,7 +128,8 @@ CPU, cache, and memory:
 
 UB link:
   --network-backend MODE        OPENURMA_NETWORK_BACKEND
-                                (builtin|ns3ub-compat|ns3ub-native;
+                                (builtin|ns3ub-compat|ns3ub-native|
+                                modular-ns3ub;
                                 default: builtin)
   --ub-transport MODE           OPENURMA_UB_TRANSPORT
                                 (switch-adapter|direct-ring; default:
@@ -930,6 +931,7 @@ sq_wqebb_latency="${OPENURMA_SQ_WQEBB_LATENCY:-$profile_sq_wqebb_latency}"
 payload_dma_latency="${OPENURMA_PAYLOAD_DMA_LATENCY:-$profile_payload_dma_latency}"
 payload_dma_rate_gbps="${OPENURMA_PAYLOAD_DMA_RATE_GBPS:-$profile_payload_dma_rate_gbps}"
 udma_poll_interval="${OPENURMA_UDMA_POLL_INTERVAL:-$profile_udma_poll_interval}"
+external_udma_poll_interval="${OPENURMA_UDMA_HOST_POLL_INTERVAL:-1us}"
 udma_iotlb_entries="${OPENURMA_UDMA_IOTLB_ENTRIES:-$profile_udma_iotlb_entries}"
 dma_max_outstanding="${OPENURMA_DMA_MAX_OUTSTANDING:-$profile_dma_max_outstanding}"
 provider="${OPENURMA_PROVIDER:-$profile_provider}"
@@ -1159,7 +1161,14 @@ initrd="${OPENURMA_INITRD:-$default_initrd}"
 config="${OPENURMA_CONFIG:-$lab/configs/single_node_fs_openurma.py}"
 switch_config="${OPENURMA_SWITCH_CONFIG:-$lab/gem5/configs/dist/sw.py}"
 ub_switch_source="${OPENURMA_UB_SWITCH_SOURCE:-$lab/tools/ub_switch_sim.cc}"
-if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
+if [[ "$network_backend" == modular-ns3ub ]]; then
+    ns3ub_root="${OPENURMA_NS3UB_ROOT:-$lab/sources/ns-3-ub}"
+    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-net-adapter}"
+    runtime_arch="${OPENURMA_RUNTIME_ARCH:-$(uname -m)}"
+    [[ "$runtime_arch" != arm64 ]] || runtime_arch=aarch64
+    udma_device_binary="${OPENURMA_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
+    ub_switch_ready_pattern='\[NS3_UB_NET\] connected'
+elif [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
     ns3ub_root="${OPENURMA_NS3UB_ROOT:-$lab/sources/ns-3-ub}"
     ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-gem5-adapter}"
     if [[ -z "${OPENURMA_UB_SWITCH_BINARY:-}" && ! -x "$ub_switch_binary" && \
@@ -1201,6 +1210,15 @@ node_tap_path() {
     if (( $1 == 0 )); then echo "$tap0";
     elif (( $1 == 1 )); then echo "$tap1";
     else echo "/tmp/openurma-dual.eth$1.sock"; fi
+}
+node_host_socket_path() {
+    echo "/tmp/openurma-dual.node$1.ub-host.sock"
+}
+node_net_socket_path() {
+    echo "/tmp/openurma-dual.node$1.ub-net.sock"
+}
+node_udma_shm_path() {
+    echo "/tmp/openurma-dual.node$1.udma.shm"
 }
 [[ "$node_count" =~ ^[0-9]+$ ]] &&
     (( node_count >= 2 && node_count <= 8 )) ||
@@ -1302,6 +1320,7 @@ valid_time sq-fetch-latency "$sq_fetch_latency"
 valid_time sq-wqebb-latency "$sq_wqebb_latency"
 valid_time payload-dma-latency "$payload_dma_latency"
 valid_time udma-poll-interval "$udma_poll_interval"
+valid_time external-udma-poll-interval "$external_udma_poll_interval"
 valid_time mem-ctrl-frontend-latency "$mem_ctrl_frontend_latency"
 valid_time mem-ctrl-backend-latency "$mem_ctrl_backend_latency"
 valid_time mem-ctrl-command-window "$mem_ctrl_command_window"
@@ -1395,8 +1414,8 @@ case "$ub_transport" in
     *) die "UB transport must be direct-ring or switch-adapter" ;;
 esac
 case "$network_backend" in
-    builtin|ns3ub-compat|ns3ub-native) ;;
-    *) die "network backend must be builtin, ns3ub-compat, or ns3ub-native" ;;
+    builtin|ns3ub-compat|ns3ub-native|modular-ns3ub) ;;
+    *) die "network backend must be builtin, ns3ub-compat, ns3ub-native, or modular-ns3ub" ;;
 esac
 if [[ "$network_backend" != builtin && "$ub_transport" != switch-adapter ]]; then
     die "$network_backend requires --ub-transport switch-adapter"
@@ -1409,8 +1428,15 @@ if (( sync_enabled )) && [[ "$sync_mode" == adapter-local ]]; then
     [[ "$ub_transport" == switch-adapter ]] ||
         die "adapter-local sync requires --ub-transport switch-adapter"
 fi
-if (( ! sync_enabled )) && [[ "$network_backend" != builtin ]]; then
+if (( ! sync_enabled )) && [[ "$network_backend" != builtin && \
+                              "$network_backend" != modular-ns3ub ]]; then
     die "unsynchronized adapter execution currently requires --network-backend builtin"
+fi
+if [[ "$network_backend" == modular-ns3ub ]]; then
+    (( ! sync_enabled )) ||
+        die "modular-ns3ub currently requires --no-sync until UB-HOST participates in conservative time synchronization"
+    [[ "$provider" == official ]] ||
+        die "modular-ns3ub requires --provider official"
 fi
 if [[ "$ub_transport" == switch-adapter && "$peer_topology" != l1-switch ]]; then
     die "switch-adapter requires --peer-topology l1-switch"
@@ -1591,6 +1617,7 @@ sq_wqebb_latency=$sq_wqebb_latency
 payload_dma_latency=$payload_dma_latency
 payload_dma_rate_gbps=$payload_dma_rate_gbps
 udma_poll_interval=$udma_poll_interval
+external_udma_poll_interval=$external_udma_poll_interval
 udma_iotlb_entries=$udma_iotlb_entries
 dma_max_outstanding=$dma_max_outstanding
 dist_link_speed=$dist_link_speed
@@ -1704,6 +1731,11 @@ for ((node = 0; node < node_count; ++node)); do
     if pid_is_live "$run_root/node$node/gem5.pid" "$run_root/node$node"; then
         die "node$node is already running; use './lab status' or './lab stop'"
     fi
+    if [[ "$network_backend" == modular-ns3ub ]] &&
+       pid_is_live "$run_root/udma-node$node/udma.pid" \
+                   "$udma_device_binary"; then
+        die "udma$node is already running; use './lab status' or './lab stop'"
+    fi
     node_terminal_argument="--terminal-port=$(node_uart "$node")"
     if conflict=$(find_process_with_argument "$node_terminal_argument"); then
         die "node$node UART is occupied by an untracked process: $conflict"
@@ -1732,6 +1764,10 @@ if ou_exec test -d "$run_root"; then
     # arbitrary OPENURMA_DUAL_OUT root supplied by the caller.
     stale_run_paths=(
         "$run_root/switch" "$run_root/ub-switch" "$run_root/oob-switch"
+        "$run_root/udma-node0" "$run_root/udma-node1"
+        "$run_root/udma-node2" "$run_root/udma-node3"
+        "$run_root/udma-node4" "$run_root/udma-node5"
+        "$run_root/udma-node6" "$run_root/udma-node7"
         "$run_root/node0" "$run_root/node1" "$run_root/node2"
         "$run_root/node3" "$run_root/node4" "$run_root/node5"
         "$run_root/node6" "$run_root/node7"
@@ -1743,17 +1779,85 @@ fi
 run_directories=("$run_root/switch" "$run_root/ub-switch" "$run_root/oob-switch")
 ring_paths=()
 tap_paths=()
+host_socket_paths=()
+net_socket_paths=()
+udma_shm_paths=()
 for ((node = 0; node < node_count; ++node)); do
     run_directories+=("$run_root/node$node")
+    if [[ "$network_backend" == modular-ns3ub ]]; then
+        run_directories+=("$run_root/udma-node$node")
+    fi
     ring_paths+=("$(node_ring_path "$node")")
     tap_paths+=("$(node_tap_path "$node")")
+    host_socket_paths+=("$(node_host_socket_path "$node")")
+    net_socket_paths+=("$(node_net_socket_path "$node")")
+    udma_shm_paths+=("$(node_udma_shm_path "$node")")
 done
 ou_exec mkdir -p "${run_directories[@]}"
 print_resolved_config | ou_exec_i sh -c \
     'umask 022; tee "$1" >/dev/null' _ "$run_root/run-manifest.txt"
-ou_exec rm -f "$ring" "${ring_paths[@]}" "${tap_paths[@]}"
+ou_exec rm -f "$ring" "${ring_paths[@]}" "${tap_paths[@]}" \
+    "${host_socket_paths[@]}" "${net_socket_paths[@]}" \
+    "${udma_shm_paths[@]}"
 # Must match the per-port trailing-slot ABI in NICTopologySC.cc.
-if [[ "$ub_transport" == switch-adapter ]]; then
+if [[ "$network_backend" == modular-ns3ub ]]; then
+    ou_exec test -x "$ub_switch_binary" ||
+        die "missing ns-3 UB-NET adapter: $ub_switch_binary; run './lab build ns3ub'"
+    ou_exec test -x "$udma_device_binary" ||
+        die "missing standalone UDMA device: $udma_device_binary; run './lab build udma-device'"
+    # The legacy topology remains instantiated only as a compatibility child;
+    # give it inert rings while its CPU-visible MMIO aperture is disabled.
+    for node_ring in "${ring_paths[@]}"; do
+        ou_exec truncate -s "$peer_ring_bytes" "$node_ring"
+    done
+    # UDMA owns both sockets and therefore starts first as the listener.  Its
+    # two-interface Establish waits until the host and fabric peers exist, so
+    # all processes are detached before readiness is checked.
+    for ((node = 0; node < node_count; ++node)); do
+        ou_exec_detached \
+            bash "$lab/tools/run-background.sh" \
+            "$run_root/udma-node$node/udma.pid" \
+            "$run_root/udma-node$node/udma.log" \
+            "$udma_device_binary" \
+            --host-socket "${host_socket_paths[$node]}" \
+            --net-socket "${net_socket_paths[$node]}" \
+            --shm "${udma_shm_paths[$node]}" \
+            --sync off --link-latency-ps 1 \
+            --sync-interval-ps "$((sync_quantum_ns * 1000))" \
+            --eid "$((0x100 + node))" --ports "$ub_port_count"
+    done
+    for node_socket in "${host_socket_paths[@]}" "${net_socket_paths[@]}"; do
+        for _ in $(seq 1 100); do
+            ou_exec test -S "$node_socket" 2>/dev/null && break
+            sleep 0.05
+        done
+        ou_exec test -S "$node_socket" ||
+            die "standalone UDMA socket did not appear: $node_socket"
+    done
+
+    switch_delay_ps=$(awk -v value="$peer_switch_delay" '
+        BEGIN {
+            if (value ~ /ps$/) { sub(/ps$/, "", value); scale=1 }
+            else if (value ~ /ns$/) { sub(/ns$/, "", value); scale=1000 }
+            else if (value ~ /us$/) { sub(/us$/, "", value); scale=1000000 }
+            else if (value ~ /ms$/) { sub(/ms$/, "", value); scale=1000000000 }
+            else if (value ~ /s$/) { sub(/s$/, "", value); scale=1000000000000 }
+            printf "%.0f", value * scale
+        }')
+    ub_switch_args=(--ports "$ub_port_count"
+        --link-delay-ps "$((peer_latency_ns * 1000))"
+        --switch-delay-ps "$switch_delay_ps"
+        --rate-gbps "$peer_link_rate_gbps" --sync off
+        --sync-interval-ps "$((sync_quantum_ns * 1000))")
+    for ((node = 0; node < node_count; ++node)); do
+        ub_switch_args+=(--endpoint
+            "${net_socket_paths[$node]},$((0x100 + node))")
+    done
+    ou_exec_detached \
+        bash "$lab/tools/run-background.sh" \
+        "$run_root/ub-switch/gem5.pid" "$run_root/ub-switch/gem5.log" \
+        "$ub_switch_binary" "${ub_switch_args[@]}"
+elif [[ "$ub_transport" == switch-adapter ]]; then
     for node_ring in "${ring_paths[@]}"; do
         ou_exec truncate -s "$peer_ring_bytes" "$node_ring"
     done
@@ -1795,7 +1899,9 @@ if (( sync_enabled )) && [[ "$sync_mode" == global-barrier ]]; then
     [[ -n "$actual_dist_port" ]] || die "dist switch did not begin listening; see $run_root/switch/gem5.log"
 fi
 
-if [[ "$ub_transport" == switch-adapter ]]; then
+if [[ "$network_backend" == modular-ns3ub ]]; then
+    : # The UB-NET fabric was started with the standalone UDMA listeners.
+elif [[ "$ub_transport" == switch-adapter ]]; then
     ub_switch_mode=--multi
     if [[ "$network_backend" == ns3ub-native ]]; then
         ub_switch_mode=--native-multi
@@ -1833,7 +1939,12 @@ launch_node() {
     out="$run_root/node$node"
     node_ring="$ring"
     peer_node="$node"
-    if [[ "$ub_transport" == switch-adapter ]]; then
+    if [[ "$network_backend" == modular-ns3ub ]]; then
+        # The legacy SystemC NIC remains a compatibility child but has no
+        # peer in the modular topology; UB-HOST owns all guest-visible I/O.
+        node_ring=""
+        peer_node=-1
+    elif [[ "$ub_transport" == switch-adapter ]]; then
         node_ring=${ring_paths[$node]}
         # Each endpoint is side zero of its own point-to-point adapter link.
         peer_node=0
@@ -1862,11 +1973,17 @@ launch_node() {
         official_args+=(--official-udma-discovery)
         official_args+=(--udma-endpoint-eid="$((0x100 + node))")
     fi
+    external_udma_socket=""
+    if [[ "$network_backend" == modular-ns3ub ]]; then
+        external_udma_socket=${host_socket_paths[$node]}
+    fi
     ou_exec_detached_env \
         "M5_PATH=$m5_path" \
         "OPENURMA_PIPE_DATA=$pipe_data" \
         "OPENURMA_TRACE_PACKETS=$packet_trace" \
         "OPENURMA_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
+        "OPENURMA_UDMA_HOST_SOCKET=$external_udma_socket" \
+        "OPENURMA_UDMA_HOST_POLL_INTERVAL=$external_udma_poll_interval" \
         -- \
         bash "$lab/tools/run-background.sh" "$out/gem5.pid" "$out/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$out" "$config" \
@@ -1992,6 +2109,19 @@ for ((node = 0; node < node_count; ++node)); do
         "${tap_paths[$node]}"
 done
 
+if [[ "$network_backend" == modular-ns3ub ]]; then
+    for _ in $(seq 1 200); do
+        if ou_exec grep -q "$ub_switch_ready_pattern" \
+            "$run_root/ub-switch/gem5.log" 2>/dev/null; then
+            break
+        fi
+        sleep 0.05
+    done
+    ou_exec grep -q "$ub_switch_ready_pattern" \
+        "$run_root/ub-switch/gem5.log" 2>/dev/null ||
+        die "modular ns-3 fabric did not connect; inspect UB switch, UDMA, and node logs"
+fi
+
 # The TCP control plane is intentionally outside the fine-grained virtual-time
 # barrier. One learning Ethernet relay connects every guest, so -S may name
 # any node IP; UB payload routing remains entirely EID based in ub-switch-sim.
@@ -2014,7 +2144,11 @@ echo "  model profile: $profile ($num_cpus x $cpu_mode at $cpu_freq)"
 echo "  cache: private $l1i_size I + $l1d_size D + $l2_size L2; shared $l3_size L3"
 echo "  memory: $mem_size modeled, Linux limited to $guest_mem_limit; $mem_channels x $mem_type, $mem_ranks rank/channel"
 echo "  resolved parameters: $run_root/run-manifest.txt"
-if [[ "$ub_transport" == switch-adapter ]]; then
+if [[ "$network_backend" == modular-ns3ub ]]; then
+    echo "  UB-HOST adapters: ${host_socket_paths[*]}"
+    echo "  standalone UDMA logs: $run_root/udma-nodeN/udma.log"
+    echo "  ns-3 UB-NET fabric: $run_root/ub-switch/gem5.log"
+elif [[ "$ub_transport" == switch-adapter ]]; then
     echo "  UB adapters: ${ring_paths[*]}"
     echo "  UB switch process: $run_root/ub-switch/gem5.log"
 else

@@ -5,6 +5,7 @@
 #include "protocol/ub_net/udma_wire.h"
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstring>
@@ -477,7 +478,8 @@ int Run(const Options& options)
             now += options.sync_interval_ps;
         else if (next > now && next != std::numeric_limits<std::uint64_t>::max())
             now = next;
-        if (!progress) std::this_thread::yield();
+        if (!progress)
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
     SimbricksBaseIfClose(&host_if.base);
     SimbricksBaseIfClose(&net_if.base);

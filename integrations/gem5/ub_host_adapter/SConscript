@@ -8,4 +8,4 @@ env.Append(CPPPATH=[lab, os.path.join(lab, 'sources/simbricks/lib')])
 
 SimObject('UbHostAdapter.py', sim_objects=['UbHostAdapter'])
 Source('UbHostAdapter.cc')
-Source(os.path.join(lab, 'components/udma-device-sim/simbricks_base_portable.c'))
+Source('simbricks_base_portable.c')

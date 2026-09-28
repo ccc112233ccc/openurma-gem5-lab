@@ -46,12 +46,13 @@ UDMA descriptor or packet logic. The reproducible gem5 builder overlays this
 source into its generated EXTRAS tree, leaving the pinned OpenURMA checkout
 unchanged.
 
-This adapter currently represents the new functional control path and keeps
-UB-HOST synchronization disabled. It is not yet selected by the default
-full-system configuration: the official-driver discovery/register map still
-needs to be extracted from `NICTopologySC` into the standalone model first.
-This explicit gate prevents silently replacing a bootable official-driver
-configuration with the temporary extraction descriptor.
+This adapter is selected explicitly by `--network-backend modular-ns3ub` and
+currently keeps UB-HOST synchronization disabled. In that mode the legacy
+SystemC NIC remains instantiated only as a compatibility child: its MMIO
+aperture and peer are disabled, while the standalone model owns official
+discovery/MMIO, DMA, interrupts, descriptors, and packet behavior. The default
+backend remains unchanged so the prior bootable path is still a regression
+baseline.
 
 ### UDMA device model
 
@@ -128,7 +129,7 @@ both process boundaries:
 
 ```bash
 ./lab --runtime native build udma-device
-ctest --test-dir artifacts/udma-device-sim-build --output-on-failure
+./lab --runtime native build udma-device
 ```
 
 The small portability translation unit compiles the pinned upstream SimBricks
@@ -150,8 +151,9 @@ directions:
 The ns-3-UB backend implements the same UB-NET boundary in
 `integrations/ns3ub/ub-net-adapter.cc`. It uses native `UbSwitch`, `UbPort`,
 and `UbLink` objects and passes bidirectional process contracts with
-synchronization disabled and required. The old mmap ring-v4 adapter remains
-only for the not-yet-cut-over full-system launcher; it is not the target API.
+synchronization disabled and required. The full-system launcher now exposes
+this boundary as `modular-ns3ub`; the old mmap ring-v4 modes remain only as
+explicit compatibility baselines and are not the target API.
 
 When SimBricks synchronization is negotiated, both the device process and the
 reference switch advance to the minimum of the next input timestamp and the
@@ -171,10 +173,12 @@ change count and period without recreating the queue.
 2. Run the core as an independent process over SimBricks shared-memory queues
    using mock host and network peers. **Complete.**
 3. Replace one gem5 control path at a time: discovery/MMIO, DMA, interrupt,
-   SEND, then READ/WRITE and receive queues. The thin MMIO/DMA/IRQ adapter is
-   implemented; migration of the official register/WQE behavior is in progress.
+   SEND, then READ/WRITE and receive queues. The thin MMIO/DMA/IRQ adapter and
+   the standalone official register/WQE behavior are implemented and launched
+   end to end in the explicit modular mode.
 4. Connect ns-3-UB at the frame boundary and remove transaction shortcuts.
-   **UB-NET process contract complete; full launcher cutover pending.**
+   **UB-NET process contracts and explicit full-system launcher cutover are
+   complete; synchronized full-system performance validation remains.**
 5. Add a QEMU adapter that implements the same `UB-HOST` protocol; the device
    and network processes remain unchanged.
 6. Remove the duplicated hardware behavior from `NICTopologySC` only after

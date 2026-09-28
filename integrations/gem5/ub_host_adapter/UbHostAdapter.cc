@@ -22,9 +22,11 @@ template <typename T>
 void
 zeroVolatile(volatile T &object)
 {
+    const uint64_t timestamp = object.timestamp;
     auto *bytes = reinterpret_cast<volatile uint8_t *>(&object);
     for (size_t i = 0; i < sizeof(T); ++i)
         bytes[i] = 0;
+    object.timestamp = timestamp;
 }
 
 } // anonymous namespace
@@ -158,14 +160,19 @@ UbHostAdapter::pollDevice()
             host_proto::UbHostD2HInType(&interface, message));
         switch (type) {
           case host_proto::D2HType::MmioCompletion:
+          {
+            // The wire ABI is packed and volatile.  Copy fields before using
+            // them as STL arguments; those APIs require ordinary references
+            // which cannot bind directly to packed members.
+            const uint64_t request_id = message->completion.request_id;
+            const uint64_t value = message->completion.value;
             if (message->completion.status !=
                 static_cast<uint16_t>(host_proto::Status::Success))
                 fatal("%s: device rejected MMIO request %llu\n", name(),
-                      static_cast<unsigned long long>(
-                          message->completion.request_id));
-            mmioCompletions.emplace(message->completion.request_id,
-                                    message->completion.value);
+                      static_cast<unsigned long long>(request_id));
+            mmioCompletions.emplace(request_id, value);
             break;
+          }
           case host_proto::D2HType::DmaRead:
             handleDma(message, true);
             break;
@@ -189,8 +196,11 @@ UbHostAdapter::pollDevice()
 void
 UbHostAdapter::handleDma(volatile host_proto::D2HMessage *message, bool read)
 {
+    const uint64_t request_id = message->dma.request_id;
+    const uint32_t length = message->dma.length;
+    const uint64_t address = message->dma.address;
     auto owned_operation = std::make_unique<DmaOperation>(
-        *this, message->dma.request_id, read, message->dma.length);
+        *this, request_id, read, length);
     auto *operation = owned_operation.get();
     dmaOperations.push_back(std::move(owned_operation));
     if (!read) {
@@ -198,10 +208,10 @@ UbHostAdapter::handleDma(volatile host_proto::D2HMessage *message, bool read)
                              sizeof(host_proto::D2HMessage);
         for (size_t i = 0; i < operation->bytes.size(); ++i)
             operation->bytes[i] = source[i];
-        dmaWrite(message->dma.address, operation->bytes.size(),
+        dmaWrite(address, operation->bytes.size(),
                  &operation->done, operation->bytes.data());
     } else {
-        dmaRead(message->dma.address, operation->bytes.size(),
+        dmaRead(address, operation->bytes.size(),
                 &operation->done, operation->bytes.data());
     }
 }

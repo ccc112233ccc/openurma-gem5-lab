@@ -136,7 +136,7 @@ bash -n scripts/run/*.sh scripts/build/*.sh scripts/*.sh
 ./lab --runtime native build udma-model
 ./lab --runtime native build udma-device
 ./lab --runtime native build ub-switch
-ctest --test-dir artifacts/udma-device-sim-build --output-on-failure
+./lab --runtime native build udma-device
 ./lab --runtime native start --profile kvm --print-config
 ```
 
@@ -185,10 +185,16 @@ in a sibling development checkout.
 ```bash
 ./lab build ns3ub
 ./lab start --network-backend ns3ub-native
+
+# Simulator-neutral five-process path (2 gem5 + 2 UDMA + 1 ns-3 fabric):
+./lab --runtime docker build udma-device
+./lab --runtime docker start --profile fast --provider official \
+  --network-backend modular-ns3ub --no-sync
 ```
 
 The build runs bidirectional UB-NET process contracts with synchronization
-disabled and required. The `start --network-backend ns3ub-native` command still
-selects the version-4 launcher compatibility path until the host-to-standalone-
-UDMA cutover is complete; passing the UB-NET contract does not imply that final
-launcher switch has already happened.
+disabled and required. `ns3ub-native` retains the version-4 compatibility path
+as a regression baseline. `modular-ns3ub` selects UB-HOST v1 from each gem5 to
+an independent UDMA process and UB-NET v1 from those devices to native ns-3-UB.
+The modular mode currently requires the official provider and `--no-sync`;
+conservative UB-HOST synchronization is the next timing checkpoint.

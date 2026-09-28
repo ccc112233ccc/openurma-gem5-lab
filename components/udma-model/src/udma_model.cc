@@ -606,7 +606,7 @@ UdmaModel::ProcessNextUbase()
     const std::uint64_t base = ubase_command_queue_registers_[BaseLow] |
         (std::uint64_t(ubase_command_queue_registers_[BaseHigh]) << 32);
     if (base == 0) return FailUbase();
-    host_.DmaReadIoVirtual(base + std::uint64_t(head) * 32, 32,
+    ReadIoVirtual(base + std::uint64_t(head) * 32, 32,
         [this](bool ok, std::vector<std::uint8_t> descriptor) {
             if (!ok || descriptor.size() != 32) return FailUbase();
             HandleUbaseDescriptor(std::move(descriptor));
@@ -721,7 +721,7 @@ UdmaModel::HandleCtrlq(std::vector<std::uint8_t> descriptor,
         const std::uint64_t address =
             base + std::uint64_t((head + *index) % depth) * 32;
         ++*index;
-        host_.DmaReadIoVirtual(address, 32,
+        ReadIoVirtual(address, 32,
             [this, request, read_next](bool ok,
                                       std::vector<std::uint8_t> continuation) {
                 if (!ok || continuation.size() != 32) return FailUbase();
@@ -874,7 +874,7 @@ UdmaModel::EmitCtrlqResponse(std::vector<std::uint8_t> event,
             return;
         }
         auto& write = writes->at((*cursor)++);
-        host_.DmaWriteIoVirtual(write.first, std::move(write.second),
+        WriteIoVirtual(write.first, std::move(write.second),
             [issue, done](bool ok) {
                 if (!ok) {
                     (*done)(false);
@@ -909,7 +909,7 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
         std::vector<std::uint8_t> context(128, 0);
         StoreLe<std::uint32_t>(context, 0, 1U << 16);
         StoreLe<std::uint32_t>(context, 26 * sizeof(std::uint32_t), 1U << 26);
-        host_.DmaWriteIoVirtual(context_iova, std::move(context),
+        WriteIoVirtual(context_iova, std::move(context),
             [this, descriptor = std::move(descriptor), descriptor_count](bool ok) mutable {
                 if (!ok) return FailUbase();
                 ApplyUbaseMailbox(std::move(descriptor), descriptor_count, {});
@@ -923,7 +923,7 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
     if ((creates_context || modifies_jfc) && context_iova) {
         const std::size_t bytes = modifies_jfc ? 256 :
             ((command == 0x34 || command == 0x44) ? 64 : 128);
-        host_.DmaReadIoVirtual(context_iova, bytes,
+        ReadIoVirtual(context_iova, bytes,
             [this, descriptor = std::move(descriptor), descriptor_count, bytes]
             (bool ok, std::vector<std::uint8_t> context) mutable {
                 if (!ok || context.size() != bytes) return FailUbase();
@@ -1058,7 +1058,7 @@ UdmaModel::EmitMailboxEvent(std::uint16_t sequence, Completion completion)
     event[12] = static_cast<std::uint8_t>(sequence);
     event[13] = static_cast<std::uint8_t>(sequence >> 8);
     const std::uint32_t slot = aeq_producer_ & (aeq_depth_ - 1);
-    host_.DmaWriteIoVirtual(aeq_iova_ + std::uint64_t(slot) * 64,
+    WriteIoVirtual(aeq_iova_ + std::uint64_t(slot) * 64,
                             std::move(event),
         [this, completion = std::move(completion)](bool ok) mutable {
             if (ok) {
@@ -1397,7 +1397,7 @@ UdmaModel::ProcessCompletionEvent()
     if (!(ceq_producer_ & ceq_depth_)) word |= 1U << 31;
     StoreLe<std::uint32_t>(event, 0, word);
     const std::uint32_t slot = ceq_producer_ & (ceq_depth_ - 1);
-    host_.DmaWriteIoVirtual(ceq_iova_ + std::uint64_t(slot) * 64,
+    WriteIoVirtual(ceq_iova_ + std::uint64_t(slot) * 64,
                             std::move(event),
         [this, completion = std::move(pending.completion)](bool ok) mutable {
             if (ok) {
@@ -1519,6 +1519,69 @@ UdmaModel::TranslateToken(std::uint32_t token, std::uint64_t address, bool write
                                                std::move(completion));
                         });
                 });
+        });
+}
+
+void
+UdmaModel::TranslateIoVirtual(std::uint64_t address, bool write,
+                              TranslateCompletion completion,
+                              std::uint32_t token)
+{
+    constexpr std::uint32_t Entries = 1024;
+    if (token >= Entries) return completion(false, 0);
+    if (token == 0 && generic_iova_token_) {
+        const std::uint32_t cached = *generic_iova_token_;
+        generic_iova_token_.reset();
+        return TranslateToken(cached, address, write,
+            [this, address, write, cached,
+             completion = std::move(completion)]
+            (bool ok, std::uint64_t physical) mutable {
+                if (ok) {
+                    generic_iova_token_ = cached;
+                    return completion(true, physical);
+                }
+                TranslateIoVirtual(address, write, std::move(completion));
+            });
+    }
+    TranslateToken(token, address, write,
+        [this, address, write, token, completion = std::move(completion)]
+        (bool ok, std::uint64_t physical) mutable {
+            if (ok) {
+                generic_iova_token_ = token;
+                return completion(true, physical);
+            }
+            TranslateIoVirtual(address, write, std::move(completion), token + 1);
+        });
+}
+
+void
+UdmaModel::ReadIoVirtual(std::uint64_t address, std::size_t length,
+                         ReadCompletion completion)
+{
+    TranslateIoVirtual(address, false,
+        [this, address, length, completion = std::move(completion)]
+        (bool ok, std::uint64_t physical) mutable {
+            if (!ok && config_.identity_iova_test_mode)
+                return host_.DmaRead(address, length, std::move(completion));
+            if (!ok) return completion(false, {});
+            host_.DmaRead(physical, length, std::move(completion));
+        });
+}
+
+void
+UdmaModel::WriteIoVirtual(std::uint64_t address,
+                          std::vector<std::uint8_t> data,
+                          Completion completion)
+{
+    TranslateIoVirtual(address, true,
+        [this, address, data = std::move(data),
+         completion = std::move(completion)]
+        (bool ok, std::uint64_t physical) mutable {
+            if (!ok && config_.identity_iova_test_mode)
+                return host_.DmaWrite(address, std::move(data),
+                                      std::move(completion));
+            if (!ok) return completion(false);
+            host_.DmaWrite(physical, std::move(data), std::move(completion));
         });
 }
 
@@ -1811,7 +1874,7 @@ UdmaModel::FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
             return;
         }
         WriteRecord& record = writes->at((*cursor)++);
-        host_.DmaWriteIoVirtual(record.address, std::move(record.bytes),
+        WriteIoVirtual(record.address, std::move(record.bytes),
             [this, issue](bool ok) {
                 if (!ok) return FailUbase();
                 (*issue)();

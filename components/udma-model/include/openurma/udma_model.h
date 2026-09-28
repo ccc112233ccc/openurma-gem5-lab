@@ -6,6 +6,8 @@
 #include <array>
 #include <deque>
 #include <functional>
+#include <memory>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -127,6 +129,9 @@ class UdmaModel {
         // Temporary descriptor ABI used only by the extraction contract test.
         // Production device processes leave this false.
         bool extraction_test_abi{false};
+        // Unit-test hosts can opt into identity IOVA fixtures before their
+        // synthetic UMMU tables are installed. Production leaves this false.
+        bool identity_iova_test_mode{false};
     };
 
     static constexpr std::uint64_t kRegisterIdentity = 0x0000;
@@ -245,6 +250,14 @@ class UdmaModel {
     using TranslateCompletion = std::function<void(bool, std::uint64_t)>;
     void TranslateToken(std::uint32_t token, std::uint64_t address, bool write,
                         TranslateCompletion completion);
+    void TranslateIoVirtual(std::uint64_t address, bool write,
+                            TranslateCompletion completion,
+                            std::uint32_t token = 0);
+    void ReadIoVirtual(std::uint64_t address, std::size_t length,
+                       ReadCompletion completion);
+    void WriteIoVirtual(std::uint64_t address,
+                        std::vector<std::uint8_t> data,
+                        Completion completion);
     void CheckMapt(std::vector<std::uint8_t> context,
                    std::uint64_t address, bool write,
                    TranslateCompletion completion);
@@ -296,6 +309,7 @@ class UdmaModel {
     NetworkInterface& network_;
     Config config_;
     std::array<std::uint8_t, 0x5000> ummu_registers_{};
+    std::optional<std::uint32_t> generic_iova_token_;
     std::array<std::uint32_t, 0x120 / sizeof(std::uint32_t)>
         ubios_message_queue_registers_{};
     std::array<std::uint32_t, 0x2c / sizeof(std::uint32_t)>

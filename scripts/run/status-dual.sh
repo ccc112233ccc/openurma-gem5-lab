@@ -46,6 +46,14 @@ node_count=${node_count:-2}
 for ((node = 0; node < node_count; ++node)); do
     show_process "node$node" "$run_root/node$node/gem5.pid"
 done
+network_backend="$(ou_exec awk -F= \
+    '$1 == "network_backend" { print $2; exit }' \
+    "$run_root/run-manifest.txt" 2>/dev/null || true)"
+if [[ "$network_backend" == modular-ns3ub ]]; then
+    for ((node = 0; node < node_count; ++node)); do
+        show_process "udma$node" "$run_root/udma-node$node/udma.pid"
+    done
+fi
 show_process switch "$run_root/switch/gem5.pid"
 show_process ub-switch "$run_root/ub-switch/gem5.pid"
 if ou_exec test -r "$run_root/oob-switch/relay.pid"; then
@@ -73,4 +81,4 @@ uart_stride=$((uart1 - uart0))
 for ((node = 0; node < node_count; ++node)); do
     echo "node$node UART: localhost:$((uart0 + node * uart_stride))"
 done
-echo "Logs:  $run_root/nodeN/gem5.log, system.terminal, switch/gem5.log, ub-switch/gem5.log, and oob-switch/relay.log"
+echo "Logs:  $run_root/nodeN/gem5.log, system.terminal, udma-nodeN/udma.log, switch/gem5.log, ub-switch/gem5.log, and oob-switch/relay.log"
