@@ -209,6 +209,10 @@ class UdmaModel {
                          std::uint64_t value);
     void ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
                    std::vector<std::uint8_t> direct = {});
+    void ContinueSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
+                       std::vector<std::uint8_t> raw,
+                       std::uint32_t remaining_wqebbs,
+                       std::uint32_t next_slot);
     void HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
                      std::vector<std::uint8_t> raw);
     void SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
@@ -231,11 +235,8 @@ class UdmaModel {
         std::uint32_t vector{};
         std::uint64_t address{};
         std::uint32_t data{};
-        std::vector<std::uint32_t> tokens;
-        std::size_t index{};
         Completion completion;
     };
-    void ContinueMsi(std::shared_ptr<MsiState> state);
     void ProcessReceiveQueue();
     void ReceiveSend(std::shared_ptr<Frame> frame);
     void ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
@@ -251,8 +252,20 @@ class UdmaModel {
     void TranslateToken(std::uint32_t token, std::uint64_t address, bool write,
                         TranslateCompletion completion);
     void TranslateIoVirtual(std::uint64_t address, bool write,
-                            TranslateCompletion completion,
-                            std::uint32_t token = 0);
+                            TranslateCompletion completion);
+    struct IoVirtualState {
+        std::uint64_t address{};
+        std::uint64_t tct{};
+        bool write{};
+        std::uint32_t next_token{};
+        std::uint32_t batch_start{};
+        std::uint32_t batch_entries{};
+        std::uint32_t batch_index{};
+        std::vector<std::uint8_t> contexts;
+        TranslateCompletion completion;
+    };
+    void ContinueIoVirtual(std::shared_ptr<IoVirtualState> state);
+    void TryIoVirtualContext(std::shared_ptr<IoVirtualState> state);
     void ReadIoVirtual(std::uint64_t address, std::size_t length,
                        ReadCompletion completion);
     void WriteIoVirtual(std::uint64_t address,

@@ -271,6 +271,30 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   all existing ARM64/KVM configuration tests continue to pass. Runtime x86_64
   compilation still requires validation on an actual x86_64 Ubuntu host.
 
+### `stage/2026-09-28-modular-official-dataplane`
+
+- The simulator-neutral path now runs five independent processes: two gem5
+  full-system hosts, two standalone UDMA devices connected through UB-HOST v1,
+  and one native ns-3-UB fabric connected through UB-NET v1.
+- The standalone device discovers UMMU tokens through the official TECT/TCT
+  tables, performs queue and payload DMA through the host adapter, and sends
+  Type-1 MSI writes through an explicit MSI address-space boundary. The
+  official UBASE and UDMA drivers are unchanged.
+- Atomic gem5 DMA completes synchronously inside the UB-HOST transaction,
+  avoiding an event-queue circular wait. Timing-mode DMA remains asynchronous.
+- SQ fetch follows the official WQE header's WQEBB count and reads all blocks,
+  including a split read when a WQE wraps at the end of the ring. Consumer
+  advancement and completion use the decoded block count rather than assuming
+  one 64-byte WQEBB.
+- A two-node stock `urma_perftest send_lat` run completed on both endpoints
+  through the modular ns-3-UB path. The 128-byte inline SEND uses three WQEBBs
+  (48-byte control plus 128-byte inline payload); five warm-up exchanges and
+  two measured exchanges completed, both processes returned zero, and all
+  official resources were deactivated normally.
+- Final validation includes the two UDMA process/model tests, a clean gem5
+  incremental rebuild, Python CLI/helper tests, Bash syntax checks, and
+  `git diff --check`.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:

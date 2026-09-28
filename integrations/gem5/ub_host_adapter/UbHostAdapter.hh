@@ -26,6 +26,8 @@ class UbHostAdapter final : public DmaDevice
 
     void init() override;
     AddrRangeList getAddrRanges() const override;
+    Port &getPort(const std::string &if_name,
+                  PortID idx=InvalidPortID) override;
     Tick read(PacketPtr packet) override;
     Tick write(PacketPtr packet) override;
 
@@ -34,12 +36,13 @@ class UbHostAdapter final : public DmaDevice
         UbHostAdapter &owner;
         uint64_t requestId;
         bool read;
+        bool msi;
         std::vector<uint8_t> bytes;
         EventFunctionWrapper done;
         bool completed{false};
 
         DmaOperation(UbHostAdapter &owner, uint64_t request_id, bool is_read,
-                     size_t length);
+                     bool is_msi, size_t length);
     };
 
     void connectDevice();
@@ -59,6 +62,7 @@ class UbHostAdapter final : public DmaDevice
     const Tick pioLatency;
     const Tick pollInterval;
     const std::string socketPath;
+    DmaPort msiPort;
     std::array<ArmInterruptPin *, 3> interrupts{};
     openurma::proto::host::Interface interface{};
     openurma::proto::host::DeviceIntro deviceIntro{};

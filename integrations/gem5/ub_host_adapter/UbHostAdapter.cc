@@ -32,8 +32,10 @@ zeroVolatile(volatile T &object)
 } // anonymous namespace
 
 UbHostAdapter::DmaOperation::DmaOperation(
-    UbHostAdapter &owner, uint64_t request_id, bool is_read, size_t length)
-    : owner(owner), requestId(request_id), read(is_read), bytes(length),
+    UbHostAdapter &owner, uint64_t request_id, bool is_read, bool is_msi,
+    size_t length)
+    : owner(owner), requestId(request_id), read(is_read), msi(is_msi),
+      bytes(length),
       done([this] { this->owner.completeDma(this); },
            owner.name() + ".dmaDone")
 {
@@ -42,7 +44,7 @@ UbHostAdapter::DmaOperation::DmaOperation(
 UbHostAdapter::UbHostAdapter(const Params &params)
     : DmaDevice(params), pioAddr(params.pio_addr), pioSize(params.pio_size),
       pioLatency(params.pio_latency), pollInterval(params.poll_interval),
-      socketPath(params.socket_path),
+      socketPath(params.socket_path), msiPort(this, sys),
       interrupts{params.interrupt_misc ? params.interrupt_misc->get() : nullptr,
                  params.interrupt_aeq ? params.interrupt_aeq->get() : nullptr,
                  params.interrupt_ceq ? params.interrupt_ceq->get() : nullptr},
@@ -68,6 +70,14 @@ AddrRangeList
 UbHostAdapter::getAddrRanges() const
 {
     return {RangeSize(pioAddr, pioSize)};
+}
+
+Port &
+UbHostAdapter::getPort(const std::string &if_name, PortID idx)
+{
+    if (if_name == "msi")
+        return msiPort;
+    return DmaDevice::getPort(if_name, idx);
 }
 
 uint64_t
@@ -199,21 +209,39 @@ UbHostAdapter::handleDma(volatile host_proto::D2HMessage *message, bool read)
     const uint64_t request_id = message->dma.request_id;
     const uint32_t length = message->dma.length;
     const uint64_t address = message->dma.address;
+    const bool msi = message->dma.address_kind ==
+        static_cast<uint8_t>(host_proto::AddressKind::Msi);
     auto owned_operation = std::make_unique<DmaOperation>(
-        *this, request_id, read, length);
+        *this, request_id, read, msi, length);
     auto *operation = owned_operation.get();
     dmaOperations.push_back(std::move(owned_operation));
+
+    // In atomic memory mode DmaPort completes the transfer synchronously.
+    // Do not attach an Event in that case: an event would be scheduled for a
+    // later tick, but this request may have arrived while transactMmio() is
+    // synchronously waiting for the device response.  The current PIO call
+    // cannot return (and hence the event queue cannot advance) until that
+    // response is sent, producing a circular wait.  Timing mode remains
+    // asynchronous and uses the normal completion event.
+    Event *const completion = sys->isAtomicMode() ? nullptr : &operation->done;
     if (!read) {
         const auto *source = reinterpret_cast<volatile uint8_t *>(message) +
                              sizeof(host_proto::D2HMessage);
         for (size_t i = 0; i < operation->bytes.size(); ++i)
             operation->bytes[i] = source[i];
-        dmaWrite(address, operation->bytes.size(),
-                 &operation->done, operation->bytes.data());
+        if (operation->msi)
+            msiPort.dmaAction(MemCmd::WriteReq, address,
+                              operation->bytes.size(), completion,
+                              operation->bytes.data(), 0);
+        else
+            dmaWrite(address, operation->bytes.size(),
+                     completion, operation->bytes.data());
     } else {
         dmaRead(address, operation->bytes.size(),
-                &operation->done, operation->bytes.data());
+                completion, operation->bytes.data());
     }
+    if (sys->isAtomicMode())
+        completeDma(operation);
 }
 
 void
@@ -263,7 +291,14 @@ UbHostAdapter::handleInterrupt(
         interrupt->raise();
     else {
         interrupt->raise();
-        interrupt->clear();
+        // Keep an edge visible across an event-queue boundary.  Raising and
+        // clearing the ArmSPI in the same host call can make a device pulse
+        // disappear before the CPU/GIC observes it, especially in atomic
+        // mode.  The event owns and deletes itself after lowering the line.
+        auto *clear = new EventFunctionWrapper(
+            [interrupt] { interrupt->clear(); },
+            name() + ".interruptClear", true);
+        schedule(clear, curTick() + 1);
     }
 }
 

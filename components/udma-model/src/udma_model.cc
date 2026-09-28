@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -688,9 +689,14 @@ UdmaModel::HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor)
         HandleCtrlq(std::move(descriptor), count);
         return;
     }
-    if (opcode != 0x0030 && opcode != 0x0002 && opcode != 0x6200 &&
-        opcode != 0x0001 && opcode != 0x7001)
-        return FailUbase();
+    // Command-queue ownership is a hardware contract independent of whether
+    // a particular command returns modeled data.  Queries with observable
+    // results are populated by BuildUbaseResponse() (or the two inline cases
+    // in FinishUbaseDescriptor); write-only control commands such as
+    // NOTIFY_DRV_CAPS legitimately complete with an empty response.  Always
+    // return ownership and advance Head here, matching the original in-process
+    // device model and preventing an unchanged driver from waiting forever on
+    // a command that the functional model has accepted.
     FinishUbaseDescriptor(std::move(descriptor), opcode, count,
                           BuildUbaseResponse(opcode));
 }
@@ -823,7 +829,11 @@ UdmaModel::ApplyCtrlq(std::vector<std::uint8_t> descriptor,
                       std::vector<std::uint8_t> request)
 {
     std::vector<std::uint8_t> response;
-    if (!BuildCtrlqResponse(request, response)) return FailUbase();
+    if (!BuildCtrlqResponse(request, response)) {
+        std::cerr << "udma-model: rejected CtrlQ request bytes="
+                  << request.size() << '\n';
+        return FailUbase();
+    }
     FinishUbaseDescriptor(std::move(descriptor), 0xf00e, descriptor_count, {},
         [this, response = std::move(response)]() mutable {
             EmitCtrlqResponse(std::move(response), [this](bool ok) {
@@ -843,7 +853,11 @@ UdmaModel::EmitCtrlqResponse(std::vector<std::uint8_t> event,
     const std::uint64_t base = ubase_command_queue_registers_[BaseLow] |
         (std::uint64_t(ubase_command_queue_registers_[BaseHigh]) << 32);
     const std::uint32_t depth = ubase_command_queue_registers_[Depth] << 3;
-    if (!base || !depth) return completion(false);
+    if (!base || !depth) {
+        std::cerr << "udma-model: invalid CRQ base/depth base=" << base
+                  << " depth=" << depth << '\n';
+        return completion(false);
+    }
     const std::uint32_t count = static_cast<std::uint32_t>((event.size() + 39) / 32);
     auto writes = std::make_shared<std::vector<std::pair<std::uint64_t,
                                                          std::vector<std::uint8_t>>>>();
@@ -877,6 +891,7 @@ UdmaModel::EmitCtrlqResponse(std::vector<std::uint8_t> event,
         WriteIoVirtual(write.first, std::move(write.second),
             [issue, done](bool ok) {
                 if (!ok) {
+                    std::cerr << "udma-model: CRQ IOVA write failed\n";
                     (*done)(false);
                     return;
                 }
@@ -1142,12 +1157,69 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
     ReadToken(jetty.token, address, abi::kWqebbBytes,
         [this, jetty_id, producer](bool ok, std::vector<std::uint8_t> raw) {
             if (!ok || raw.size() != abi::kWqebbBytes) {
+                std::cerr << "udma-model: SQ DMA read failed jetty="
+                          << jetty_id << " ok=" << ok
+                          << " bytes=" << raw.size() << '\n';
                 auto found = jetty_contexts_.find(jetty_id);
                 if (found != jetty_contexts_.end()) found->second.busy = false;
                 ++ubase_errors_;
                 return;
             }
-            HandleSqWqe(jetty_id, producer, std::move(raw));
+            auto found = jetty_contexts_.find(jetty_id);
+            if (found == jetty_contexts_.end()) return;
+            std::array<std::uint8_t, abi::kWqebbBytes> first{};
+            std::copy(raw.begin(), raw.end(), first.begin());
+            const std::uint32_t wqebbs = abi::SqWqe(first).wqebb_count();
+            const std::uint32_t outstanding = producer -
+                static_cast<std::uint32_t>(found->second.consumer);
+            if (!wqebbs || wqebbs > outstanding ||
+                wqebbs > found->second.depth) {
+                found->second.busy = false;
+                ++ubase_errors_;
+                return;
+            }
+            ContinueSqWqe(jetty_id, producer, std::move(raw), wqebbs - 1,
+                (static_cast<std::uint32_t>(found->second.consumer) + 1) &
+                    (found->second.depth - 1U));
+        });
+}
+
+void
+UdmaModel::ContinueSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
+                         std::vector<std::uint8_t> raw,
+                         std::uint32_t remaining_wqebbs,
+                         std::uint32_t next_slot)
+{
+    if (!remaining_wqebbs) {
+        HandleSqWqe(jetty_id, producer, std::move(raw));
+        return;
+    }
+    auto found = jetty_contexts_.find(jetty_id);
+    if (found == jetty_contexts_.end()) return;
+    const QueueContext& jetty = found->second;
+    const std::uint32_t contiguous = std::min(remaining_wqebbs,
+                                               jetty.depth - next_slot);
+    const std::uint64_t address = jetty.queue_iova +
+        std::uint64_t(next_slot) * abi::kWqebbBytes;
+    ReadToken(jetty.token, address,
+              std::size_t(contiguous) * abi::kWqebbBytes,
+        [this, jetty_id, producer, raw = std::move(raw),
+         remaining_wqebbs, next_slot, contiguous]
+        (bool ok, std::vector<std::uint8_t> continuation) mutable {
+            if (!ok || continuation.size() !=
+                    std::size_t(contiguous) * abi::kWqebbBytes) {
+                auto found = jetty_contexts_.find(jetty_id);
+                if (found != jetty_contexts_.end()) found->second.busy = false;
+                ++ubase_errors_;
+                return;
+            }
+            raw.insert(raw.end(), continuation.begin(), continuation.end());
+            auto found = jetty_contexts_.find(jetty_id);
+            if (found == jetty_contexts_.end()) return;
+            ContinueSqWqe(jetty_id, producer, std::move(raw),
+                          remaining_wqebbs - contiguous,
+                          (next_slot + contiguous) &
+                              (found->second.depth - 1U));
         });
 }
 
@@ -1161,20 +1233,30 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         ++ubase_errors_;
     };
     auto found = jetty_contexts_.find(jetty_id);
-    if (found == jetty_contexts_.end() || raw.size() != abi::kWqebbBytes)
+    if (found == jetty_contexts_.end() || raw.size() < abi::kWqebbBytes)
         return fail();
     std::array<std::uint8_t, abi::kWqebbBytes> bytes{};
-    std::copy(raw.begin(), raw.end(), bytes.begin());
+    std::copy_n(raw.begin(), bytes.size(), bytes.begin());
     const abi::SqWqe wqe(bytes);
     QueueContext& jetty = found->second;
     const bool expected_owner = ((jetty.consumer / jetty.depth) & 1U) == 0;
-    if (wqe.owner() != expected_owner || wqe.wqebb_count() != 1 ||
+    if (wqe.owner() != expected_owner ||
+        raw.size() != std::size_t(wqe.wqebb_count()) * abi::kWqebbBytes ||
         (wqe.opcode() != 0 && wqe.opcode() != 1 &&
-         wqe.opcode() != 3 && wqe.opcode() != 6)) return fail();
+         wqe.opcode() != 3 && wqe.opcode() != 6)) {
+        std::cerr << "udma-model: rejected SQ WQE header\n";
+        return fail();
+    }
     const auto route = tp_routes_.find(wqe.tpn());
     if (route == tp_routes_.end() || !route->second.active ||
         route->second.port >= link_up_.size() ||
-        !link_up_[route->second.port]) return fail();
+        !link_up_[route->second.port]) {
+        std::cerr << "udma-model: rejected SQ route found="
+                  << (route != tp_routes_.end())
+                  << " active=" << (route != tp_routes_.end() && route->second.active)
+                  << '\n';
+        return fail();
+    }
     if (wqe.opcode() == 6) {
         if (wqe.inline_payload() || wqe.sge_count() != 1) return fail();
         const abi::Sge local = wqe.first_sge();
@@ -1209,10 +1291,11 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         return;
     }
     if (wqe.inline_payload()) {
-        if (wqe.inline_length() > 16) return fail();
+        if (wqe.inline_length() > raw.size() - 48) return fail();
+        std::vector<std::uint8_t> payload(
+            raw.begin() + 48, raw.begin() + 48 + wqe.inline_length());
         SubmitSqPayload(jetty_id, producer, std::move(raw),
-            std::vector<std::uint8_t>(bytes.begin() + 48,
-                                      bytes.begin() + 48 + wqe.inline_length()));
+                        std::move(payload));
         return;
     }
     if (wqe.sge_count() != 1) return fail();
@@ -1240,8 +1323,10 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
     auto found = jetty_contexts_.find(jetty_id);
     if (found == jetty_contexts_.end()) return;
     std::array<std::uint8_t, abi::kWqebbBytes> bytes{};
-    std::copy(raw.begin(), raw.end(), bytes.begin());
+    if (raw.size() < bytes.size()) return;
+    std::copy_n(raw.begin(), bytes.size(), bytes.begin());
     const abi::SqWqe wqe(bytes);
+    const std::uint32_t wqebbs = wqe.wqebb_count();
     const QueueContext jetty = found->second;
     const auto route = tp_routes_.find(wqe.tpn());
     if (route == tp_routes_.end()) return;
@@ -1275,6 +1360,7 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
     }
     network_.Send(std::move(frame),
         [this, jetty_id, producer, completed_index, opcode = wqe.opcode(),
+         wqebbs,
          count, immediate = wqe.immediate(), completion = wqe.completion(),
          request_id]
         (bool ok) {
@@ -1286,7 +1372,7 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
                 return;
             }
             if (opcode == 3) return;
-            CompleteSq(jetty_id, producer, 1, completed_index, opcode, count,
+            CompleteSq(jetty_id, producer, wqebbs, completed_index, opcode, count,
                        immediate, completion);
         });
 }
@@ -1453,30 +1539,23 @@ UdmaModel::RaiseInterrupt(std::uint32_t vector, Completion completion)
                        std::move(state->completion));
         return;
     }
-    state->tokens.push_back(0);
-    const auto add_token = [&state](const auto& contexts) {
-        for (const auto& [id, context] : contexts) {
-            (void)id;
-            if (std::find(state->tokens.begin(), state->tokens.end(),
-                          context.token) == state->tokens.end())
-                state->tokens.push_back(context.token);
-        }
-    };
-    add_token(jfc_contexts_);
-    add_token(jfr_contexts_);
-    add_token(jetty_contexts_);
-    ContinueMsi(std::move(state));
-}
-
-void
-UdmaModel::ContinueMsi(std::shared_ptr<MsiState> state)
-{
-    if (state->index >= state->tokens.size())
-        return state->completion(false);
-    const std::uint32_t token = state->tokens[state->index++];
-    TranslateToken(token, state->address, true,
-        [this, state = std::move(state)](bool ok, std::uint64_t physical) mutable {
-            if (!ok || !physical) return ContinueMsi(std::move(state));
+    // The administrative UBASE MSI mapping exists before any userspace UDMA
+    // queue context is created, so its token cannot be inferred from JFC/JFR
+    // or jetty state.  Resolve it through the UMMU TCT just like every other
+    // device-visible IOVA.  This also avoids assuming that the kernel chose a
+    // particular token number.
+    TranslateIoVirtual(state->address, true,
+        [this, state = std::move(state)]
+        (bool ok, std::uint64_t physical) mutable {
+            if (!ok && config_.identity_iova_test_mode) {
+                ok = true;
+                physical = state->address;
+            }
+            if (!ok || !physical) {
+                std::cerr << "udma-model: MSI IOVA translation failed address=0x"
+                          << std::hex << state->address << std::dec << '\n';
+                return state->completion(false);
+            }
             msi_iova_ = state->address;
             msi_physical_ = physical;
             host_.MsiWrite(physical, state->data,
@@ -1524,12 +1603,10 @@ UdmaModel::TranslateToken(std::uint32_t token, std::uint64_t address, bool write
 
 void
 UdmaModel::TranslateIoVirtual(std::uint64_t address, bool write,
-                              TranslateCompletion completion,
-                              std::uint32_t token)
+                              TranslateCompletion completion)
 {
-    constexpr std::uint32_t Entries = 1024;
-    if (token >= Entries) return completion(false, 0);
-    if (token == 0 && generic_iova_token_) {
+    constexpr std::uint64_t AddressMask = 0x0000fffffffff000ULL;
+    if (generic_iova_token_) {
         const std::uint32_t cached = *generic_iova_token_;
         generic_iova_token_.reset();
         return TranslateToken(cached, address, write,
@@ -1543,15 +1620,75 @@ UdmaModel::TranslateIoVirtual(std::uint64_t address, bool write,
                 TranslateIoVirtual(address, write, std::move(completion));
             });
     }
-    TranslateToken(token, address, write,
-        [this, address, write, token, completion = std::move(completion)]
-        (bool ok, std::uint64_t physical) mutable {
-            if (ok) {
-                generic_iova_token_ = token;
-                return completion(true, physical);
-            }
-            TranslateIoVirtual(address, write, std::move(completion), token + 1);
+    const std::uint64_t tect =
+        LoadLe<std::uint64_t>(ummu_registers_.data() + 0x70) & AddressMask;
+    if (!tect) return completion(false, 0);
+    host_.DmaRead(tect, 64,
+        [this, address, write, completion = std::move(completion)]
+        (bool ok, std::vector<std::uint8_t> entry) mutable {
+            constexpr std::uint64_t AddressMask = 0x0000fffffffff000ULL;
+            if (!ok || entry.size() != 64 ||
+                !(LoadLe<std::uint64_t>(entry.data()) & 1U))
+                return completion(false, 0);
+            const std::uint64_t tct =
+                LoadLe<std::uint64_t>(entry.data() + 8) & AddressMask;
+            if (!tct) return completion(false, 0);
+            auto state = std::make_shared<IoVirtualState>();
+            state->address = address;
+            state->tct = tct;
+            state->write = write;
+            state->completion = std::move(completion);
+            ContinueIoVirtual(std::move(state));
         });
+}
+
+void
+UdmaModel::ContinueIoVirtual(std::shared_ptr<IoVirtualState> state)
+{
+    constexpr std::uint32_t Entries = 1024;
+    // 120 contexts (7680 bytes) fit in one 8-KiB UB-HOST message together
+    // with its wire header. This mirrors the old in-process bulk TCT scan
+    // without relying on direct guest-memory access.
+    constexpr std::uint32_t EntriesPerBatch = 120;
+    if (state->next_token >= Entries)
+        return state->completion(false, 0);
+    state->batch_start = state->next_token;
+    state->batch_entries = std::min(EntriesPerBatch,
+                                    Entries - state->next_token);
+    state->batch_index = 0;
+    state->next_token += state->batch_entries;
+    host_.DmaRead(state->tct + std::uint64_t(state->batch_start) * 64,
+                  std::size_t(state->batch_entries) * 64,
+        [this, state](bool ok, std::vector<std::uint8_t> contexts) {
+            if (!ok || contexts.size() !=
+                    std::size_t(state->batch_entries) * 64)
+                return state->completion(false, 0);
+            state->contexts = std::move(contexts);
+            TryIoVirtualContext(state);
+        });
+}
+
+void
+UdmaModel::TryIoVirtualContext(std::shared_ptr<IoVirtualState> state)
+{
+    while (state->batch_index < state->batch_entries) {
+        const std::uint32_t local = state->batch_index++;
+        const std::uint8_t* context = state->contexts.data() + local * 64;
+        if (!(LoadLe<std::uint64_t>(context) & 1U)) continue;
+        const std::uint32_t token = state->batch_start + local;
+        std::vector<std::uint8_t> copy(context, context + 64);
+        return CheckMapt(std::move(copy), state->address, state->write,
+            [this, state, token](bool permitted, std::uint64_t root) {
+                if (!permitted || !root) return TryIoVirtualContext(state);
+                WalkTokenPageTable(root, state->address, 0,
+                    [this, state, token](bool ok, std::uint64_t physical) {
+                        if (!ok) return TryIoVirtualContext(state);
+                        generic_iova_token_ = token;
+                        state->completion(true, physical);
+                    });
+            });
+    }
+    ContinueIoVirtual(std::move(state));
 }
 
 void

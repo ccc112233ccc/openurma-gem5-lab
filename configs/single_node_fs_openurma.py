@@ -198,6 +198,7 @@ def create_olk66_compatible(args):
         )
         system.external_udma.pio = system.membus.mem_side_ports
         system.external_udma.dma = system.iobus.cpu_side_ports
+        system.external_udma.msi = system.membus.cpu_side_ports
         print("[openurma-fs-wrapper] external UB-HOST UDMA enabled: "
               f"{external_socket}")
     return system

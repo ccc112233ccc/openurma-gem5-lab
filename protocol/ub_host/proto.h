@@ -42,6 +42,7 @@ enum class Status : std::uint16_t {
 enum class AddressKind : std::uint8_t {
     GuestPhysical = 0,
     IoVirtual = 1,
+    Msi = 2,
 };
 
 enum class InterruptAction : std::uint8_t {

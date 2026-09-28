@@ -148,6 +148,17 @@ class HostPort final : public device::HostInterface {
                 host_proto::AddressKind::IoVirtual, token);
     }
 
+    void MsiWrite(std::uint64_t physical_address, std::uint32_t data,
+                  device::Completion completion) override
+    {
+        std::vector<std::uint8_t> bytes(4);
+        for (std::uint32_t i = 0; i < 4; ++i)
+            bytes[i] = static_cast<std::uint8_t>(data >> (8 * i));
+        SendDma(physical_address, bytes.size(), false, {},
+                std::move(completion), &bytes,
+                host_proto::AddressKind::Msi);
+    }
+
     void SetInterrupt(std::uint32_t vector, bool asserted) override
     {
         SendInterrupt(vector, asserted ? host_proto::InterruptAction::Raise
