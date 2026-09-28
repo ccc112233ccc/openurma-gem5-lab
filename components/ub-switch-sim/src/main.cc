@@ -238,9 +238,15 @@ int Run(const Options& options)
             }
             terminated = terminated || SimbricksBaseIfInTerminated(&source.interface.base);
         }
+        bool sync_blocked = false;
         for (auto& endpoint : endpoints) {
             progress = Flush(endpoint, now) || progress;
-            net::UbNetOutSync(&endpoint.interface, now);
+            sync_blocked = net::UbNetOutSync(&endpoint.interface, now) != 0 ||
+                           sync_blocked;
+        }
+        if (sync_blocked) {
+            std::this_thread::yield();
+            continue;
         }
         if (terminated) break;
         bool synchronized = false;

@@ -47,6 +47,8 @@ class UbHostAdapter final : public DmaDevice
 
     void connectDevice();
     void pollDevice();
+    bool serviceDevice(uint64_t deadline);
+    void scheduleNextPoll();
     void handleDma(volatile openurma::proto::host::D2HMessage *message,
                    bool read);
     void completeDma(DmaOperation *operation);
@@ -61,12 +63,16 @@ class UbHostAdapter final : public DmaDevice
     const Addr pioSize;
     const Tick pioLatency;
     const Tick pollInterval;
+    const bool syncEnabled;
+    const Tick linkLatency;
+    const Tick syncInterval;
     const std::string socketPath;
     DmaPort msiPort;
     std::array<ArmInterruptPin *, 3> interrupts{};
     openurma::proto::host::Interface interface{};
     openurma::proto::host::DeviceIntro deviceIntro{};
     uint64_t nextRequest{1};
+    uint64_t serviceTime{0};
     EventFunctionWrapper pollEvent;
     std::unordered_map<uint64_t, uint64_t> mmioCompletions;
     std::vector<std::unique_ptr<DmaOperation>> dmaOperations;

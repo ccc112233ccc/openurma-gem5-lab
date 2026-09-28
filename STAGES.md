@@ -295,6 +295,27 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   incremental rebuild, Python CLI/helper tests, Bash syntax checks, and
   `git diff --check`.
 
+### `stage/2026-09-28-modular-virtual-time`
+
+- The complete modular topology now negotiates required SimBricks
+  synchronization from tick zero across both UB-HOST and both UB-NET
+  boundaries. KVM retains the existing automatic no-sync default; users must
+  opt in explicitly because short lookahead would force frequent vCPU exits.
+- gem5's native UB-HOST event schedules at peer-granted horizons. Atomic MMIO
+  is completed within its charged PIO deadline, while asynchronous DMA and
+  interrupts retain timestamp ordering.
+- UDMA and fabric loops retain the last received SYNC as their conservative
+  horizon and honor output-ring backpressure. This prevents both causality
+  overrun and the 8192-SYNC ring-fill shutdown deadlock found by the required
+  process contract.
+- A five-process cold-start gate kept both gem5 instances at exactly
+  5,131,000,000 ticks and 14,743,314 instructions after 66.36 host seconds.
+  The result proves lifetime lockstep and also quantifies why synchronized
+  production runs need boot checkpoints rather than a relaxed physical
+  lookahead.
+- gem5, standalone UDMA, native ns-3-UB, disabled/required UB-NET contracts,
+  and Bash/diff checks pass with the new boundary implementation.
+
 ## Future checkpoints
 
 The next intended tags are created only after their observable gates pass:

@@ -31,7 +31,8 @@ struct Options {
     std::string host_socket;
     std::string net_socket;
     std::string shm_path;
-    std::uint64_t link_latency_ps{100000};
+    std::uint64_t host_link_latency_ps{100000};
+    std::uint64_t net_link_latency_ps{100000};
     std::uint64_t sync_interval_ps{100000};
     std::uint64_t endpoint_eid{0x100};
     std::uint64_t port_count{2};
@@ -58,7 +59,12 @@ bool ParseOptions(int argc, char** argv, Options& options)
         else if (arg == "--net-socket" && i + 1 < argc) options.net_socket = argv[++i];
         else if (arg == "--shm" && i + 1 < argc) options.shm_path = argv[++i];
         else if (arg == "--link-latency-ps" && i + 1 < argc) {
-            if (!ParseUnsigned(argv[++i], options.link_latency_ps)) return false;
+            if (!ParseUnsigned(argv[++i], options.host_link_latency_ps)) return false;
+            options.net_link_latency_ps = options.host_link_latency_ps;
+        } else if (arg == "--host-link-latency-ps" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.host_link_latency_ps)) return false;
+        } else if (arg == "--net-link-latency-ps" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.net_link_latency_ps)) return false;
         } else if (arg == "--sync-interval-ps" && i + 1 < argc) {
             if (!ParseUnsigned(argv[++i], options.sync_interval_ps)) return false;
         } else if (arg == "--sync" && i + 1 < argc) {
@@ -80,7 +86,11 @@ bool ParseOptions(int argc, char** argv, Options& options)
         }
     }
     return !options.host_socket.empty() && !options.net_socket.empty() &&
-           !options.shm_path.empty();
+           !options.shm_path.empty() &&
+           (options.sync_mode == kSimbricksBaseIfSyncDisabled ||
+            options.sync_interval_ps <=
+                std::min(options.host_link_latency_ps,
+                         options.net_link_latency_ps));
 }
 
 template <typename T>
@@ -416,7 +426,8 @@ int Run(const Options& options)
     net_proto::DefaultParams(&net_params);
     host_params.sock_path = options.host_socket.c_str();
     net_params.sock_path = options.net_socket.c_str();
-    host_params.link_latency = net_params.link_latency = options.link_latency_ps;
+    host_params.link_latency = options.host_link_latency_ps;
+    net_params.link_latency = options.net_link_latency_ps;
     host_params.sync_interval = net_params.sync_interval = options.sync_interval_ps;
     host_params.sync_mode = net_params.sync_mode = options.sync_mode;
 
@@ -470,14 +481,21 @@ int Run(const Options& options)
         bool progress = false;
         while (host.Poll()) progress = true;
         while (network.Poll()) progress = true;
-        host_proto::UbHostD2HOutSync(&host_if, now);
-        net_proto::UbNetOutSync(&net_if, now);
+        const bool sync_blocked =
+            host_proto::UbHostD2HOutSync(&host_if, now) != 0 ||
+            net_proto::UbNetOutSync(&net_if, now) != 0;
+        if (sync_blocked) {
+            std::this_thread::yield();
+            continue;
+        }
         bool synchronized = false;
         std::uint64_t next = std::numeric_limits<std::uint64_t>::max();
         const auto constrain = [&synchronized, &next]
             (SimbricksBaseIf& interface) {
                 if (!SimbricksBaseIfSyncEnabled(&interface)) return;
                 synchronized = true;
+                // The last received SYNC remains the conservative horizon
+                // until the peer publishes a newer message.
                 next = std::min(next,
                     SimbricksBaseIfInTimestamp(&interface));
                 next = std::min(next,
@@ -507,7 +525,8 @@ int main(int argc, char** argv)
     if (!ParseOptions(argc, argv, options)) {
         std::cerr << "usage: udma-device-sim --host-socket PATH --net-socket PATH "
                      "--shm PATH [--sync off|optional|required] "
-                     "[--link-latency-ps N] [--sync-interval-ps N] "
+                     "[--link-latency-ps N | --host-link-latency-ps N "
+                     "--net-link-latency-ps N] [--sync-interval-ps N] "
                      "[--eid N] [--ports N] "
                      "[--test-abi]\n";
         return 2;

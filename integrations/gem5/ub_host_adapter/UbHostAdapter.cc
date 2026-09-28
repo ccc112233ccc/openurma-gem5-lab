@@ -44,6 +44,8 @@ UbHostAdapter::DmaOperation::DmaOperation(
 UbHostAdapter::UbHostAdapter(const Params &params)
     : DmaDevice(params), pioAddr(params.pio_addr), pioSize(params.pio_size),
       pioLatency(params.pio_latency), pollInterval(params.poll_interval),
+      syncEnabled(params.sync), linkLatency(params.link_latency),
+      syncInterval(params.sync_interval),
       socketPath(params.socket_path), msiPort(this, sys),
       interrupts{params.interrupt_misc ? params.interrupt_misc->get() : nullptr,
                  params.interrupt_aeq ? params.interrupt_aeq->get() : nullptr,
@@ -63,7 +65,8 @@ UbHostAdapter::init()
 {
     DmaDevice::init();
     connectDevice();
-    schedule(pollEvent, curTick() + pollInterval);
+    host_proto::UbHostH2DOutSync(&interface, protocolTime());
+    scheduleNextPoll();
 }
 
 AddrRangeList
@@ -84,19 +87,25 @@ uint64_t
 UbHostAdapter::protocolTime() const
 {
     // gem5's default tick is one picosecond, matching the SimBricks ABI.
-    return curTick();
+    return std::max<uint64_t>(curTick(), serviceTime);
 }
 
 void
 UbHostAdapter::connectDevice()
 {
+    if (syncEnabled && syncInterval > linkLatency)
+        fatal("%s: UB-HOST sync interval must not exceed link latency\n",
+              name());
+    if (syncEnabled && pioLatency < 2 * linkLatency)
+        fatal("%s: atomic PIO latency must cover the UB-HOST round trip\n",
+              name());
     SimbricksBaseIfParams params{};
     host_proto::DefaultParams(&params);
     params.sock_path = socketPath.c_str();
-    // Functional bring-up deliberately does not constrain gem5's event queue.
-    // Synchronization will be enabled by a later event-boundary integration,
-    // never by short periodic vCPU exits.
-    params.sync_mode = kSimbricksBaseIfSyncDisabled;
+    params.link_latency = linkLatency;
+    params.sync_interval = syncInterval;
+    params.sync_mode = syncEnabled ? kSimbricksBaseIfSyncRequired
+                                   : kSimbricksBaseIfSyncDisabled;
     if (SimbricksBaseIfInit(&interface.base, &params) != 0 ||
         SimbricksBaseIfConnect(&interface.base) != 0)
         fatal("%s: cannot connect UB-HOST socket %s\n", name(), socketPath);
@@ -152,8 +161,13 @@ UbHostAdapter::transactMmio(Addr offset, unsigned length, uint64_t value,
     // PioDevice's atomic API is synchronous. Keep servicing device-originated
     // requests while waiting, so a future register transaction may itself
     // trigger DMA without deadlocking the two processes.
+    const uint64_t deadline = protocolTime() + pioLatency;
     while (mmioCompletions.find(request_id) == mmioCompletions.end()) {
-        pollDevice();
+        // Atomic PIO cannot return control to gem5's event queue before the
+        // response exists.  Treat the request/response pair as one atomic
+        // transaction, but never consume a device message beyond the latency
+        // gem5 will charge for this access.
+        serviceDevice(deadline);
         std::this_thread::yield();
     }
     const uint64_t result = mmioCompletions.at(request_id);
@@ -164,8 +178,20 @@ UbHostAdapter::transactMmio(Addr offset, unsigned length, uint64_t value,
 void
 UbHostAdapter::pollDevice()
 {
-    while (auto *message =
-               host_proto::UbHostD2HInPoll(&interface, UINT64_MAX)) {
+    serviceDevice(protocolTime());
+    while (host_proto::UbHostH2DOutSync(&interface, protocolTime()) != 0)
+        std::this_thread::yield();
+    scheduleNextPoll();
+}
+
+bool
+UbHostAdapter::serviceDevice(uint64_t deadline)
+{
+    bool progress = false;
+    while (auto *message = host_proto::UbHostD2HInPoll(&interface, deadline)) {
+        progress = true;
+        const uint64_t message_time = message->base.header.timestamp;
+        serviceTime = std::max<uint64_t>(curTick(), message_time);
         const auto type = static_cast<host_proto::D2HType>(
             host_proto::UbHostD2HInType(&interface, message));
         switch (type) {
@@ -194,13 +220,49 @@ UbHostAdapter::pollDevice()
             break;
         }
         host_proto::UbHostD2HInDone(&interface, message);
+        serviceTime = 0;
     }
     dmaOperations.erase(
         std::remove_if(dmaOperations.begin(), dmaOperations.end(),
             [](const auto &operation) { return operation->completed; }),
         dmaOperations.end());
-    if (!pollEvent.scheduled())
-        schedule(pollEvent, curTick() + pollInterval);
+    return progress;
+}
+
+void
+UbHostAdapter::scheduleNextPoll()
+{
+    if (pollEvent.scheduled())
+        return;
+    Tick next = curTick() + pollInterval;
+    if (SimbricksBaseIfSyncEnabled(&interface.base)) {
+        // At a conservative horizon gem5 must not advance even one tick until
+        // the device publishes a newer SYNC/data timestamp.  Wait at this
+        // simulator boundary (not in the vCPU) and then schedule directly at
+        // the newly granted horizon.
+        while (!SimbricksBaseIfInTerminated(&interface.base)) {
+            auto *visible = host_proto::UbHostD2HInPeek(&interface, UINT64_MAX);
+            if (visible != nullptr) {
+                const uint64_t timestamp =
+                    host_proto::UbHostD2HInTimestamp(&interface);
+                if (timestamp <= curTick()) {
+                    serviceDevice(curTick());
+                    continue;
+                }
+                break;
+            }
+            if (host_proto::UbHostD2HInTimestamp(&interface) > curTick())
+                break;
+            std::this_thread::yield();
+        }
+        const uint64_t incoming =
+            host_proto::UbHostD2HInTimestamp(&interface);
+        const uint64_t outgoing = host_proto::UbHostH2DOutNextSync(&interface);
+        const uint64_t boundary = std::min(incoming, outgoing);
+        if (boundary != UINT64_MAX)
+            next = std::max<Tick>(curTick() + 1, boundary);
+    }
+    schedule(pollEvent, next);
 }
 
 void

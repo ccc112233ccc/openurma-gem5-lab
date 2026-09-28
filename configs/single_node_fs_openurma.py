@@ -188,9 +188,19 @@ def create_olk66_compatible(args):
         system.external_udma = upstream.UbHostAdapter(
             pio_addr=upstream.IOMEM_BASE,
             pio_size=upstream.OFFICIAL_UDMA_IOMEM_SIZE,
+            pio_latency=os.environ.get(
+                "OPENURMA_UDMA_HOST_PIO_LATENCY", "100ns"
+            ),
             socket_path=external_socket,
             poll_interval=os.environ.get(
                 "OPENURMA_UDMA_HOST_POLL_INTERVAL", "1us"
+            ),
+            sync=os.environ.get("OPENURMA_UDMA_HOST_SYNC", "0") == "1",
+            link_latency=os.environ.get(
+                "OPENURMA_UDMA_HOST_LINK_LATENCY", "50ns"
+            ),
+            sync_interval=os.environ.get(
+                "OPENURMA_UDMA_HOST_SYNC_INTERVAL", "50ns"
             ),
             interrupt_misc=interrupt_pins[0],
             interrupt_aeq=interrupt_pins[1],

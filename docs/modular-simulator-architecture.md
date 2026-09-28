@@ -47,8 +47,9 @@ source into its generated EXTRAS tree, leaving the pinned OpenURMA checkout
 unchanged.
 
 This adapter is selected explicitly by `--network-backend modular-ns3ub` and
-currently keeps UB-HOST synchronization disabled. In that mode the legacy
-SystemC NIC remains instantiated only as a compatibility child: its MMIO
+negotiates required SimBricks synchronization when the launcher enables
+virtual time. The legacy SystemC NIC remains instantiated only as a
+compatibility child: its MMIO
 aperture and peer are disabled, while the standalone model owns official
 discovery/MMIO, DMA, interrupts, descriptors, and packet behavior. The default
 backend remains unchanged so the prior bootable path is still a regression
@@ -129,7 +130,6 @@ both process boundaries:
 
 ```bash
 ./lab --runtime native build udma-device
-./lab --runtime native build udma-device
 ```
 
 The small portability translation unit compiles the pinned upstream SimBricks
@@ -155,11 +155,29 @@ synchronization disabled and required. The full-system launcher now exposes
 this boundary as `modular-ns3ub`; the old mmap ring-v4 modes remain only as
 explicit compatibility baselines and are not the target API.
 
-When SimBricks synchronization is negotiated, both the device process and the
-reference switch advance to the minimum of the next input timestamp and the
-next required outbound SYNC timestamp. They do not increment virtual time from
-host loop iterations. The switch test suite exercises this with a second
-three-process `sync=required` contract.
+When SimBricks synchronization is negotiated, gem5, both device processes,
+and the network fabric participate from tick zero. Each process advances to
+the minimum of the last peer-granted input horizon and its next required
+outbound SYNC timestamp; an empty queue does not revoke the last horizon.
+Every producer also stops virtual-time advancement while its output queue is
+backpressured. The gem5 adapter schedules directly at the next boundary event,
+so synchronization does not use a Python polling loop or a global barrier.
+The switch test suite exercises this with a second three-process
+`sync=required` contract.
+
+Atomic PIO is a special host API constraint: gem5 cannot run its event queue
+until a PIO callback returns. UB-HOST therefore treats one MMIO
+request/response as an atomic transaction and consumes device messages only up
+to the PIO deadline charged by gem5. Background DMA, interrupt, and UB-NET
+traffic continue to obey ordinary timestamp delivery.
+
+The default 100 ns lookahead is correct but costly during a cold Linux boot. A
+two-node five-process gate reached exactly 5,131,000,000 ticks and 14,743,314
+instructions on both gem5 instances after 66.36 host seconds, demonstrating
+lockstep conservative progress from tick zero. This mode is the timing-valid
+path. `--no-sync` remains an explicit functional/debug path, and future boot
+checkpoint automation should remove cold-boot cost without changing runtime
+lookahead.
 
 The device core receives time explicitly through `AdvanceTime(picoseconds)`.
 JFC completion-period moderation therefore uses the official encoded
@@ -177,8 +195,9 @@ change count and period without recreating the queue.
    the standalone official register/WQE behavior are implemented and launched
    end to end in the explicit modular mode.
 4. Connect ns-3-UB at the frame boundary and remove transaction shortcuts.
-   **UB-NET process contracts and explicit full-system launcher cutover are
-   complete; synchronized full-system performance validation remains.**
+   **UB-NET process contracts, explicit full-system launcher cutover, and
+   tick-zero five-process synchronization are complete; checkpoint-assisted
+   synchronized workload validation remains.**
 5. Add a QEMU adapter that implements the same `UB-HOST` protocol; the device
    and network processes remain unchanged.
 6. Remove the duplicated hardware behavior from `NICTopologySC` only after

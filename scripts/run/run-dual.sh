@@ -932,6 +932,7 @@ payload_dma_latency="${OPENURMA_PAYLOAD_DMA_LATENCY:-$profile_payload_dma_latenc
 payload_dma_rate_gbps="${OPENURMA_PAYLOAD_DMA_RATE_GBPS:-$profile_payload_dma_rate_gbps}"
 udma_poll_interval="${OPENURMA_UDMA_POLL_INTERVAL:-$profile_udma_poll_interval}"
 external_udma_poll_interval="${OPENURMA_UDMA_HOST_POLL_INTERVAL:-1us}"
+external_udma_host_latency_ns="${OPENURMA_UDMA_HOST_LATENCY_NS:-$sync_quantum_ns}"
 udma_iotlb_entries="${OPENURMA_UDMA_IOTLB_ENTRIES:-$profile_udma_iotlb_entries}"
 dma_max_outstanding="${OPENURMA_DMA_MAX_OUTSTANDING:-$profile_dma_max_outstanding}"
 provider="${OPENURMA_PROVIDER:-$profile_provider}"
@@ -1342,6 +1343,10 @@ esac
 (( peer_latency_ns > 0 )) || die "peer lookahead must be positive"
 (( sync_quantum_ns > 0 && sync_quantum_ns <= peer_latency_ns )) ||
     die "sync quantum must satisfy 0 < quantum <= peer latency"
+(( external_udma_host_latency_ns > 0 )) ||
+    die "external UDMA host latency must be positive"
+(( sync_quantum_ns <= external_udma_host_latency_ns )) ||
+    die "sync quantum must not exceed the external UDMA host latency"
 (( peer_link_rate_gbps > 0 )) || die "peer link rate must be positive"
 (( num_cpus > 0 )) || die "number of CPUs must be positive"
 (( benchmark_cpu < num_cpus )) || die "benchmark CPU must be smaller than the CPU count"
@@ -1433,8 +1438,6 @@ if (( ! sync_enabled )) && [[ "$network_backend" != builtin && \
     die "unsynchronized adapter execution currently requires --network-backend builtin"
 fi
 if [[ "$network_backend" == modular-ns3ub ]]; then
-    (( ! sync_enabled )) ||
-        die "modular-ns3ub currently requires --no-sync until UB-HOST participates in conservative time synchronization"
     [[ "$provider" == official ]] ||
         die "modular-ns3ub requires --provider official"
 fi
@@ -1618,6 +1621,7 @@ payload_dma_latency=$payload_dma_latency
 payload_dma_rate_gbps=$payload_dma_rate_gbps
 udma_poll_interval=$udma_poll_interval
 external_udma_poll_interval=$external_udma_poll_interval
+external_udma_host_latency_ns=$external_udma_host_latency_ns
 udma_iotlb_entries=$udma_iotlb_entries
 dma_max_outstanding=$dma_max_outstanding
 dist_link_speed=$dist_link_speed
@@ -1813,6 +1817,11 @@ if [[ "$network_backend" == modular-ns3ub ]]; then
     # UDMA owns both sockets and therefore starts first as the listener.  Its
     # two-interface Establish waits until the host and fabric peers exist, so
     # all processes are detached before readiness is checked.
+    if (( sync_enabled )); then
+        modular_sync_mode=required
+    else
+        modular_sync_mode=off
+    fi
     for ((node = 0; node < node_count; ++node)); do
         ou_exec_detached \
             bash "$lab/tools/run-background.sh" \
@@ -1822,7 +1831,9 @@ if [[ "$network_backend" == modular-ns3ub ]]; then
             --host-socket "${host_socket_paths[$node]}" \
             --net-socket "${net_socket_paths[$node]}" \
             --shm "${udma_shm_paths[$node]}" \
-            --sync off --link-latency-ps 1 \
+            --sync "$modular_sync_mode" \
+            --host-link-latency-ps "$((external_udma_host_latency_ns * 1000))" \
+            --net-link-latency-ps "$((peer_latency_ns * 1000))" \
             --sync-interval-ps "$((sync_quantum_ns * 1000))" \
             --eid "$((0x100 + node))" --ports "$ub_port_count"
     done
@@ -1847,7 +1858,7 @@ if [[ "$network_backend" == modular-ns3ub ]]; then
     ub_switch_args=(--ports "$ub_port_count"
         --link-delay-ps "$((peer_latency_ns * 1000))"
         --switch-delay-ps "$switch_delay_ps"
-        --rate-gbps "$peer_link_rate_gbps" --sync off
+        --rate-gbps "$peer_link_rate_gbps" --sync "$modular_sync_mode"
         --sync-interval-ps "$((sync_quantum_ns * 1000))")
     for ((node = 0; node < node_count; ++node)); do
         ub_switch_args+=(--endpoint
@@ -1957,6 +1968,11 @@ launch_node() {
         # pseudo-op. There is no DistIface in functional adapter mode, so keep
         # the adapter compatibility no-op enabled without starting its event.
         adapter_sync_env=1
+    elif [[ "$network_backend" == modular-ns3ub ]]; then
+        # UB-HOST is the gem5 conservative-time boundary in the modular
+        # topology.  The legacy in-process adapter stays disabled.
+        sync_args+=(--dist-size=0)
+        adapter_sync_env=1
     elif [[ "$sync_mode" == adapter-local ]]; then
         sync_args+=(--adapter-local-sync --dist-size=0)
         adapter_sync_env=1
@@ -1984,6 +2000,10 @@ launch_node() {
         "OPENURMA_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
         "OPENURMA_UDMA_HOST_SOCKET=$external_udma_socket" \
         "OPENURMA_UDMA_HOST_POLL_INTERVAL=$external_udma_poll_interval" \
+        "OPENURMA_UDMA_HOST_SYNC=$sync_enabled" \
+        "OPENURMA_UDMA_HOST_LINK_LATENCY=${external_udma_host_latency_ns}ns" \
+        "OPENURMA_UDMA_HOST_SYNC_INTERVAL=${sync_quantum_ns}ns" \
+        "OPENURMA_UDMA_HOST_PIO_LATENCY=$((2 * external_udma_host_latency_ns))ns" \
         -- \
         bash "$lab/tools/run-background.sh" "$out/gem5.pid" "$out/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$out" "$config" \

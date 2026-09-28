@@ -35,6 +35,13 @@ grep -qx 'virtual_time_synchronization=enabled' "$tmp/fast"
 grep -qx 'sync_request=off' "$tmp/fast-unsync"
 grep -qx 'virtual_time_synchronization=disabled' "$tmp/fast-unsync"
 
+"$lab/lab" --runtime native start --profile fast --provider official \
+    --network-backend modular-ns3ub --sync \
+    --print-config >"$tmp/modular-sync"
+grep -qx 'network_backend=modular-ns3ub' "$tmp/modular-sync"
+grep -qx 'virtual_time_synchronization=enabled' "$tmp/modular-sync"
+grep -qx 'external_udma_host_latency_ns=100' "$tmp/modular-sync"
+
 "$lab/lab" --runtime native start --profile fast \
     --cpu-mode kvm --print-config >"$tmp/kvm-override"
 grep -qx 'udma_poll_interval=1ms' "$tmp/kvm-override"

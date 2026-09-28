@@ -189,12 +189,18 @@ in a sibling development checkout.
 # Simulator-neutral five-process path (2 gem5 + 2 UDMA + 1 ns-3 fabric):
 ./lab --runtime docker build udma-device
 ./lab --runtime docker start --profile fast --provider official \
-  --network-backend modular-ns3ub --no-sync
+  --network-backend modular-ns3ub --sync
 ```
 
 The build runs bidirectional UB-NET process contracts with synchronization
 disabled and required. `ns3ub-native` retains the version-4 compatibility path
 as a regression baseline. `modular-ns3ub` selects UB-HOST v1 from each gem5 to
 an independent UDMA process and UB-NET v1 from those devices to native ns-3-UB.
-The modular mode currently requires the official provider and `--no-sync`;
-conservative UB-HOST synchronization is the next timing checkpoint.
+The modular mode requires the official provider. `--sync` makes both UB-HOST
+links and both UB-NET links participate from tick zero. The configured
+host/device and endpoint/fabric propagation delays are the conservative
+lookahead. Use `--no-sync` for fast functional bring-up; its latency output is
+not a synchronized virtual-time result. With the default 100 ns lookahead, a
+cold full-system Atomic boot is intentionally expensive, so synchronized
+experiments should use a prepared boot checkpoint in future automation rather
+than weakening the runtime causality contract.

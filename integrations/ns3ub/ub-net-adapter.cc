@@ -244,15 +244,23 @@ class UbNetFabric {
                     std::this_thread::sleep_for(std::chrono::microseconds(50));
                 continue;
             }
+            bool sync_blocked = false;
             for (auto& endpoint : endpoints_)
-                ubnet::UbNetOutSync(&endpoint.interface, now);
+                sync_blocked =
+                    ubnet::UbNetOutSync(&endpoint.interface, now) != 0 ||
+                    sync_blocked;
+            if (sync_blocked) {
+                std::this_thread::yield();
+                continue;
+            }
 
             bool synchronized = false;
             std::uint64_t next = std::numeric_limits<std::uint64_t>::max();
             for (auto& endpoint : endpoints_) {
                 if (!SimbricksBaseIfSyncEnabled(&endpoint.interface.base)) continue;
                 synchronized = true;
-                next = std::min(next, ubnet::UbNetInTimestamp(&endpoint.interface));
+                next = std::min(next,
+                    ubnet::UbNetInTimestamp(&endpoint.interface));
                 next = std::min(next, ubnet::UbNetOutNextSync(&endpoint.interface));
             }
             if (synchronized && next > now &&
