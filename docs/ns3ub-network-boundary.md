@@ -2,9 +2,10 @@
 
 ## Scope
 
-The integration boundary is the cable-facing side of each modeled UDMA host
-port. Software-visible device and host-NIC behaviour remains in gem5. The
-switched fabric belongs to the ns-3-UB process.
+The integration boundary is the cable-facing side of each standalone UDMA
+device process. The host simulator provides CPU, memory and interrupts through
+UB-HOST; device behavior belongs to `udma-device-sim`; the switched fabric
+belongs to the ns-3-UB process.
 
 This rule is normative: a delay, queue, state machine, or fault is modeled by
 exactly one side of the boundary.
@@ -14,41 +15,40 @@ exactly one side of the boundary.
 | Behaviour | Owner |
 | --- | --- |
 | Official UMDK provider and kernel drivers | guest software in gem5 |
-| Doorbells, SQ/RQ/CQ, WQE decoding and CQE generation | gem5 UDMA device |
-| DMA, address translation, token checks and IOTLB | gem5 UDMA device |
-| TP activation and TP-to-physical-port selection | gem5 UDMA device |
-| Endpoint packetization/reassembly and RMA completion semantics | gem5 UDMA device |
-| Host NIC egress queue, port selection and source-port serialization | gem5 UDMA device |
-| Host-to-switch Adapter lookahead | co-simulation boundary |
+| Doorbells, SQ/RQ/CQ, WQE decoding and CQE generation | standalone UDMA device |
+| DMA, address translation, token checks and IOTLB | standalone UDMA device |
+| TP activation and TP-to-physical-port selection | standalone UDMA device |
+| Endpoint packetization/reassembly and RMA completion semantics | standalone UDMA device |
+| Host NIC egress queue and port selection | standalone UDMA device |
+| Endpoint-to-fabric propagation and lookahead | UB-NET boundary configured by fabric adapter |
 | Switch ingress processing and VOQ admission | ns-3-UB |
 | Switch ingress/egress queues, arbitration and forwarding | ns-3-UB |
-| Switch egress-port serialization and switch-to-host propagation | ns-3-UB |
+| Switch egress-port serialization | ns-3-UB |
 | Fabric routing, flow control, congestion and link faults | ns-3-UB |
 
-The first integration phase transports the existing 40-byte modeled UDMA
-transaction plus its optional payload.  That transaction is opaque to the
-network except for adapter metadata needed for forwarding and accounting.
-It is not an ns-3-UB transaction-layer request.
+UB-NET transports a wire-visible frame plus forwarding metadata. The payload
+is opaque to the network process: WQEs, DMA requests and RMA state transitions
+never cross this boundary.
 
 ## Process topology
 
-For two hosts the timed system has three processes:
+For two hosts the target timed system has five processes:
 
 ```text
-gem5 node 0 <=> adapter <=> ns-3-UB fabric <=> adapter <=> gem5 node 1
+gem5/QEMU 0 <=> UDMA 0 <=> ns-3-UB fabric <=> UDMA 1 <=> gem5/QEMU 1
 ```
 
-An N-host run uses N gem5 processes and one ns-3-UB fabric process.  Each
-physical port has independent ingress and egress FIFO state.
+An N-host run uses N host-simulator processes, N UDMA device processes and one
+ns-3-UB fabric process. Each physical port has independent link and queue state.
 
 ## Adapter contract
 
-The checked-in implementation uses adapter protocol version 4 so the current
-gem5 endpoint can be tested without changing the official software path.
-Each fixed-size record has a 64-byte header followed by either:
+The target implementation uses simulator-neutral UB-NET v1 over the pinned
+SimBricks shared-memory transport. Each fixed-size record has a 64-byte header
+followed by either:
 
-* `DATA`: the opaque UDMA transaction and optional payload;
-* `SYNC`: a null-message promise for conservative synchronization; or
+* `FRAME`: an opaque wire-visible UB frame and its route metadata;
+* SimBricks `SYNC`: a null-message promise for conservative synchronization; or
 * `LINK_STATE`: reserved control information.
 
 EIDs choose the destination endpoint.  Physical port identifiers choose the
@@ -56,21 +56,20 @@ source and destination port within that endpoint.  IP addresses remain part
 of the userspace resource-exchange control path and never route UB data in the
 fabric process.
 
-Version 4 presents `receive_tick` at the switch ingress after gem5 has charged
-the host NIC's source-port serialization and the positive Adapter lookahead.
-This makes the boundary timestamp directly usable as a native `UbSwitch`
-ingress event. The `ns3ub-compat` mode retains arithmetic switch/egress timing;
-`ns3ub-native` replaces that arithmetic with the production `UbSwitch`, VOQ,
-allocator, `UbPort`, and `UbLink` path.
+The positive UB-NET boundary latency represents endpoint-to-fabric propagation
+and provides conservative lookahead. ns-3 owns port serialization, switch VOQ
+admission, arbitration and queueing. Internal `UbLink` propagation is zero in
+the adapter so the boundary delay is not charged twice.
 
 The complete process and protocol implementation is reviewable in
-`integrations/ns3ub/ub-gem5-adapter.cc` and
-`integrations/ns3ub/ub-external-adapter-protocol.h`. The public ns-3-UB source
-tree is a pinned generated dependency, not the owner of this lab-specific ABI.
+`integrations/ns3ub/ub-net-adapter.cc` and `protocol/ub_net/`. The public
+ns-3-UB source tree is a pinned generated dependency, not the owner of this
+lab-specific ABI. The version-4 mmap adapter remains a temporary launcher
+compatibility path only.
 
 ## Virtual time
 
-DATA and SYNC share the same per-port FIFO.  A SYNC record promises that the
+FRAME and SYNC share the same per-port FIFO. A SYNC record promises that the
 sender will not later publish an earlier `receive_tick` on that FIFO.  The
 positive host-link propagation delay is the conservative lookahead.
 
@@ -81,14 +80,15 @@ never used as simulated latency.
 
 Synchronization starts with the simulator and uses one absolute virtual-time
 axis. SYNC terminates at the adjacent fabric adapter and carries no EID, TP,
-pair, workload or ROI state. EIDs route DATA only. This lets independent flows
+pair, workload or ROI state. EIDs route FRAME only. This lets independent flows
 start at different times without creating pair-specific epochs or barriers.
 
 ## Delivery stages
 
-1. `compatibility bridge`: consume the current version-4 ring, execute fabric
+1. `compatibility bridge` (**complete**): consume the current version-4 ring, execute fabric
    events in an ns-3 process, and reproduce the existing switch timing test.
-2. `native fabric`: translate the opaque endpoint carrier to an ns-3-UB frame
+2. `native fabric` (**UB-NET contract complete; launcher cutover pending**):
+   translate the opaque endpoint carrier to an ns-3-UB frame
    at switch ingress and use native switch queues, routing, egress ports, and
    links. The first milestone disables flow control while validating the
    lossless base path.

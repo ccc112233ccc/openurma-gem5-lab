@@ -176,8 +176,9 @@ silently producing a nonfunctional full-system image.
 
 ## ns-3-UB adapter source
 
-The complete external-process adapter is checked in under
-`integrations/ns3ub/`; it is not hidden in a sibling development checkout.
+Both the temporary gem5 compatibility adapter and the simulator-neutral
+UB-NET v1 adapter are checked in under `integrations/ns3ub/`; neither is hidden
+in a sibling development checkout.
 `./lab setup --sources-only` fetches the pinned public ns-3-UB baseline into
 `sources/ns-3-ub`, and the build command installs the reviewed adapter overlay:
 
@@ -185,3 +186,9 @@ The complete external-process adapter is checked in under
 ./lab build ns3ub
 ./lab start --network-backend ns3ub-native
 ```
+
+The build runs bidirectional UB-NET process contracts with synchronization
+disabled and required. The `start --network-backend ns3ub-native` command still
+selects the version-4 launcher compatibility path until the host-to-standalone-
+UDMA cutover is complete; passing the UB-NET contract does not imply that final
+launcher switch has already happened.

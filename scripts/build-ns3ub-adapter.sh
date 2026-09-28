@@ -18,6 +18,9 @@ output_dir="${OPENURMA_NS3UB_OUTPUT:-$source_root/build-linux}"
 adapter_source="$runtime_lab/integrations/ns3ub/ub-gem5-adapter.cc"
 adapter_protocol="$runtime_lab/integrations/ns3ub/ub-external-adapter-protocol.h"
 adapter_cmake_patch="$runtime_lab/integrations/ns3ub/register-adapter-header.patch"
+ubnet_adapter_source="$runtime_lab/integrations/ns3ub/ub-net-adapter.cc"
+ubnet_adapter_cmake="$runtime_lab/integrations/ns3ub/ub-net-adapter.CMakeLists.txt"
+simbricks_base_source="$runtime_lab/components/udma-device-sim/simbricks_base_portable.c"
 expected_source_revision=d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b
 
 # Docker Desktop can retain an unreachable virtiofs directory after the host
@@ -41,6 +44,13 @@ actual_source_revision="$(ou_exec git -C "$source_root" rev-parse HEAD)"
 ou_exec install -m 0644 "$adapter_source" "$source_root/scratch/ub-gem5-adapter.cc"
 ou_exec install -m 0644 "$adapter_protocol" \
     "$source_root/src/unified-bus/model/ub-external-adapter-protocol.h"
+ou_exec mkdir -p "$source_root/scratch/openurma-ub-net"
+ou_exec install -m 0644 "$ubnet_adapter_source" \
+    "$source_root/scratch/openurma-ub-net/ub-net-adapter.cc"
+ou_exec install -m 0644 "$ubnet_adapter_cmake" \
+    "$source_root/scratch/openurma-ub-net/CMakeLists.txt"
+ou_exec install -m 0644 "$simbricks_base_source" \
+    "$source_root/scratch/openurma-ub-net/simbricks-base-portable.c"
 if ou_exec git -C "$source_root" apply --reverse --check "$adapter_cmake_patch" \
         >/dev/null 2>&1; then
     : # already applied
@@ -68,14 +78,33 @@ ou_exec cmake -S "$source_root" -B "$cache_dir" \
     -DNS3_MTP=OFF \
     -DNS3_TESTS=OFF \
     -DNS3_ENABLED_MODULES=unified-bus \
+    -DOPENURMA_LAB_ROOT="$runtime_lab" \
     -DNS3_OUTPUT_DIRECTORY="$output_dir"
 
 ou_exec cmake --build "$cache_dir" \
-    --target scratch_ub-gem5-adapter -j "${OPENURMA_BUILD_JOBS:-8}"
+    --target scratch_ub-gem5-adapter scratch_ub-net-adapter \
+    -j "${OPENURMA_BUILD_JOBS:-8}"
 
 ou_exec test -x \
     "$output_dir/scratch/ns3.44-ub-gem5-adapter"
 ou_exec env PYTHONPATH="$runtime_lab/tools:$runtime_lab" python3 \
     "$runtime_lab/tools/test_ns3ub_native_adapter.py" \
     "$output_dir/scratch/ns3.44-ub-gem5-adapter"
+ou_exec test -x "$output_dir/scratch/ns3.44-ub-net-adapter"
+
+# Build the protocol peer from the same pinned SimBricks tree and exercise both
+# asynchronous and conservative-synchronization contracts end to end.
+switch_build=/tmp/openurma-ub-switch-ns3-build
+ou_exec env OPENURMA_LAB_ROOT="$runtime_lab" \
+    OPENURMA_UB_SWITCH_BUILD="$switch_build" \
+    JOBS="${OPENURMA_BUILD_JOBS:-8}" \
+    bash "$runtime_lab/scripts/build/build_ub_switch_sim.sh"
+for sync_mode in off required; do
+    ou_exec timeout 20 bash \
+        "$runtime_lab/components/ub-switch-sim/tests/process_contract.sh" \
+        "$output_dir/scratch/ns3.44-ub-net-adapter" \
+        "$switch_build/ub-net-contract-peer" \
+        "/tmp/openurma-ns3ub-contract-$sync_mode" "$sync_mode"
+done
 echo "ns-3-UB gem5 adapter built: $output_dir/scratch/ns3.44-ub-gem5-adapter"
+echo "ns-3-UB UB-NET adapter built: $output_dir/scratch/ns3.44-ub-net-adapter"

@@ -19,8 +19,10 @@ namespace {
 template <typename T>
 void ZeroVolatile(volatile T& object)
 {
+    const std::uint64_t timestamp = object.timestamp;
     auto* bytes = reinterpret_cast<volatile std::uint8_t*>(&object);
     for (std::size_t i = 0; i < sizeof(T); ++i) bytes[i] = 0;
+    object.timestamp = timestamp;
 }
 
 template <typename Message>

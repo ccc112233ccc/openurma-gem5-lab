@@ -147,8 +147,11 @@ directions:
 ./lab --runtime native build ub-switch
 ```
 
-The ns-3-UB backend must implement this same UB-NET boundary. The old mmap
-ring-v4 adapter remains a compatibility path only and is not the target API.
+The ns-3-UB backend implements the same UB-NET boundary in
+`integrations/ns3ub/ub-net-adapter.cc`. It uses native `UbSwitch`, `UbPort`,
+and `UbLink` objects and passes bidirectional process contracts with
+synchronization disabled and required. The old mmap ring-v4 adapter remains
+only for the not-yet-cut-over full-system launcher; it is not the target API.
 
 When SimBricks synchronization is negotiated, both the device process and the
 reference switch advance to the minimum of the next input timestamp and the
@@ -171,6 +174,7 @@ change count and period without recreating the queue.
    SEND, then READ/WRITE and receive queues. The thin MMIO/DMA/IRQ adapter is
    implemented; migration of the official register/WQE behavior is in progress.
 4. Connect ns-3-UB at the frame boundary and remove transaction shortcuts.
+   **UB-NET process contract complete; full launcher cutover pending.**
 5. Add a QEMU adapter that implements the same `UB-HOST` protocol; the device
    and network processes remain unchanged.
 6. Remove the duplicated hardware behavior from `NICTopologySC` only after

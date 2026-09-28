@@ -16,8 +16,10 @@ namespace {
 template <typename T>
 void ZeroVolatile(volatile T& object)
 {
+    const std::uint64_t timestamp = object.timestamp;
     auto* bytes = reinterpret_cast<volatile std::uint8_t*>(&object);
     for (std::size_t i = 0; i < sizeof(T); ++i) bytes[i] = 0;
+    object.timestamp = timestamp;
 }
 
 int Run(const std::string& role, const std::string& socket,
@@ -96,6 +98,8 @@ int Run(const std::string& role, const std::string& socket,
         if (type == net::MessageType::LinkState) {
             link_up = input->link.state ==
                       static_cast<std::uint8_t>(net::LinkState::Up);
+            std::cerr << role << ": link state "
+                      << (link_up ? "up" : "down") << '\n';
         } else if (type == net::MessageType::Frame) {
             const auto& expected = sender ? response : request;
             bool valid = link_up && input->frame.source_eid == remote_eid &&
@@ -143,6 +147,8 @@ int Run(const std::string& role, const std::string& socket,
             net::UbNetInDone(&interface, input);
         }
     }
+    std::cerr << role << ": timed out link_up=" << link_up
+              << " sent=" << sent << " now=" << now << '\n';
     return 6;
 }
 

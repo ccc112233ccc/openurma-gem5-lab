@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+set(openurma_lab_root "${OPENURMA_LAB_ROOT}")
+if(NOT openurma_lab_root)
+  message(FATAL_ERROR "OPENURMA_LAB_ROOT must name the openurma-gem5-lab checkout")
+endif()
+
+add_library(openurma_simbricks_base STATIC simbricks-base-portable.c)
+target_include_directories(openurma_simbricks_base SYSTEM PUBLIC
+  "${openurma_lab_root}/sources/simbricks/lib")
+
+build_exec(
+  EXECNAME ub-net-adapter
+  EXECNAME_PREFIX scratch_
+  SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/ub-net-adapter.cc
+  LIBRARIES_TO_LINK ${libunified-bus} ${libcore} ${libnetwork}
+                    openurma_simbricks_base
+  EXECUTABLE_DIRECTORY_PATH ${CMAKE_OUTPUT_DIRECTORY}/scratch/
+)
+target_include_directories(scratch_ub-net-adapter PRIVATE
+  "${openurma_lab_root}"
+  "${openurma_lab_root}/sources/simbricks/lib")
+target_compile_features(scratch_ub-net-adapter PRIVATE cxx_std_17)
