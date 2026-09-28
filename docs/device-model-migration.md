@@ -28,7 +28,8 @@ migrated merely because an old in-gem5 fallback still implements it.
 | completion period moderation | pending | virtual-time timer integration required |
 | multi-port TP selection | migrated | control-plane round-robin TP-to-port binding |
 | multi-port failover | migrated | UB-NET link-state event and active-TP rebinding test |
-| ns-3-UB packet transport and switch model | adapter exists; integration pending | UB-NET v1 adapter source |
+| simulator-neutral UB packet transport and switch | migrated | independent `ub-switch-sim`, EID routing, link-state and bidirectional process contract |
+| ns-3-UB packet timing/backend | legacy adapter exists; UB-NET integration pending | replace mmap ring v4 boundary with UB-NET v1 |
 | QEMU host adapter | pending | implement the same UB-HOST v1 contract, no model fork |
 
 Removal rule: an old `NICTopologySC` behavior can be deleted only after the

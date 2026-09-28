@@ -2,6 +2,7 @@
 #pragma once
 
 #ifdef __cplusplus
+#include <simbricks/base/cxxatomicfix.h>
 extern "C" {
 #endif
 #include <simbricks/base/generic.h>
