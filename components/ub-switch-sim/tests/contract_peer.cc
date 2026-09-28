@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "protocol/ub_net/if.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,7 +21,7 @@ void ZeroVolatile(volatile T& object)
 }
 
 int Run(const std::string& role, const std::string& socket,
-        const std::string& shm_path)
+        const std::string& shm_path, const std::string& sync_mode)
 {
     const bool sender = role == "sender";
     if (!sender && role != "receiver") return 2;
@@ -29,7 +31,14 @@ int Run(const std::string& role, const std::string& socket,
     SimbricksBaseIfParams params{};
     net::DefaultParams(&params);
     params.sock_path = socket.c_str();
-    params.sync_mode = kSimbricksBaseIfSyncDisabled;
+    if (sync_mode == "off")
+        params.sync_mode = kSimbricksBaseIfSyncDisabled;
+    else if (sync_mode == "required")
+        params.sync_mode = kSimbricksBaseIfSyncRequired;
+    else
+        return 2;
+    params.link_latency = 100000;
+    params.sync_interval = 100000;
     SimbricksBaseIfSHMPool pool{};
     if (SimbricksBaseIfSHMPoolCreate(&pool, shm_path.c_str(),
                                      SimbricksBaseIfSHMSize(&params)) != 0 ||
@@ -48,9 +57,11 @@ int Run(const std::string& role, const std::string& socket,
     const std::vector<std::uint8_t> response{'o', 'k'};
     bool link_up = false;
     bool sent = false;
+    std::uint64_t now = 0;
     for (std::uint64_t spins = 0; spins < 20000000; ++spins) {
+        net::UbNetOutSync(&interface, now);
         if (sender && link_up && !sent) {
-            auto* output = net::UbNetOutAlloc(&interface, 0);
+            auto* output = net::UbNetOutAlloc(&interface, now);
             if (output != nullptr) {
                 ZeroVolatile(output->frame);
                 output->frame.sequence = 7;
@@ -66,8 +77,17 @@ int Run(const std::string& role, const std::string& socket,
                 sent = true;
             }
         }
-        auto* input = net::UbNetInPoll(&interface, UINT64_MAX);
+        auto* input = net::UbNetInPoll(&interface, now);
         if (input == nullptr) {
+            if (SimbricksBaseIfSyncEnabled(&interface.base)) {
+                const std::uint64_t next = std::min(
+                    net::UbNetInTimestamp(&interface),
+                    net::UbNetOutNextSync(&interface));
+                if (next > now && next != std::numeric_limits<std::uint64_t>::max())
+                    now = next;
+            } else {
+                now += 100000;
+            }
             std::this_thread::yield();
             continue;
         }
@@ -95,7 +115,7 @@ int Run(const std::string& role, const std::string& socket,
                 return 0;
             }
             for (;;) {
-                auto* output = net::UbNetOutAlloc(&interface, 0);
+                auto* output = net::UbNetOutAlloc(&interface, now);
                 if (output == nullptr) {
                     std::this_thread::yield();
                     continue;
@@ -130,9 +150,10 @@ int Run(const std::string& role, const std::string& socket,
 
 int main(int argc, char** argv)
 {
-    if (argc != 4) {
-        std::cerr << "usage: ub-net-contract-peer sender|receiver SOCKET SHM\n";
+    if (argc != 5) {
+        std::cerr << "usage: ub-net-contract-peer sender|receiver SOCKET SHM "
+                     "off|required\n";
         return 2;
     }
-    return Run(argv[1], argv[2], argv[3]);
+    return Run(argv[1], argv[2], argv[3], argv[4]);
 }

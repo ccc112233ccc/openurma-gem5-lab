@@ -919,8 +919,10 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
 
     const bool creates_context = command == 0x34 || command == 0x44 ||
         command == 0x04 || command == 0x24 || command == 0x54;
-    if (creates_context && context_iova) {
-        const std::size_t bytes = (command == 0x34 || command == 0x44) ? 64 : 128;
+    const bool modifies_jfc = command == 0x25;
+    if ((creates_context || modifies_jfc) && context_iova) {
+        const std::size_t bytes = modifies_jfc ? 256 :
+            ((command == 0x34 || command == 0x44) ? 64 : 128);
         host_.DmaReadIoVirtual(context_iova, bytes,
             [this, descriptor = std::move(descriptor), descriptor_count, bytes]
             (bool ok, std::vector<std::uint8_t> context) mutable {
@@ -979,6 +981,20 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
         if (!queue.queue_iova || !queue.index_iova || !queue.depth)
             return FailUbase();
         jfc_contexts_[tag] = queue;
+    } else if (command == 0x25 && context.size() >= 256) {
+        auto found = jfc_contexts_.find(tag);
+        if (found == jfc_contexts_.end()) return FailUbase();
+        const std::uint32_t count_mask =
+            LoadLe<std::uint32_t>(context.data() + 128 + 4 * 4);
+        const std::uint32_t period_mask =
+            LoadLe<std::uint32_t>(context.data() + 128 + 5 * 4);
+        if ((count_mask & (0x3ffU << 22)) == 0) {
+            found->second.moderation_count = dw(4) >> 22;
+            if (!found->second.moderation_count)
+                found->second.moderation_count = 1;
+        }
+        if ((period_mask & (0x7U << 22)) == 0)
+            found->second.moderation_period = (dw(5) >> 22) & 0x7U;
     } else if (command == 0x54 && context.size() >= 128) {
         const std::uint32_t rqe_shift = (dw(0) >> 8) & 0xfU;
         QueueContext queue{};
@@ -1337,12 +1353,21 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                         return completion(false);
                     ++found->second.producer;
                     ++found->second.pending_completions;
+                    static constexpr std::array<std::uint64_t, 8> PeriodUs{
+                        0, 4, 16, 64, 256, 1024, 4096, 16384};
                     if (found->second.pending_completions <
                         found->second.moderation_count) {
+                        if (!found->second.moderation_deadline_ps &&
+                            found->second.moderation_period) {
+                            found->second.moderation_deadline_ps = now_ps_ +
+                                PeriodUs[found->second.moderation_period] *
+                                    1000000ULL;
+                        }
                         completion(true);
                         return;
                     }
                     found->second.pending_completions = 0;
+                    found->second.moderation_deadline_ps = 0;
                     EmitCompletionEvent(jfc_id, std::move(completion));
                 });
         });
@@ -1351,22 +1376,44 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
 void
 UdmaModel::EmitCompletionEvent(std::uint32_t jfc_id, Completion completion)
 {
-    if (!ceq_iova_ || !ceq_depth_ || (ceq_depth_ & (ceq_depth_ - 1)))
-        return completion(false);
+    completion_events_.push_back({jfc_id, std::move(completion)});
+    ProcessCompletionEvent();
+}
+
+void
+UdmaModel::ProcessCompletionEvent()
+{
+    if (completion_event_busy_ || completion_events_.empty()) return;
+    PendingCompletionEvent pending = std::move(completion_events_.front());
+    completion_events_.pop_front();
+    if (!ceq_iova_ || !ceq_depth_ || (ceq_depth_ & (ceq_depth_ - 1))) {
+        pending.completion(false);
+        ProcessCompletionEvent();
+        return;
+    }
+    completion_event_busy_ = true;
     std::vector<std::uint8_t> event(64, 0);
-    std::uint32_t word = jfc_id & 0xfffffU;
+    std::uint32_t word = pending.jfc_id & 0xfffffU;
     if (!(ceq_producer_ & ceq_depth_)) word |= 1U << 31;
     StoreLe<std::uint32_t>(event, 0, word);
     const std::uint32_t slot = ceq_producer_ & (ceq_depth_ - 1);
     host_.DmaWriteIoVirtual(ceq_iova_ + std::uint64_t(slot) * 64,
                             std::move(event),
-        [this, completion = std::move(completion)](bool ok) mutable {
+        [this, completion = std::move(pending.completion)](bool ok) mutable {
             if (ok) {
                 ++ceq_producer_;
-                RaiseInterrupt(2, std::move(completion));
+                RaiseInterrupt(2,
+                    [this, completion = std::move(completion)]
+                    (bool interrupt_ok) mutable {
+                        completion_event_busy_ = false;
+                        completion(interrupt_ok);
+                        ProcessCompletionEvent();
+                    });
                 return;
             }
+            completion_event_busy_ = false;
             completion(false);
+            ProcessCompletionEvent();
         });
 }
 
@@ -1873,6 +1920,27 @@ UdmaModel::SetLinkState(std::uint32_t port, bool up)
             }
         }
         if (!rebound) route.active = false;
+    }
+}
+
+void
+UdmaModel::AdvanceTime(std::uint64_t now_ps)
+{
+    if (now_ps < now_ps_) return;
+    now_ps_ = now_ps;
+    std::vector<std::uint32_t> expired;
+    for (auto& [jfc_id, jfc] : jfc_contexts_) {
+        if (jfc.pending_completions && jfc.moderation_deadline_ps &&
+            jfc.moderation_deadline_ps <= now_ps_) {
+            jfc.pending_completions = 0;
+            jfc.moderation_deadline_ps = 0;
+            expired.push_back(jfc_id);
+        }
+    }
+    for (const std::uint32_t jfc_id : expired) {
+        EmitCompletionEvent(jfc_id, [this](bool ok) {
+            if (!ok) ++ubase_errors_;
+        });
     }
 }
 

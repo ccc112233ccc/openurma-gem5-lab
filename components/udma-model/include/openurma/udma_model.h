@@ -146,6 +146,9 @@ class UdmaModel {
                    std::uint64_t value);
     void Receive(Frame frame);
     void SetLinkState(std::uint32_t port, bool up);
+    // Advance device virtual time in picoseconds. Timed hardware behavior is
+    // driven only through this method; the model never reads host wall time.
+    void AdvanceTime(std::uint64_t now_ps);
 
     std::uint64_t submitted() const { return submitted_; }
     std::uint64_t completed() const { return completed_; }
@@ -217,6 +220,7 @@ class UdmaModel {
                   Completion completion, std::uint32_t remote_id = 0,
                   std::uint32_t remote_eid = 0, std::uint32_t tpn = 0);
     void EmitCompletionEvent(std::uint32_t jfc_id, Completion completion);
+    void ProcessCompletionEvent();
     void RaiseInterrupt(std::uint32_t vector, Completion completion);
     struct MsiState {
         std::uint32_t vector{};
@@ -333,6 +337,7 @@ class UdmaModel {
         std::uint32_t moderation_count{1};
         std::uint32_t moderation_period{};
         std::uint32_t pending_completions{};
+        std::uint64_t moderation_deadline_ps{};
         std::array<std::uint8_t, 64> direct_wqe{};
         std::uint64_t direct_valid{};
     };
@@ -342,6 +347,12 @@ class UdmaModel {
     std::uint64_t ceq_iova_{};
     std::uint32_t ceq_depth_{};
     std::uint32_t ceq_producer_{};
+    struct PendingCompletionEvent {
+        std::uint32_t jfc_id{};
+        Completion completion;
+    };
+    std::deque<PendingCompletionEvent> completion_events_;
+    bool completion_event_busy_{};
     std::unordered_map<std::uint32_t, QueueContext> jfc_contexts_;
     std::unordered_map<std::uint32_t, QueueContext> jfr_contexts_;
     std::unordered_map<std::uint32_t, QueueContext> jetty_contexts_;
@@ -359,6 +370,7 @@ class UdmaModel {
     std::vector<bool> link_up_;
     std::uint64_t next_sequence_{1};
     std::uint64_t next_rma_request_{1};
+    std::uint64_t now_ps_{};
     std::uint64_t submitted_{0};
     std::uint64_t completed_{0};
     std::unordered_map<std::uint64_t, Descriptor> pending_;

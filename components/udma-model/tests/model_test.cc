@@ -276,7 +276,8 @@ int main()
     std::vector<std::uint8_t> jfc_context(128, 0);
     store32(jfc_context, 0, static_cast<std::uint32_t>(cq_iova));
     store32(jfc_context, 2 * 4, 9);
-    store32(jfc_context, 4 * 4, 1U << 22); // interrupt every CQE
+    store32(jfc_context, 4 * 4, 2U << 22); // interrupt every two CQEs
+    store32(jfc_context, 5 * 4, 1U << 22); // or after 4 virtual us
     store32(jfc_context, 6 * 4, static_cast<std::uint32_t>(ci_iova >> 6));
     host.Store(jfc_context_iova, jfc_context);
     std::vector<std::uint8_t> create_jfc(32, 0);
@@ -525,6 +526,10 @@ int main()
     assert(send_cqe.size() == 64);
     assert((send_cqe[0] & 6) == 6); // Jetty + owner
     assert(send_cqe[16] == 3);
+    assert(!host.Contains(ceq_iova));
+    official_model.AdvanceTime(3999999);
+    assert(!host.Contains(ceq_iova));
+    official_model.AdvanceTime(4000000);
     const auto& completion_event = host.Load(ceq_iova);
     assert((completion_event[0] & 0x7f) == 7);
     assert(host.irq_pulses == 4);

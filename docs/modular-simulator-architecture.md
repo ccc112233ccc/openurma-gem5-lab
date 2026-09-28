@@ -150,6 +150,18 @@ directions:
 The ns-3-UB backend must implement this same UB-NET boundary. The old mmap
 ring-v4 adapter remains a compatibility path only and is not the target API.
 
+When SimBricks synchronization is negotiated, both the device process and the
+reference switch advance to the minimum of the next input timestamp and the
+next required outbound SYNC timestamp. They do not increment virtual time from
+host loop iterations. The switch test suite exercises this with a second
+three-process `sync=required` contract.
+
+The device core receives time explicitly through `AdvanceTime(picoseconds)`.
+JFC completion-period moderation therefore uses the official encoded
+0/4/16/64/256/1024/4096/16384 microsecond periods in virtual time, independent
+of host scheduling speed. The official MODIFY_JFC context/mask operation can
+change count and period without recreating the queue.
+
 ## Migration sequence
 
 1. Freeze and test `UB-HOST`/`UB-NET` layouts and the simulator-neutral core.

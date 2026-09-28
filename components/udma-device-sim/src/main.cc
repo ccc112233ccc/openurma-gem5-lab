@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -451,12 +452,29 @@ int Run(const Options& options)
 
     while (running.load() && !SimbricksBaseIfInTerminated(&host_if.base) &&
            !SimbricksBaseIfInTerminated(&net_if.base)) {
+        model.AdvanceTime(now);
         bool progress = false;
         while (host.Poll()) progress = true;
         while (network.Poll()) progress = true;
         host_proto::UbHostD2HOutSync(&host_if, now);
         net_proto::UbNetOutSync(&net_if, now);
-        now += options.sync_interval_ps;
+        bool synchronized = false;
+        std::uint64_t next = std::numeric_limits<std::uint64_t>::max();
+        const auto constrain = [&synchronized, &next]
+            (SimbricksBaseIf& interface) {
+                if (!SimbricksBaseIfSyncEnabled(&interface)) return;
+                synchronized = true;
+                next = std::min(next,
+                    SimbricksBaseIfInTimestamp(&interface));
+                next = std::min(next,
+                    SimbricksBaseIfOutNextSync(&interface));
+            };
+        constrain(host_if.base);
+        constrain(net_if.base);
+        if (!synchronized)
+            now += options.sync_interval_ps;
+        else if (next > now && next != std::numeric_limits<std::uint64_t>::max())
+            now = next;
         if (!progress) std::this_thread::yield();
     }
     SimbricksBaseIfClose(&host_if.base);

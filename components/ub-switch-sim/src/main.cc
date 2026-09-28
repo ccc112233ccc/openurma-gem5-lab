@@ -241,7 +241,20 @@ int Run(const Options& options)
             net::UbNetOutSync(&endpoint.interface, now);
         }
         if (terminated) break;
-        now += options.sync_interval_ps;
+        bool synchronized = false;
+        std::uint64_t next = std::numeric_limits<std::uint64_t>::max();
+        for (auto& endpoint : endpoints) {
+            if (!SimbricksBaseIfSyncEnabled(&endpoint.interface.base)) continue;
+            synchronized = true;
+            next = std::min(next,
+                net::UbNetInTimestamp(&endpoint.interface));
+            next = std::min(next,
+                net::UbNetOutNextSync(&endpoint.interface));
+        }
+        if (!synchronized)
+            now += options.sync_interval_ps;
+        else if (next > now && next != std::numeric_limits<std::uint64_t>::max())
+            now = next;
         if (!progress) std::this_thread::yield();
     }
     for (auto& endpoint : endpoints) SimbricksBaseIfClose(&endpoint.interface.base);

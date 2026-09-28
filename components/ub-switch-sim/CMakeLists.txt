@@ -35,8 +35,14 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/tests/process_contract.sh"
                 "$<TARGET_FILE:ub-switch-sim>"
                 "$<TARGET_FILE:ub-net-contract-peer>"
-                "${CMAKE_CURRENT_BINARY_DIR}/contract")
+                "${CMAKE_CURRENT_BINARY_DIR}/contract" off)
+    add_test(NAME ub_switch_synchronized_contract
+        COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/tests/process_contract.sh"
+                "$<TARGET_FILE:ub-switch-sim>"
+                "$<TARGET_FILE:ub-net-contract-peer>"
+                "${CMAKE_CURRENT_BINARY_DIR}/synchronized-contract" required)
     set_tests_properties(ub_switch_process_contract PROPERTIES TIMEOUT 20)
+    set_tests_properties(ub_switch_synchronized_contract PROPERTIES TIMEOUT 20)
 endif()
 
 install(TARGETS ub-switch-sim RUNTIME DESTINATION bin)

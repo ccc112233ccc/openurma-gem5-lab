@@ -4,6 +4,7 @@ set -euo pipefail
 switch_bin="$1"
 peer_bin="$2"
 work="$3"
+sync_mode="${4:-off}"
 mkdir -p "$work"
 rm -f "$work"/*.sock "$work"/*.shm "$work"/*.log
 
@@ -13,9 +14,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$peer_bin" sender "$work/a.sock" "$work/a.shm" >"$work/a.log" 2>&1 &
+"$peer_bin" sender "$work/a.sock" "$work/a.shm" "$sync_mode" >"$work/a.log" 2>&1 &
 sender_pid=$!
-"$peer_bin" receiver "$work/b.sock" "$work/b.shm" >"$work/b.log" 2>&1 &
+"$peer_bin" receiver "$work/b.sock" "$work/b.shm" "$sync_mode" >"$work/b.log" 2>&1 &
 receiver_pid=$!
 
 for _ in $(seq 1 100); do
@@ -23,7 +24,7 @@ for _ in $(seq 1 100); do
     sleep 0.01
 done
 
-"$switch_bin" --sync off \
+"$switch_bin" --sync "$sync_mode" \
     --endpoint "$work/a.sock,0x101" \
     --endpoint "$work/b.sock,0x202" >"$work/switch.log" 2>&1 &
 switch_pid=$!

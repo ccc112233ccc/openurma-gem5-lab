@@ -24,8 +24,8 @@ migrated merely because an old in-gem5 fallback still implements it.
 | WRITE/READ request-response state machines | migrated | WRITE-after-remote-DMA ACK and READ response-to-local-SGE tests |
 | UMMU MAPT permission enforcement | migrated | official entry/table node layouts, range and read/write permission checks; token-protected grants fail closed until wire credentials are modeled |
 | CQE creation and CEQ production | SEND TX/RX migrated | CI check, owner bit, 64-byte CQE, CEQE and vector 2 |
-| completion count moderation | migrated | official JFC count threshold gates CEQ/MSI |
-| completion period moderation | pending | virtual-time timer integration required |
+| completion count moderation | migrated | official JFC count threshold and MODIFY_JFC mask gate CEQ/MSI |
+| completion period moderation | migrated | official 0/4/16/64/256/1024/4096/16384 us encoding driven by adapter-supplied virtual picoseconds |
 | multi-port TP selection | migrated | control-plane round-robin TP-to-port binding |
 | multi-port failover | migrated | UB-NET link-state event and active-TP rebinding test |
 | simulator-neutral UB packet transport and switch | migrated | independent `ub-switch-sim`, EID routing, link-state and bidirectional process contract |
