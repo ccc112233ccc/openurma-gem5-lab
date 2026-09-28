@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Run and time the official-perftest modular dataplane regression matrix."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+from pathlib import Path
+import subprocess
+import time
+
+
+FULL_CASES = [
+    ("send_bw_128_wrap", "send_bw", 128, 128, 16, 16, False),
+    ("send_bw_4096", "send_bw", 4096, 32, 16, 16, False),
+    ("write_lat_128", "write_lat", 128, 8, 1, 1, False),
+    ("read_lat_128", "read_lat", 128, 8, 1, 1, False),
+    ("write_bw_4096_out16", "write_bw", 4096, 64, 16, 16, True),
+    ("read_bw_4096_out16", "read_bw", 4096, 64, 16, 16, True),
+    ("write_bw_65536_frag", "write_bw", 65536, 16, 1, 1, True),
+    ("read_bw_65536_frag", "read_bw", 65536, 16, 1, 1, True),
+    ("write_bw_1m_frag", "write_bw", 1048576, 5, 1, 1, True),
+    ("read_bw_1m_frag", "read_bw", 1048576, 5, 1, 1, True),
+]
+
+SYNC_SMOKE_CASES = [
+    ("send_lat_128_sync", "send_lat", 128, 8, 1, 1, False),
+    ("write_lat_128_sync", "write_lat", 128, 8, 1, 1, False),
+    ("read_lat_128_sync", "read_lat", 128, 8, 1, 1, False),
+    ("send_bw_128_sync", "send_bw", 128, 16, 16, 16, False),
+]
+
+
+def command(verb: str, size: int, iterations: int, post_list: int,
+            cq_mod: int, port: int, server: str | None,
+            bidirectional: bool, dist_sync: bool) -> str:
+    parts = [
+        "LD_LIBRARY_PATH=/lib:/usr/lib", "urma_perftest", verb,
+        "-d", "udma0", "--eid_idx", "0", "--ctp",
+        "-s", str(size), "-P", str(port), "-J", "1", "-I", "64",
+        "-n", str(iterations), "-l", str(post_list), "-Q", str(cq_mod),
+        "-p", "0",
+    ]
+    if dist_sync:
+        parts.insert(0, "OPENURMA_DIST_SYNC=1")
+    if bidirectional:
+        parts.append("-B")
+    if server is not None:
+        parts.extend(["-S", server])
+    return " ".join(parts)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--lab", type=Path, required=True)
+    parser.add_argument("--run-root", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--uart0", type=int, default=3460)
+    parser.add_argument("--uart1", type=int, default=3470)
+    parser.add_argument("--timeout", type=float, default=1800)
+    parser.add_argument(
+        "--suite", choices=("full", "sync-smoke"), default="full",
+        help="full functional stress without a fine-grained fence, or a small synchronized ROI smoke suite",
+    )
+    args = parser.parse_args()
+    args.output.mkdir(parents=True, exist_ok=False)
+    (args.output / "model-manifest.txt").write_text(
+        (args.run_root / "run-manifest.txt").read_text()
+    )
+    suite_started = time.perf_counter()
+    records = []
+    dist_sync = args.suite == "sync-smoke"
+    cases = SYNC_SMOKE_CASES if dist_sync else FULL_CASES
+    for index, (label, verb, size, iterations, post_list, cq_mod,
+                bidirectional) in enumerate(cases):
+        port = 21300 + index
+        server_command = command(verb, size, iterations, post_list, cq_mod,
+                                 port, None, bidirectional, dist_sync)
+        client_command = command(verb, size, iterations, post_list, cq_mod,
+                                 port, "10.0.0.1", bidirectional, dist_sync)
+        raw = args.output / f"{index:02d}-{label}.uart.txt"
+        started = time.perf_counter()
+        result = subprocess.run(
+            ["python3", str(args.lab / "tools/dual_serial_command.py"),
+             "--ports", str(args.uart0), str(args.uart1), "--commands",
+             server_command, client_command, "--timeout", str(args.timeout),
+             "--prompt-kick-after", "1", "--stagger", "1",
+             "--full-output"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        elapsed = time.perf_counter() - started
+        raw.write_text(result.stdout)
+        record = {
+            "case": label, "verb": verb, "size_bytes": size,
+            "iterations": iterations, "post_list": post_list,
+            "cq_mod": cq_mod, "bidirectional": bidirectional,
+            "wall_seconds": elapsed, "returncode": result.returncode,
+            "server_command": server_command,
+            "client_command": client_command,
+            "raw_output": raw.name,
+        }
+        records.append(record)
+        print(f"[{label}] rc={result.returncode} wall={elapsed:.3f}s", flush=True)
+    suite_wall = time.perf_counter() - suite_started
+    report = {
+        "suite": args.suite,
+        "virtual_time_synchronized": dist_sync,
+        "suite_wall_seconds": suite_wall,
+        "cases": records,
+    }
+    (args.output / "report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n"
+    )
+    with (args.output / "results.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=[
+            "case", "verb", "size_bytes", "iterations", "post_list",
+            "cq_mod", "bidirectional", "wall_seconds", "returncode",
+            "raw_output",
+        ], extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(records)
+    print(f"suite_wall_seconds={suite_wall:.3f}")
+    return 0 if all(record["returncode"] == 0 for record in records) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

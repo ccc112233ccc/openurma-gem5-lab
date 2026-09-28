@@ -1,0 +1,81 @@
+From 31e47bfbf0e1f8b22fcfb09df922a425f0f2fb74 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Mon, 28 Sep 2026 21:21:37 +0800
+Subject: [PATCH] Coordinate modular checkpoints and official UMMU lifecycle
+
+---
+ .../gem5_scaffold/configs/single_node_fs_clean.py   | 11 +++++++++++
+ eval/twonode/gem5_scaffold/src/NICTopologySC.cc     | 13 +++++++++++--
+ integration/umdk/vendor/umdk                        |  2 +-
+ 3 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+index 5d25fd7..e34fe89 100644
+--- a/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
++++ b/eval/twonode/gem5_scaffold/configs/single_node_fs_clean.py
+@@ -1051,6 +1051,14 @@ def main():
+                 cause == "simulate() limit reached":
+             continue
+         print(f"[single_node_fs_clean] exited @ tick {m5.curTick()} because {cause}")
++        if cause == "openurma lifecycle sync fence":
++            if not hasattr(root.system, "external_udma"):
++                raise RuntimeError(
++                    "lifecycle synchronization requires the external UDMA adapter"
++                )
++            root.system.external_udma.toggleLifecycleSync()
++            print("[single_node_fs_clean] modular lifecycle synchronization toggled")
++            continue
+         if cause == "adapter sync toggle" and args.adapter_local_sync:
+             print("[single_node_fs_clean] ignored legacy guest sync toggle; "
+                   "adapter synchronization is lifetime-scoped")
+@@ -1068,6 +1076,9 @@ def main():
+             cdir = os.path.join(m5.options.outdir, "cpt")
+             m5.checkpoint(cdir)
+             print(f"[single_node_fs_clean] checkpoint written to {cdir}")
++            if os.environ.get("OPENURMA_EXIT_AFTER_CHECKPOINT", "0") == "1":
++                print("[single_node_fs_clean] stopping at coordinated checkpoint")
++                break
+             continue
+         if cause == "switchcpu" and args.cpu in ("server_o3", "kvm_server_o3"):
+             # NICTopologySC is a SystemC SimObject rather than a gem5
+diff --git a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+index 3ee6e8f..e842970 100644
+--- a/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
++++ b/eval/twonode/gem5_scaffold/src/NICTopologySC.cc
+@@ -1697,7 +1697,13 @@ NICTopologySC::NICTopologySC(sc_core::sc_module_name nm)
+     openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap0, 0x00000b08);
+     openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap1, 0x00042208);
+     openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap2, 0x00009056);
+-    openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap3, 0x00000010);
++    // Advertise the terminate fault model (STALL_MODEL=1).  The standalone
++    // model implements MAPT/SVA translation, but it has no EVENTQ-backed I/O
++    // page-fault replay path.  Advertising the stall model here makes the
++    // stock UMMU driver enable IOPF and then wait on hardware behavior that
++    // does not exist.  Capability bits must describe implemented hardware,
++    // rather than forcing a driver-side workaround.
++    openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap3, 0x00001010);
+     openurma_udma::storeLe32(ummu_regs_.data() + OuUmmuCap5, 0x00000011);
+ 
+     SC_THREAD(timing_dma_worker);
+@@ -1708,7 +1714,10 @@ NICTopologySC::NICTopologySC(sc_core::sc_module_name nm)
+     if (impl_->ethdec)     _wire_rx_drv.bind(impl_->ethdec->in_1);
+ 
+     std::cerr << "[NICTopologySC " << name()
+-              << "] constructed; 38-module TLM topology online\n";
++              << "] constructed; 38-module TLM topology online; UMMU CAP3=0x"
++              << std::hex
++              << openurma_udma::loadLe32(ummu_regs_.data() + OuUmmuCap3)
++              << std::dec << "\n";
+ }
+ 
+ void
+diff --git a/integration/umdk/vendor/umdk b/integration/umdk/vendor/umdk
+index f84b90b..8f27249 160000
+--- a/integration/umdk/vendor/umdk
++++ b/integration/umdk/vendor/umdk
+@@ -1 +1 @@
+-Subproject commit f84b90b8ddd8173b851334f55d332783d248bfc7
++Subproject commit 8f272493e4138cd52cfb3ce11064a07c8d1be49f
+-- 
+2.50.1 (Apple Git-155)
+

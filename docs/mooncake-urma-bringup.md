@@ -10,7 +10,7 @@ ARM64 gem5 full-system guest.
 ## Pinned inputs
 
 - Mooncake: `1a0c0a44214ff61a8a4b2e9d90dfb023dd4703ed`
-- official UMDK: `f84b90b8ddd8173b851334f55d332783d248bfc7`
+- official UMDK: `8f272493e4138cd52cfb3ce11064a07c8d1be49f`
 - build mode: `Release`, `USE_UB=ON`
 - Mooncake binary SHA-256:
   `10e57b04b6fb6151f0a0e3b253fe0f8428888ac0a23a07b7582507208d827b4e`

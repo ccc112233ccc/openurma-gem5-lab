@@ -1,0 +1,91 @@
+# Modular RMA regression
+
+This is the reproducible acceptance matrix for the independent five-process
+topology: two gem5 full-system guests, two standalone UDMA devices, and one
+native ns-3-UB fabric process.  The guests use the official kernel drivers,
+official UMDK UDMA provider, and the complete official `libummu.so.1`.
+
+## Fast functional gate
+
+The full matrix restores a coordinated shell-ready checkpoint and runs with
+`--no-sync`.
+This removes Linux boot from every test and avoids paying a 100 ns conservative
+barrier while checking protocol and device correctness.  ns-3 still executes
+serialization, queueing, routing, and delivery events at modeled timestamps;
+the reported URMA latency values are not claimed as synchronized timing data.
+
+```bash
+./lab start --profile fast --provider official \
+  --network-backend modular-ns3ub --no-sync \
+  --restore-checkpoint shell-ready-rma
+./lab sync
+./lab rma-regression experiments/rma-regression
+```
+
+Measured on 2026-09-28 on the M2 development host:
+
+| Case | Bytes | Iterations / post list | Wall time | Result |
+|---|---:|---:|---:|---:|
+| `send_bw_128_wrap` | 128 | 128 / 16 | 18.947 s | PASS |
+| `send_bw_4096` | 4 KiB | 32 / 16 | 11.611 s | PASS |
+| `write_lat_128` | 128 | 8 / 1 | 10.029 s | PASS |
+| `read_lat_128` | 128 | 8 / 1 | 9.398 s | PASS |
+| `write_bw_4096_out16` | 4 KiB | 64 / 16 | 11.527 s | PASS |
+| `read_bw_4096_out16` | 4 KiB | 64 / 16 | 11.506 s | PASS |
+| `write_bw_65536_frag` | 64 KiB | 16 / 1 | 15.202 s | PASS |
+| `read_bw_65536_frag` | 64 KiB | 16 / 1 | 15.559 s | PASS |
+| `write_bw_1m_frag` | 1 MiB | 5 / 1 | 37.437 s | PASS |
+| `read_bw_1m_frag` | 1 MiB | 5 / 1 | 37.911 s | PASS |
+
+All ten cases passed in **179.138 seconds**.  `send_bw_128_wrap` advances the
+SQ producer/consumer indices through multiple ring wraps.  The 4 KiB
+bidirectional cases maintain 16 outstanding WQEs.  The 64 KiB and 1 MiB cases
+exercise asynchronous multi-packet READ/WRITE fragmentation in both
+directions.
+
+Large transfers originally exposed two hardware-model bugs.  UDMA tried to
+push every fragment synchronously and could deadlock on a full transport ring;
+it now retains a pending transfer and drains fragments asynchronously.  The
+ns-3 ingress adapter also injected every fragment at one timestamp and could
+overflow the finite switch queue; ingress is now paced by the configured
+400 Gbit/s serialization time.
+
+## Checkpoint and profiling
+
+`./lab checkpoint NAME` stops both guests at the same pseudo operation, waits
+for both architectural checkpoints, drains both UDMA processes, and stores the
+two device states beside the gem5 states.  Creating `post-rma-verified` took
+19 seconds.  A restored run validates the live `udma0 ACTIVE` state instead of
+depending on boot messages absent from a fresh UART log.
+
+Normal shutdown emits three boundary profiles:
+
+- `[UB_HOST_PROFILE]`: host messages, polling, synchronization and backpressure.
+- `[UDMA_PROFILE]`: wall/virtual time, loops, sleeps, SQ doorbells, DMA reads,
+  decoded WQEs, fragments, completions and rejects.
+- `[NS3_UB_NET_STATS]`: forwarded/delivered packets and bytes, virtual time,
+  synchronization steps and backpressure.
+
+## Conservative synchronization status
+
+The lifecycle protocol supports a collective PREPARE/COMMIT fence with an
+explicit enable or disable target.  The enable fence was observed at both
+gem5/UDMA boundaries and ns-3 in a five-process run.  With AtomicCPU and the
+default 100 ns lookahead, however, synchronized execution advances only about
+one simulated microsecond per host second: the CPU event queue must repeatedly
+stop at the safe horizon even when no packet is present.  Replacing adapter
+sleeps with spinning increased host loops dramatically without increasing
+virtual-time progress, confirming that the bottleneck is the fine-grained CPU
+horizon, not polling sleep.
+
+For that reason the full correctness matrix uses checkpoint plus `--no-sync`.
+Use the synchronized smoke suite only for small timing-valid samples:
+
+```bash
+./lab rma-regression --sync-smoke experiments/rma-sync-smoke
+```
+
+The disable-fence implementation builds and passes process-level protocol
+tests, but its second guest marker could not be reached within the practical
+AtomicCPU timeout after enabling 100 ns synchronization.  It should not yet be
+treated as an end-to-end acceptance result.

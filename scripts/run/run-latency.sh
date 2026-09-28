@@ -117,13 +117,17 @@ transcript=$(mktemp "${TMPDIR:-/tmp}/openurma-latency.XXXXXX")
 trap 'rm -f "$transcript"' EXIT
 
 set +e
+wall_started_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
 ou_exec python3 "$lab/tools/dual_serial_command.py" \
     --ports "$uart0" "$uart1" \
     --commands "$server_command" "$client_command" \
     --stagger "$stagger" --timeout "$timeout" --prompt-kick-after 1 --full-output \
     >"$transcript" 2>&1
 command_rc=$?
+wall_finished_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
 set -e
+wall_seconds=$(awk -v start="$wall_started_ns" -v finish="$wall_finished_ns" \
+    'BEGIN { printf "%.6f", (finish - start) / 1000000000 }')
 
 if [[ -n "$raw_output" ]]; then
     mkdir -p "$(dirname "$raw_output")"
@@ -134,12 +138,13 @@ if (( command_rc != 0 )); then
     exit "$command_rc"
 fi
 
-rows=$(awk -v profile="$profile" -v uart0="$uart0" -v uart1="$uart1" -v expected="$size" '
+rows=$(awk -v profile="$profile" -v uart0="$uart0" -v uart1="$uart1" \
+    -v expected="$size" -v wall="$wall_seconds" '
     /^--- UART [0-9]+ ---$/ { uart=$3; next }
     $1 == expected && $1 ~ /^[0-9]+$/ && NF >= 11 {
         node=(uart == uart0 ? "node0" : (uart == uart1 ? "node1" : "unknown"))
-        row[node]=sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s", \
-            profile, node, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        row[node]=sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s", \
+            profile, node, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, wall)
     }
     END {
         if ("node0" in row) print row["node0"]
@@ -154,10 +159,11 @@ fi
 
 if [[ "$output_format" == human ]]; then
     echo "Running synchronized send_lat: profile=$profile measured_samples=$samples size=$size bytes port=$port roi_stats=$roi_stats"
+    echo "Host wall time: ${wall_seconds} s"
     echo "node0 is the server; node1 is the client"
     cat "$transcript"
     echo
     echo "Parsed result (tab-separated):"
 fi
-printf '%s\n' $'profile\tnode\tbytes\titerations\tt_min_us\tt_max_us\tt_median_us\tt_avg_us\tt_stdev_us\tp99_us\tp99_9_us\tp99_99_us\tp99_999_us'
+printf '%s\n' $'profile\tnode\tbytes\titerations\tt_min_us\tt_max_us\tt_median_us\tt_avg_us\tt_stdev_us\tp99_us\tp99_9_us\tp99_99_us\tp99_999_us\thost_wall_seconds'
 printf '%s\n' "$rows"

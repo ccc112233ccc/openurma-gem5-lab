@@ -1,0 +1,63 @@
+From 387db831795fcc87f194a755b5f4be3b89864c61 Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Mon, 28 Sep 2026 21:21:25 +0800
+Subject: [PATCH] Support modular lifecycle fences and tap checkpoints
+
+---
+ src/dev/net/ethertap.cc | 16 ++++++++++++----
+ src/sim/pseudo_inst.cc  |  5 +++++
+ 2 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/src/dev/net/ethertap.cc b/src/dev/net/ethertap.cc
+index c66723b55..2be7060d9 100644
+--- a/src/dev/net/ethertap.cc
++++ b/src/dev/net/ethertap.cc
+@@ -135,10 +135,14 @@ EtherTapBase::unserialize(CheckpointIn &cp)
+     bool tapevent_present;
+     UNSERIALIZE_SCALAR(tapevent_present);
+     if (tapevent_present) {
+-        event = new TapEvent(this, 0, 0);
+-        event->unserialize(cp);
+-        if (event->queued())
+-            pollQueue.schedule(event);
++        // A host poll event cannot survive a process restart: its fd belongs
++        // to the old EtherTap socket.  The newly constructed tap has already
++        // installed (or will install) a poll event for its current fd.  Read
++        // the serialized event solely to consume the checkpoint fields and
++        // discard it instead of replacing the live event with a stale fd.
++        auto *stale_event = new TapEvent(this, 0, 0);
++        stale_event->unserialize(cp);
++        delete stale_event;
+     }
+ }
+ 
+@@ -312,6 +316,10 @@ EtherTapStub::unserialize(CheckpointIn &cp)
+     EtherTapBase::unserialize(cp);
+ 
+     UNSERIALIZE_SCALAR(socket);
++    // The serialized descriptor belonged to the checkpointing process.  A
++    // restored stub must accept a fresh connection instead of treating that
++    // integer as an already-live socket (and closing the newly accepted fd).
++    socket = -1;
+     UNSERIALIZE_SCALAR(buffer_used);
+     UNSERIALIZE_SCALAR(frame_len);
+ }
+diff --git a/src/sim/pseudo_inst.cc b/src/sim/pseudo_inst.cc
+index a22e79036..1b8845a62 100644
+--- a/src/sim/pseudo_inst.cc
++++ b/src/sim/pseudo_inst.cc
+@@ -484,6 +484,11 @@ togglesync(ThreadContext *tc)
+     // perftest marker, so treat it as a compatibility no-op. It must neither
+     // exit to Python nor change adapter state. Stock dist-gem5 behavior is
+     // preserved when the explicit adapter environment flag is absent.
++    const char *lifecycle_sync = std::getenv("OPENURMA_LIFECYCLE_SYNC");
++    if (lifecycle_sync && *lifecycle_sync && *lifecycle_sync != '0') {
++        exitSimLoop("openurma lifecycle sync fence");
++        return;
++    }
+     const char *adapter_sync = std::getenv("OPENURMA_ADAPTER_LOCAL_SYNC");
+     if (adapter_sync && *adapter_sync && *adapter_sync != '0') {
+         return;
+-- 
+2.50.1 (Apple Git-155)
+

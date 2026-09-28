@@ -22,7 +22,7 @@ EXTRA_LIBRARY_DIRS="${EXTRA_LIBRARY_DIRS:-}"
 ARM64_SYSROOT="${OPENURMA_ARM64_SYSROOT:-}"
 EXTRA_MODULES="${EXTRA_MODULES:-}"
 STOCK_UDMA_PROVIDER="${STOCK_UDMA_PROVIDER:-}"
-UMMU_SHIM="${UMMU_SHIM:-}"
+UMMU_LIBRARY="${UMMU_LIBRARY:-${UMMU_SHIM:-}}"
 UBAGG_PROVIDER="${UBAGG_PROVIDER:-}"
 UBAGG_CLI="${UBAGG_CLI:-}"
 LIBTPSA="${LIBTPSA:-}"
@@ -48,8 +48,8 @@ Optional environment:
   STOCK_UDMA_PROVIDER
                  stock liburma-udma.so to package alongside the legacy
                  OpenURMA provider (auto-detected in ARM_BUILD when present)
-  UMMU_SHIM      simulation libummu.so.1 paired with STOCK_UDMA_PROVIDER
-                 (auto-detected next to ARM_BUILD when present)
+  UMMU_LIBRARY   official libummu.so.1 paired with STOCK_UDMA_PROVIDER
+                 (legacy UMMU_SHIM is accepted as a fallback)
   UBAGG_PROVIDER official liburma_ubagg.so (auto-detected in ARM_BUILD)
   UBAGG_CLI      official ubagg_cli executable (auto-detected in ARM_BUILD)
   LIBTPSA        official UVS control-plane library (auto-detected in ARM_BUILD)
@@ -109,7 +109,18 @@ if busybox_applets="$($BUSYBOX_ARM64 --list 2>/dev/null)"; then
     done
 fi
 
-kernel_release="$(make -s -C "$KSRC" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" kernelrelease)"
+if [[ -n "${KERNEL_RELEASE:-}" ]]; then
+    kernel_release=$KERNEL_RELEASE
+elif [[ -f "$KSRC/include/config/auto.conf" ]]; then
+    kernel_release="$(make -s -C "$KSRC" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" kernelrelease)"
+elif [[ -r "$KERNEL_BUNDLE_DIR/kernelrelease.txt" ]]; then
+    # A cleaned source tree may retain only the immutable kernel bundle.  The
+    # release belongs to the bundled vmlinux/modules and is therefore a more
+    # reliable packaging input than regenerating configuration in-place.
+    kernel_release="$(sed -n '1p' "$KERNEL_BUNDLE_DIR/kernelrelease.txt")"
+else
+    die "kernel release unavailable: build KSRC or set KERNEL_RELEASE"
+fi
 case "$kernel_release" in
     6.6*) ;;
     *) die "kernel release '$kernel_release' is not OLK-6.6; current UMDK uses the TLV uburma ABI" ;;
@@ -168,13 +179,15 @@ fi
 if [[ -z "$STOCK_UDMA_PROVIDER" && -f "$ARM_BUILD/urma/hw/udma/liburma-udma.so" ]]; then
     STOCK_UDMA_PROVIDER="$ARM_BUILD/urma/hw/udma/liburma-udma.so"
 fi
-if [[ -z "$UMMU_SHIM" && -f "${ARM_BUILD}-ummu-shim/libummu.so.1" ]]; then
-    UMMU_SHIM="${ARM_BUILD}-ummu-shim/libummu.so.1"
+if [[ -z "$UMMU_LIBRARY" && -f "${ARM_BUILD}-ummu-official/libummu.so.1" ]]; then
+    UMMU_LIBRARY="${ARM_BUILD}-ummu-official/libummu.so.1"
+elif [[ -z "$UMMU_LIBRARY" && -f "${ARM_BUILD}-ummu-shim/libummu.so.1" ]]; then
+    UMMU_LIBRARY="${ARM_BUILD}-ummu-shim/libummu.so.1"
 fi
-if [[ -n "$STOCK_UDMA_PROVIDER" || -n "$UMMU_SHIM" ]]; then
+if [[ -n "$STOCK_UDMA_PROVIDER" || -n "$UMMU_LIBRARY" ]]; then
     [[ -f "$STOCK_UDMA_PROVIDER" ]] ||
         die "stock UDMA provider not found: $STOCK_UDMA_PROVIDER"
-    [[ -f "$UMMU_SHIM" ]] || die "simulation UMMU shim not found: $UMMU_SHIM"
+    [[ -f "$UMMU_LIBRARY" ]] || die "libummu not found: $UMMU_LIBRARY"
 fi
 
 for f in "$KSRC/vmlinux" "$UBCORE_KO" "$UBURMA_KO" "$IPV6_KO" "$OPENURMA_KO" \
@@ -184,7 +197,7 @@ done
 if [[ -n "$STOCK_UDMA_PROVIDER" ]]; then
     is_arm64_elf "$STOCK_UDMA_PROVIDER" ||
         die "not an AArch64 ELF artifact: $STOCK_UDMA_PROVIDER"
-    is_arm64_elf "$UMMU_SHIM" || die "not an AArch64 ELF artifact: $UMMU_SHIM"
+    is_arm64_elf "$UMMU_LIBRARY" || die "not an AArch64 ELF artifact: $UMMU_LIBRARY"
 fi
 if [[ -n "$UBAGG_PROVIDER" ]]; then
     is_arm64_elf "$UBAGG_PROVIDER" || die "not an AArch64 ELF artifact: $UBAGG_PROVIDER"
@@ -301,6 +314,12 @@ M5OPS_DISPATCH_HEADER="$LAB_DIR/tools/ou-m5ops.h"
 is_arm64_elf "$STAGE/usr/bin/ou-dist-sync" || die "ou-dist-sync is not AArch64"
 is_static_elf "$STAGE/usr/bin/ou-dist-sync" || die "ou-dist-sync is not static"
 
+"$CC" -O2 -static -Wall -I"$GEM5_ROOT/include" \
+    -I"$GEM5_ROOT/util/m5/src" -I"$LAB_DIR/tools" \
+    -o "$STAGE/usr/bin/ou-checkpoint" "$LAB_DIR/tools/ou-checkpoint.c" "$M5_LIB"
+is_arm64_elf "$STAGE/usr/bin/ou-checkpoint" || die "ou-checkpoint is not AArch64"
+is_static_elf "$STAGE/usr/bin/ou-checkpoint" || die "ou-checkpoint is not static"
+
 # A distinct switchcpu pseudo-op lets the host configuration replace the
 # boot-fast AtomicSimpleCPUs with the configured ArmO3 CPUs at an explicit
 # guest-visible boundary.  It is not a timer and does not guess when boot is
@@ -339,7 +358,7 @@ fi
 available_providers=legacy
 if [[ -n "$STOCK_UDMA_PROVIDER" ]]; then
     cp -L "$STOCK_UDMA_PROVIDER" "$STAGE/lib/urma/liburma-udma.so"
-    cp -L "$UMMU_SHIM" "$STAGE/lib/libummu.so.1"
+    cp -L "$UMMU_LIBRARY" "$STAGE/lib/libummu.so.1"
     chmod 0755 "$STAGE/lib/urma/liburma-udma.so" "$STAGE/lib/libummu.so.1"
     available_providers="$available_providers udma"
 fi
@@ -409,8 +428,8 @@ for extra_lib_dir in $EXTRA_LIBRARY_DIRS; do
     [[ -d "$extra_lib_dir" ]] || die "EXTRA_LIBRARY_DIRS entry not found: $extra_lib_dir"
     SEARCH_DIRS+=("$extra_lib_dir")
 done
-if [[ -n "$UMMU_SHIM" ]]; then
-    SEARCH_DIRS+=("$(dirname "$UMMU_SHIM")")
+if [[ -n "$UMMU_LIBRARY" ]]; then
+    SEARCH_DIRS+=("$(dirname "$UMMU_LIBRARY")")
 fi
 
 locate_library() {
@@ -532,7 +551,7 @@ sha256_file() {
     if [[ -n "$UBAGG_PROVIDER" ]]; then
         printf ' ubagg_cli ou-ubagg-topology'
     fi
-    printf ' k_smoke k_dataplane twonode_write ou-dist-sync ou-cpu-switch ou-enable-sync ou-net-up ou-help ou-status ou-smoke ou-dataplane ou-peer-server ou-peer-client ou-lat-server ou-lat-client'
+    printf ' k_smoke k_dataplane twonode_write ou-dist-sync ou-checkpoint ou-cpu-switch ou-enable-sync ou-net-up ou-help ou-status ou-smoke ou-dataplane ou-peer-server ou-peer-client ou-lat-server ou-lat-client'
     for extra in $EXTRA_BINS; do printf ' %s' "$(basename "$extra")"; done
     printf '\n'
     extra_index=0
@@ -582,6 +601,8 @@ sha256_file() {
     printf 'uburma_module_sha256=%s\n' "$(sha256_file "$UBURMA_KO")"
     printf 'dist_sync_source_path=%s\n' "$LAB_DIR/tools/ou-dist-sync.c"
     printf 'dist_sync_source_sha256=%s\n' "$(sha256_file "$LAB_DIR/tools/ou-dist-sync.c")"
+    printf 'checkpoint_source_path=%s\n' "$LAB_DIR/tools/ou-checkpoint.c"
+    printf 'checkpoint_source_sha256=%s\n' "$(sha256_file "$LAB_DIR/tools/ou-checkpoint.c")"
     printf 'cpu_switch_source_path=%s\n' "$LAB_DIR/tools/ou-cpu-switch.c"
     printf 'cpu_switch_source_sha256=%s\n' "$(sha256_file "$LAB_DIR/tools/ou-cpu-switch.c")"
     printf 'm5ops_dispatch_source_path=%s\n' "$M5OPS_DISPATCH_HEADER"
@@ -589,8 +610,8 @@ sha256_file() {
     if [[ -n "$STOCK_UDMA_PROVIDER" ]]; then
         printf 'stock_udma_provider_path=%s\n' "$STOCK_UDMA_PROVIDER"
         printf 'stock_udma_provider_sha256=%s\n' "$(sha256_file "$STOCK_UDMA_PROVIDER")"
-        printf 'ummu_shim_path=%s\n' "$UMMU_SHIM"
-        printf 'ummu_shim_sha256=%s\n' "$(sha256_file "$UMMU_SHIM")"
+        printf 'ummu_library_path=%s\n' "$UMMU_LIBRARY"
+        printf 'ummu_library_sha256=%s\n' "$(sha256_file "$UMMU_LIBRARY")"
     fi
 } > "$manifest"
 

@@ -2,6 +2,7 @@
 from m5.objects.Device import DmaDevice
 from m5.objects.Gic import ArmInterruptPin
 from m5.params import NULL, Param, RequestPort
+from m5.util.pybind import PyBindMethod
 
 
 class UbHostAdapter(DmaDevice):
@@ -14,6 +15,7 @@ class UbHostAdapter(DmaDevice):
     type = "UbHostAdapter"
     cxx_class = "gem5::UbHostAdapter"
     cxx_header = "ub_host_adapter/UbHostAdapter.hh"
+    cxx_exports = [PyBindMethod("toggleLifecycleSync")]
 
     pio_addr = Param.Addr("Device MMIO base")
     pio_size = Param.Addr(0x10000, "Device MMIO aperture size")
@@ -22,6 +24,9 @@ class UbHostAdapter(DmaDevice):
     msi = RequestPort("Port for device-originated MSI writes")
     poll_interval = Param.Latency("1us", "Idle device-message poll interval")
     sync = Param.Bool(False, "Enable conservative UB-HOST synchronization")
+    lifecycle_sync = Param.Bool(
+        False, "Boot freely and enable synchronization at a drained lifecycle fence"
+    )
     link_latency = Param.Latency("50ns", "One-way UB-HOST boundary latency")
     sync_interval = Param.Latency("50ns", "Maximum UB-HOST null-message gap")
     interrupt_misc = Param.ArmInterruptPin(NULL, "UBASE misc interrupt")

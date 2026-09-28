@@ -19,6 +19,8 @@
 /*.host.log
 /sweeps/
 /*.raw.txt
+/checkpoints/
+/experiments/
 
 # Generated presentation output. Keep the current AICO plan and generator.
 /presentation-aico/output/

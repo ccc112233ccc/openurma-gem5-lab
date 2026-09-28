@@ -7,6 +7,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <iosfwd>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -154,9 +155,27 @@ class UdmaModel {
     // Advance device virtual time in picoseconds. Timed hardware behavior is
     // driven only through this method; the model never reads host wall time.
     void AdvanceTime(std::uint64_t now_ps);
+    bool IsQuiescent() const;
+    void RebaseTime(std::uint64_t now_ps = 0);
+    bool SaveState(std::ostream& output) const;
+    bool LoadState(std::istream& input);
 
     std::uint64_t submitted() const { return submitted_; }
     std::uint64_t completed() const { return completed_; }
+    std::uint64_t mmio_writes() const { return mmio_writes_; }
+    std::uint64_t jetty_mmio_writes() const { return jetty_mmio_writes_; }
+    std::uint64_t sq_doorbells() const { return sq_doorbells_; }
+    std::uint64_t sq_dma_reads() const { return sq_dma_reads_; }
+    std::uint64_t sq_wqes() const { return sq_wqes_; }
+    std::uint64_t sq_completions() const { return sq_completions_; }
+    std::uint64_t sq_depth_rejects() const { return sq_depth_rejects_; }
+    std::uint64_t sq_decode_rejects() const { return sq_decode_rejects_; }
+    std::uint64_t unknown_queue_writes() const { return unknown_queue_writes_; }
+    std::uint64_t last_unknown_queue_offset() const
+    {
+        return last_unknown_queue_offset_;
+    }
+    std::uint64_t ubase_errors() const { return ubase_errors_; }
     std::size_t jfc_count() const { return jfc_contexts_.size(); }
     std::size_t jfr_count() const { return jfr_contexts_.size(); }
     std::size_t jetty_count() const { return jetty_contexts_.size(); }
@@ -400,6 +419,18 @@ class UdmaModel {
     std::uint64_t now_ps_{};
     std::uint64_t submitted_{0};
     std::uint64_t completed_{0};
+    // Aggregate fast-path diagnostics.  These are deliberately observational
+    // (not architected state), so checkpoint compatibility is unaffected.
+    std::uint64_t mmio_writes_{0};
+    std::uint64_t jetty_mmio_writes_{0};
+    std::uint64_t sq_doorbells_{0};
+    std::uint64_t sq_dma_reads_{0};
+    std::uint64_t sq_wqes_{0};
+    std::uint64_t sq_completions_{0};
+    std::uint64_t sq_depth_rejects_{0};
+    std::uint64_t sq_decode_rejects_{0};
+    std::uint64_t unknown_queue_writes_{0};
+    std::uint64_t last_unknown_queue_offset_{0};
     std::unordered_map<std::uint64_t, Descriptor> pending_;
     std::deque<Frame> receive_frames_;
     bool receive_busy_{};

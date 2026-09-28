@@ -196,8 +196,10 @@ change count and period without recreating the queue.
    end to end in the explicit modular mode.
 4. Connect ns-3-UB at the frame boundary and remove transaction shortcuts.
    **UB-NET process contracts, explicit full-system launcher cutover, and
-   tick-zero five-process synchronization are complete; checkpoint-assisted
-   synchronized workload validation remains.**
+   lifecycle-fenced five-process synchronization, coordinated checkpointing,
+   and the timed modular SEND/READ/WRITE regression are implemented.  The
+   enable fence and all functional data paths are verified; an end-to-end
+   disable-fence test is still impractical with AtomicCPU at 100 ns lookahead.**
 5. Add a QEMU adapter that implements the same `UB-HOST` protocol; the device
    and network processes remain unchanged.
 6. Remove the duplicated hardware behavior from `NICTopologySC` only after

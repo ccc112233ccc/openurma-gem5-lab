@@ -20,6 +20,7 @@ Profiles:
   --profile fast|kvm|server|udma400|legacy
                                 OPENURMA_DUAL_PROFILE (default: fast;
                                 fast is the AtomicSimpleCPU functional path)
+  --restore-checkpoint NAME     restore coordinated state from checkpoints/NAME
 
 CPU, cache, and memory:
   --cpu-mode MODE               OPENURMA_CPU_MODE (atomic_fast is portable;
@@ -142,9 +143,10 @@ UB link:
   --peer-latency-ns NS          OPENURMA_PEER_LATENCY_NS
   --sync-quantum-ns NS          OPENURMA_SYNC_QUANTUM_NS (default: lookahead)
   --sync                        force inter-simulator virtual-time sync on
+  --roi-sync                    boot freely, then enable sync at a drained fence
   --no-sync                     force inter-simulator virtual-time sync off
-                                OPENURMA_SYNC=(auto|on|off; default: auto;
-                                off for KVM CPUs, on otherwise)
+                                OPENURMA_SYNC=(auto|on|roi|off; default: auto;
+                                roi for modular Atomic, off for KVM)
   --sync-mode MODE              OPENURMA_SYNC_MODE
                                 mechanism used when synchronization is on
                                 (global-barrier|adapter-local; default:
@@ -302,6 +304,7 @@ cli_udma_poll_interval=""
 cli_udma_iotlb_entries=""
 cli_dma_max_outstanding=""
 cli_provider=""
+restore_checkpoint="${OPENURMA_RESTORE_CHECKPOINT:-}"
 print_config=0
 
 need_value() {
@@ -511,6 +514,7 @@ while (( $# > 0 )); do
         --sync-quantum-ns) need_value "$@"; cli_sync_quantum_ns=$2; shift 2 ;;
         --sync-quantum-ns=*) cli_sync_quantum_ns=${1#*=}; shift ;;
         --sync) cli_sync=on; shift ;;
+        --roi-sync) cli_sync=roi; shift ;;
         --no-sync) cli_sync=off; shift ;;
         --sync-mode) need_value "$@"; cli_sync_mode=$2; shift 2 ;;
         --sync-mode=*) cli_sync_mode=${1#*=}; shift ;;
@@ -548,6 +552,8 @@ while (( $# > 0 )); do
         --dma-max-outstanding=*) cli_dma_max_outstanding=${1#*=}; shift ;;
         --provider) need_value "$@"; cli_provider=$2; shift 2 ;;
         --provider=*) cli_provider=${1#*=}; shift ;;
+        --restore-checkpoint) need_value "$@"; restore_checkpoint=$2; shift 2 ;;
+        --restore-checkpoint=*) restore_checkpoint=${1#*=}; shift ;;
         --print-config) print_config=1; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; (( $# == 0 )) || die "unexpected positional argument: $1" ;;
@@ -1132,24 +1138,46 @@ fi
 
 case "$sync_request" in
     auto)
-        case "$cpu_mode" in
-            kvm|kvm_server_o3) sync_enabled=0 ;;
-            *) sync_enabled=1 ;;
-        esac
+        if [[ "$network_backend" == modular-ns3ub ]]; then
+            case "$cpu_mode" in
+                kvm|kvm_server_o3) sync_enabled=0; lifecycle_sync_enabled=0 ;;
+                *) sync_enabled=0; lifecycle_sync_enabled=1 ;;
+            esac
+        else
+            case "$cpu_mode" in
+                kvm|kvm_server_o3) sync_enabled=0 ;;
+                *) sync_enabled=1 ;;
+            esac
+            lifecycle_sync_enabled=0
+        fi
         ;;
-    on|1|true|yes) sync_enabled=1 ;;
-    off|0|false|no) sync_enabled=0 ;;
-    *) die "OPENURMA_SYNC must be auto, on, or off" ;;
+    on|1|true|yes) sync_enabled=1; lifecycle_sync_enabled=0 ;;
+    roi|lifecycle) sync_enabled=0; lifecycle_sync_enabled=1 ;;
+    off|0|false|no) sync_enabled=0; lifecycle_sync_enabled=0 ;;
+    *) die "OPENURMA_SYNC must be auto, on, roi, or off" ;;
 esac
-if (( sync_enabled )); then
+if (( lifecycle_sync_enabled )); then
+    [[ "$network_backend" == modular-ns3ub ]] ||
+        die "ROI lifecycle synchronization requires --network-backend modular-ns3ub"
+    synchronization=lifecycle
+elif (( sync_enabled )); then
     synchronization=enabled
 else
     synchronization=disabled
 fi
 
 lab_host="$(cd "$script_dir/../.." && pwd)"
-container="$OPENURMA_CONTAINER"
 lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$lab_host")}"
+checkpoint_root=""
+if [[ -n "$restore_checkpoint" ]]; then
+    case "$restore_checkpoint" in
+        *[!A-Za-z0-9._-]*|.|..) die "checkpoint name must use letters, digits, '.', '_' or '-'" ;;
+    esac
+    checkpoint_root="$lab/checkpoints/$restore_checkpoint"
+    ou_exec test -r "$checkpoint_root/run-manifest.txt" ||
+        die "checkpoint does not exist: checkpoints/$restore_checkpoint"
+fi
+container="$OPENURMA_CONTAINER"
 gem5="${OPENURMA_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
 m5_path="${OPENURMA_M5_PATH:-$lab/system}"
 kernel="${OPENURMA_KERNEL:-$lab/artifacts/kernel/vmlinux}"
@@ -1598,6 +1626,8 @@ peer_latency_ns=$peer_latency_ns
 sync_quantum_ns=$sync_quantum_ns
 sync_request=$sync_request
 virtual_time_synchronization=$synchronization
+lifecycle_sync=$lifecycle_sync_enabled
+restore_checkpoint=${restore_checkpoint:-none}
 sync_mode=$sync_mode
 ub_port_count=$ub_port_count
 ub_transport=$ub_transport
@@ -1823,19 +1853,26 @@ if [[ "$network_backend" == modular-ns3ub ]]; then
         modular_sync_mode=off
     fi
     for ((node = 0; node < node_count; ++node)); do
+        udma_args=(
+            --host-socket "${host_socket_paths[$node]}"
+            --net-socket "${net_socket_paths[$node]}"
+            --shm "${udma_shm_paths[$node]}"
+            --sync "$modular_sync_mode"
+            --host-link-latency-ps "$((external_udma_host_latency_ns * 1000))"
+            --net-link-latency-ps "$((peer_latency_ns * 1000))"
+            --sync-interval-ps "$((sync_quantum_ns * 1000))"
+            --eid "$((0x100 + node))" --ports "$ub_port_count"
+        )
+        (( lifecycle_sync_enabled == 0 )) || udma_args+=(--lifecycle-sync)
+        if [[ -n "$checkpoint_root" ]]; then
+            udma_args+=(--state-in "$checkpoint_root/udma-node$node.state")
+        fi
+        udma_args+=(--state-out "$run_root/udma-node$node/state.bin")
         ou_exec_detached \
             bash "$lab/tools/run-background.sh" \
             "$run_root/udma-node$node/udma.pid" \
             "$run_root/udma-node$node/udma.log" \
-            "$udma_device_binary" \
-            --host-socket "${host_socket_paths[$node]}" \
-            --net-socket "${net_socket_paths[$node]}" \
-            --shm "${udma_shm_paths[$node]}" \
-            --sync "$modular_sync_mode" \
-            --host-link-latency-ps "$((external_udma_host_latency_ns * 1000))" \
-            --net-link-latency-ps "$((peer_latency_ns * 1000))" \
-            --sync-interval-ps "$((sync_quantum_ns * 1000))" \
-            --eid "$((0x100 + node))" --ports "$ub_port_count"
+            "$udma_device_binary" "${udma_args[@]}"
     done
     for node_socket in "${host_socket_paths[@]}" "${net_socket_paths[@]}"; do
         for _ in $(seq 1 100); do
@@ -1860,6 +1897,7 @@ if [[ "$network_backend" == modular-ns3ub ]]; then
         --switch-delay-ps "$switch_delay_ps"
         --rate-gbps "$peer_link_rate_gbps" --sync "$modular_sync_mode"
         --sync-interval-ps "$((sync_quantum_ns * 1000))")
+    (( lifecycle_sync_enabled == 0 )) || ub_switch_args+=(--lifecycle-sync)
     for ((node = 0; node < node_count; ++node)); do
         ub_switch_args+=(--endpoint
             "${net_socket_paths[$node]},$((0x100 + node))")
@@ -1993,14 +2031,20 @@ launch_node() {
     if [[ "$network_backend" == modular-ns3ub ]]; then
         external_udma_socket=${host_socket_paths[$node]}
     fi
+    if [[ -n "$checkpoint_root" ]]; then
+        sync_args+=(--restore-from="$checkpoint_root/node$node-cpt")
+    fi
     ou_exec_detached_env \
         "M5_PATH=$m5_path" \
         "OPENURMA_PIPE_DATA=$pipe_data" \
         "OPENURMA_TRACE_PACKETS=$packet_trace" \
         "OPENURMA_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
+        "OPENURMA_LIFECYCLE_SYNC=$lifecycle_sync_enabled" \
+        "OPENURMA_EXIT_AFTER_CHECKPOINT=1" \
         "OPENURMA_UDMA_HOST_SOCKET=$external_udma_socket" \
         "OPENURMA_UDMA_HOST_POLL_INTERVAL=$external_udma_poll_interval" \
         "OPENURMA_UDMA_HOST_SYNC=$sync_enabled" \
+        "OPENURMA_UDMA_HOST_LIFECYCLE_SYNC=$lifecycle_sync_enabled" \
         "OPENURMA_UDMA_HOST_LINK_LATENCY=${external_udma_host_latency_ns}ns" \
         "OPENURMA_UDMA_HOST_SYNC_INTERVAL=${sync_quantum_ns}ns" \
         "OPENURMA_UDMA_HOST_PIO_LATENCY=$((2 * external_udma_host_latency_ns))ns" \
@@ -2178,7 +2222,9 @@ echo "  UB link model: ${ub_port_count} physical port(s), ${peer_link_rate_gbps}
 echo "  UB topology: $peer_topology (source-to-destination port map: ${peer_port_map:-identity})"
 echo "  UB egress selection: $peer_port_selection"
 echo "  UB switch service delay: $peer_switch_delay"
-if (( ! sync_enabled )); then
+if (( lifecycle_sync_enabled )); then
+    echo "  synchronization: free boot, then generic drain/fence and per-link conservative time"
+elif (( ! sync_enabled )); then
     echo "  synchronization: disabled (${sync_request}; CPU mode $cpu_mode)"
 elif [[ "$sync_mode" == adapter-local ]]; then
     echo "  synchronization: lifetime per-link Adapter DATA/SYNC (switch is a virtual-time participant)"

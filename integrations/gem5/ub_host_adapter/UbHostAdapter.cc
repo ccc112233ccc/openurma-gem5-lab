@@ -44,7 +44,8 @@ UbHostAdapter::DmaOperation::DmaOperation(
 UbHostAdapter::UbHostAdapter(const Params &params)
     : DmaDevice(params), pioAddr(params.pio_addr), pioSize(params.pio_size),
       pioLatency(params.pio_latency), pollInterval(params.poll_interval),
-      syncEnabled(params.sync), linkLatency(params.link_latency),
+      syncEnabled(params.sync), lifecycleSync(params.lifecycle_sync),
+      linkLatency(params.link_latency),
       syncInterval(params.sync_interval),
       socketPath(params.socket_path), msiPort(this, sys),
       interrupts{params.interrupt_misc ? params.interrupt_misc->get() : nullptr,
@@ -56,6 +57,20 @@ UbHostAdapter::UbHostAdapter(const Params &params)
 
 UbHostAdapter::~UbHostAdapter()
 {
+    const auto wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - wallStarted).count();
+    inform("[UB_HOST_PROFILE] object=%s wall_ns=%lld poll_events=%llu "
+           "service_polls=%llu empty_service_polls=%llu sync_messages=%llu "
+           "sync_backpressure=%llu boundary_wait_yields=%llu mmio=%llu dma=%llu\n",
+           name(), static_cast<long long>(wall_ns),
+           static_cast<unsigned long long>(pollEvents),
+           static_cast<unsigned long long>(servicePolls),
+           static_cast<unsigned long long>(emptyServicePolls),
+           static_cast<unsigned long long>(syncMessages),
+           static_cast<unsigned long long>(syncBackpressure),
+           static_cast<unsigned long long>(boundaryWaitYields),
+           static_cast<unsigned long long>(mmioTransactions),
+           static_cast<unsigned long long>(dmaTransactions));
     if (interface.base.conn_state != 0)
         SimbricksBaseIfClose(&interface.base);
 }
@@ -65,7 +80,20 @@ UbHostAdapter::init()
 {
     DmaDevice::init();
     connectDevice();
-    host_proto::UbHostH2DOutSync(&interface, protocolTime());
+    if (host_proto::UbHostH2DOutSync(&interface, protocolTime()) == 0 &&
+        SimbricksBaseIfSyncEnabled(&interface.base))
+        ++syncMessages;
+}
+
+void
+UbHostAdapter::startup()
+{
+    DmaDevice::startup();
+    // init() runs before a checkpoint restores curTick.  Scheduling there
+    // leaves a boot-time poll event in the past when a late shell snapshot is
+    // loaded.  startup() runs after checkpoint state and the event queue have
+    // been restored, so the first external-device poll is always relative to
+    // the active epoch.
     scheduleNextPoll();
 }
 
@@ -87,7 +115,8 @@ uint64_t
 UbHostAdapter::protocolTime() const
 {
     // gem5's default tick is one picosecond, matching the SimBricks ABI.
-    return std::max<uint64_t>(curTick(), serviceTime);
+    const uint64_t absolute = std::max<uint64_t>(curTick(), serviceTime);
+    return lifecycleSyncActive ? absolute - epochOrigin : absolute;
 }
 
 void
@@ -144,6 +173,7 @@ uint64_t
 UbHostAdapter::transactMmio(Addr offset, unsigned length, uint64_t value,
                             bool write)
 {
+    ++mmioTransactions;
     auto *message = host_proto::UbHostH2DOutAlloc(&interface, protocolTime());
     if (!message)
         fatal("%s: UB-HOST request ring is full\n", name());
@@ -178,20 +208,28 @@ UbHostAdapter::transactMmio(Addr offset, unsigned length, uint64_t value,
 void
 UbHostAdapter::pollDevice()
 {
+    ++pollEvents;
     serviceDevice(protocolTime());
-    while (host_proto::UbHostH2DOutSync(&interface, protocolTime()) != 0)
+    while (host_proto::UbHostH2DOutSync(&interface, protocolTime()) != 0) {
+        ++syncBackpressure;
         std::this_thread::yield();
+    }
+    if (SimbricksBaseIfSyncEnabled(&interface.base))
+        ++syncMessages;
     scheduleNextPoll();
 }
 
 bool
 UbHostAdapter::serviceDevice(uint64_t deadline)
 {
+    ++servicePolls;
     bool progress = false;
     while (auto *message = host_proto::UbHostD2HInPoll(&interface, deadline)) {
         progress = true;
         const uint64_t message_time = message->base.header.timestamp;
-        serviceTime = std::max<uint64_t>(curTick(), message_time);
+        const uint64_t absolute_message_time = lifecycleSyncActive
+            ? epochOrigin + message_time : message_time;
+        serviceTime = std::max<uint64_t>(curTick(), absolute_message_time);
         const auto type = static_cast<host_proto::D2HType>(
             host_proto::UbHostD2HInType(&interface, message));
         switch (type) {
@@ -218,6 +256,14 @@ UbHostAdapter::serviceDevice(uint64_t deadline)
           case host_proto::D2HType::Interrupt:
             handleInterrupt(message->interrupt);
             break;
+          case host_proto::D2HType::Lifecycle:
+            if (message->lifecycle.action == static_cast<uint8_t>(
+                    host_proto::LifecycleAction::CommitSync) &&
+                message->lifecycle.generation == lifecycleGeneration) {
+                lifecycleCommitSeen = true;
+                lifecycleCommitEnabled = message->lifecycle.enabled != 0;
+            }
+            break;
         }
         host_proto::UbHostD2HInDone(&interface, message);
         serviceTime = 0;
@@ -226,6 +272,8 @@ UbHostAdapter::serviceDevice(uint64_t deadline)
         std::remove_if(dmaOperations.begin(), dmaOperations.end(),
             [](const auto &operation) { return operation->completed; }),
         dmaOperations.end());
+    if (!progress)
+        ++emptyServicePolls;
     return progress;
 }
 
@@ -245,22 +293,24 @@ UbHostAdapter::scheduleNextPoll()
             if (visible != nullptr) {
                 const uint64_t timestamp =
                     host_proto::UbHostD2HInTimestamp(&interface);
-                if (timestamp <= curTick()) {
-                    serviceDevice(curTick());
+                if (timestamp <= protocolTime()) {
+                    serviceDevice(protocolTime());
                     continue;
                 }
                 break;
             }
-            if (host_proto::UbHostD2HInTimestamp(&interface) > curTick())
+            if (host_proto::UbHostD2HInTimestamp(&interface) > protocolTime())
                 break;
             std::this_thread::yield();
+            ++boundaryWaitYields;
         }
         const uint64_t incoming =
             host_proto::UbHostD2HInTimestamp(&interface);
         const uint64_t outgoing = host_proto::UbHostH2DOutNextSync(&interface);
         const uint64_t boundary = std::min(incoming, outgoing);
         if (boundary != UINT64_MAX)
-            next = std::max<Tick>(curTick() + 1, boundary);
+            next = std::max<Tick>(curTick() + 1,
+                lifecycleSyncActive ? epochOrigin + boundary : boundary);
     }
     schedule(pollEvent, next);
 }
@@ -268,6 +318,7 @@ UbHostAdapter::scheduleNextPoll()
 void
 UbHostAdapter::handleDma(volatile host_proto::D2HMessage *message, bool read)
 {
+    ++dmaTransactions;
     const uint64_t request_id = message->dma.request_id;
     const uint32_t length = message->dma.length;
     const uint64_t address = message->dma.address;
@@ -304,6 +355,75 @@ UbHostAdapter::handleDma(volatile host_proto::D2HMessage *message, bool read)
     }
     if (sys->isAtomicMode())
         completeDma(operation);
+}
+
+void
+UbHostAdapter::resetProtocolEpoch()
+{
+    interface.base.in_timestamp = 0;
+    interface.base.out_timestamp = 0;
+    interface.base.sync = true;
+    epochOrigin = curTick();
+    serviceTime = 0;
+    lifecycleSyncActive = true;
+}
+
+void
+UbHostAdapter::toggleLifecycleSync()
+{
+    if (!lifecycleSync)
+        return;
+    if (!dmaOperations.empty() || !mmioCompletions.empty())
+        fatal("%s: lifecycle sync requested with outstanding host operations\n",
+              name());
+    if (pollEvent.scheduled())
+        deschedule(pollEvent);
+
+    ++lifecycleGeneration;
+    lifecycleCommitSeen = false;
+    const bool enable = !lifecycleSyncActive;
+    auto *message = host_proto::UbHostH2DOutAlloc(&interface, protocolTime());
+    if (!message)
+        fatal("%s: UB-HOST ring full at lifecycle fence\n", name());
+    zeroVolatile(message->lifecycle);
+    message->lifecycle.generation = lifecycleGeneration;
+    message->lifecycle.action = static_cast<uint8_t>(
+        host_proto::LifecycleAction::PrepareSync);
+    message->lifecycle.enabled = enable ? 1 : 0;
+    host_proto::UbHostH2DOutSend(&interface, message,
+        static_cast<uint8_t>(host_proto::H2DType::Lifecycle));
+
+    const auto wait_started = std::chrono::steady_clock::now();
+    while (!lifecycleCommitSeen) {
+        serviceDevice(UINT64_MAX);
+        ++boundaryWaitYields;
+        std::this_thread::yield();
+    }
+    if (lifecycleCommitEnabled != enable)
+        fatal("%s: lifecycle fence target mismatch\n", name());
+    if (enable) {
+        resetProtocolEpoch();
+        while (host_proto::UbHostH2DOutSync(&interface, 0) != 0) {
+            ++syncBackpressure;
+            std::this_thread::yield();
+        }
+        ++syncMessages;
+    } else {
+        const uint64_t absolute = protocolTime() + epochOrigin;
+        interface.base.in_timestamp = absolute;
+        interface.base.out_timestamp = absolute;
+        interface.base.sync = false;
+        lifecycleSyncActive = false;
+        epochOrigin = 0;
+    }
+    const auto wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - wait_started).count();
+    inform("[UB_HOST_FENCE] object=%s generation=%llu active=%d origin_tick=%llu wait_ns=%lld\n",
+           name(), static_cast<unsigned long long>(lifecycleGeneration),
+           enable ? 1 : 0,
+           static_cast<unsigned long long>(epochOrigin),
+           static_cast<long long>(wait_ns));
+    scheduleNextPoll();
 }
 
 void

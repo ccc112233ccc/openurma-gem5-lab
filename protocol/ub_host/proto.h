@@ -22,6 +22,7 @@ enum class H2DType : std::uint8_t {
     DmaReadCompletion = 0x42,
     DmaWriteCompletion = 0x43,
     DeviceControl = 0x44,
+    Lifecycle = 0x45,
 };
 
 enum class D2HType : std::uint8_t {
@@ -29,6 +30,17 @@ enum class D2HType : std::uint8_t {
     DmaRead = 0x41,
     DmaWrite = 0x42,
     Interrupt = 0x43,
+    Lifecycle = 0x44,
+};
+
+// Simulator lifecycle control is deliberately transport-generic.  It is not
+// a UDMA command and is never visible to the guest driver.  PREPARE is ordered
+// behind all pre-fence traffic; COMMIT is returned only after every process in
+// the topology has drained its queues.  Both sides then rebase protocol time
+// to zero and enable conservative synchronization.
+enum class LifecycleAction : std::uint8_t {
+    PrepareSync = 1,
+    CommitSync = 2,
 };
 
 enum class Status : std::uint16_t {
@@ -121,10 +133,21 @@ struct [[gnu::packed]] Interrupt {
     std::uint8_t own_type;
 };
 
+struct [[gnu::packed]] Lifecycle {
+    std::uint64_t generation;
+    std::uint8_t action;
+    std::uint8_t enabled;
+    std::uint8_t reserved[38];
+    std::uint64_t timestamp;
+    std::uint8_t pad[7];
+    std::uint8_t own_type;
+};
+
 union H2DMessage {
     SimbricksProtoBaseMsg base;
     MmioRequest mmio;
     Completion completion;
+    Lifecycle lifecycle;
 };
 
 union D2HMessage {
@@ -132,12 +155,14 @@ union D2HMessage {
     Completion completion;
     DmaRequest dma;
     Interrupt interrupt;
+    Lifecycle lifecycle;
 };
 
 static_assert(sizeof(MmioRequest) == 64);
 static_assert(sizeof(Completion) == 64);
 static_assert(sizeof(DmaRequest) == 64);
 static_assert(sizeof(Interrupt) == 64);
+static_assert(sizeof(Lifecycle) == 64);
 static_assert(sizeof(H2DMessage) == 64);
 static_assert(sizeof(D2HMessage) == 64);
 static_assert(offsetof(MmioRequest, timestamp) == 48);

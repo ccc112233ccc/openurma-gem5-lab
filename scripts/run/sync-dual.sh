@@ -38,12 +38,26 @@ for ((node = 0; node < node_count; ++node)); do
     uart_ports+=("$((uart0 + node * uart_stride))")
 done
 
+restore_checkpoint="$(ou_exec awk -F= \
+    '$1 == "restore_checkpoint" { print $2; exit }' \
+    "$run_root/run-manifest.txt" 2>/dev/null || true)"
+timer_verified_by_checkpoint=0
+if [[ -n "$restore_checkpoint" && "$restore_checkpoint" != none ]] && \
+        ou_exec grep -qx 'architected_timer_verified=1' \
+        "$lab/checkpoints/$restore_checkpoint/checkpoint-manifest.txt"; then
+    timer_verified_by_checkpoint=1
+fi
+
 # A usable architected timer is part of the experiment contract.  Without it,
 # OLK falls back to a 250 Hz sched_clock and the 4 ms quantization dominates the
 # reported tail even though distributed causality is still correct.
 for ((node = 0; node < node_count; ++node)); do
     node_name="node$node"
     terminal="$run_root/$node_name/system.terminal"
+    if (( timer_verified_by_checkpoint )); then
+        echo "$node_name architected timer: OK (checkpoint)"
+        continue
+    fi
     timer_ready=0
     for _ in $(seq 1 "$((sync_timeout / 2 + 1))"); do
         if ou_exec test -f "$terminal" && \
@@ -74,12 +88,13 @@ fi
 echo "Configuring all guests on the shared OOB control network..."
 echo "All UARTs must be detached; use ~. at the start of a line first."
 ou_exec python3 "$serial_tool" \
-    --ports "${uart_ports[@]}" --command /usr/local/bin/ou-net-up \
+    --ports "${uart_ports[@]}" \
+    --command 'ip link set eth0 up && /usr/local/bin/ou-net-up' \
     --timeout "$sync_timeout" --prompt-kick-after 1
 
 cpu_mode="$(ou_exec awk -F= \
     '$1 == "cpu_mode" { print $2; exit }' "$run_root/run-manifest.txt" 2>/dev/null || true)"
-ou_exec touch "$marker"
+ou_exec sh -c 'printf "architected_timer_verified=1\noob_ready=1\n" > "$1"' _ "$marker"
 echo "All unique OOB IPv4 addresses are active."
 if [[ "$cpu_mode" == server_o3 ]]; then
     echo "The guests remain on their fast boot CPUs while idle."

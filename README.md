@@ -202,5 +202,42 @@ host/device and endpoint/fabric propagation delays are the conservative
 lookahead. Use `--no-sync` for fast functional bring-up; its latency output is
 not a synchronized virtual-time result. With the default 100 ns lookahead, a
 cold full-system Atomic boot is intentionally expensive, so synchronized
-experiments should use a prepared boot checkpoint in future automation rather
-than weakening the runtime causality contract.
+experiments should restore a prepared coordinated checkpoint rather than
+weakening the runtime causality contract.
+
+The normal regression path deliberately restores a shell-ready checkpoint and
+runs without conservative synchronization.  This keeps functional stress
+tests fast while ns-3 still executes every serialization, queueing, routing and
+delivery event at its modeled virtual timestamp:
+
+```bash
+./lab start --profile fast --provider official \
+  --network-backend modular-ns3ub --no-sync \
+  --restore-checkpoint shell-ready-rma
+./lab sync
+./lab rma-regression experiments/rma-regression
+```
+
+`rma-regression` writes `results.csv`, `report.json`, the resolved model
+manifest and one complete UART transcript per case.  It covers SEND bandwidth,
+READ/WRITE latency and bandwidth, 4 KiB/64 KiB/1 MiB fragmentation, SQ ring
+wrap and 16 outstanding operations.  Every row includes wall-clock time.  The
+verified matrix and its measured host times are summarized in
+[`docs/modular-rma-regression.md`](docs/modular-rma-regression.md).
+
+Create a new coordinated shell snapshot only when both guests and the external
+device are idle:
+
+```bash
+./lab checkpoint shell-ready-rma
+./lab start --restore-checkpoint shell-ready-rma
+```
+
+The checkpoint contains both gem5 architectural states and both standalone
+UDMA states.  Process shutdown prints `[UB_HOST_PROFILE]`, `[UDMA_PROFILE]` and
+`[NS3_UB_NET_STATS]` counters for boundary-level profiling.
+
+`BUILD_STOCK_UDMA=enable ./lab build umdk` now builds and links the complete
+official `deps/ummu` library by default.  The old bootstrap shim remains an
+explicit diagnostic fallback via `OPENURMA_UMMU_MODE=shim`; it is not the
+default official-provider path.

@@ -114,6 +114,25 @@ ou_m5ops_switch_cpu(void)
 }
 
 static inline int
+ou_m5ops_checkpoint(void)
+{
+    int address_mode = ou_m5ops_address_mode();
+
+    if (address_mode < 0) {
+        return -1;
+    }
+    if (address_mode != 0) {
+        if (ou_m5ops_prepare_address() != 0) {
+            return -1;
+        }
+        m5_checkpoint_addr(0, 0);
+    } else {
+        m5_checkpoint(0, 0);
+    }
+    return 0;
+}
+
+static inline int
 ou_m5ops_reset_stats(void)
 {
     int address_mode = ou_m5ops_address_mode();

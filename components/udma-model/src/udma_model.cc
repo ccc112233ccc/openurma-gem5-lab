@@ -5,13 +5,58 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <istream>
 #include <limits>
 #include <memory>
+#include <ostream>
+#include <type_traits>
 #include <utility>
 
 namespace openurma::device {
 
 namespace {
+constexpr std::uint64_t kStateMagic = 0x3154504355444f55ULL; // OUDCPT1
+
+template <typename T>
+bool WritePod(std::ostream& output, const T& value)
+{
+    static_assert(std::is_trivially_copyable_v<T>);
+    output.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    return output.good();
+}
+
+template <typename T>
+bool ReadPod(std::istream& input, T& value)
+{
+    static_assert(std::is_trivially_copyable_v<T>);
+    input.read(reinterpret_cast<char*>(&value), sizeof(value));
+    return input.good();
+}
+
+template <typename Map>
+bool WritePodMap(std::ostream& output, const Map& map)
+{
+    const std::uint64_t size = map.size();
+    if (!WritePod(output, size)) return false;
+    for (const auto& [key, value] : map)
+        if (!WritePod(output, key) || !WritePod(output, value)) return false;
+    return true;
+}
+
+template <typename Map>
+bool ReadPodMap(std::istream& input, Map& map)
+{
+    std::uint64_t size{};
+    if (!ReadPod(input, size) || size > (1ULL << 24)) return false;
+    map.clear();
+    for (std::uint64_t i = 0; i < size; ++i) {
+        typename Map::key_type key{};
+        typename Map::mapped_type value{};
+        if (!ReadPod(input, key) || !ReadPod(input, value)) return false;
+        map.emplace(key, value);
+    }
+    return true;
+}
 constexpr std::uint8_t kOpcodeSend = 1;
 constexpr std::uint32_t kStatusReady = 1U;
 constexpr std::uint32_t kStatusSuccess = 0U;
@@ -34,6 +79,8 @@ constexpr std::uint32_t kUmmuCommandQueueStride = 0x10;
 constexpr std::uint32_t kUmmuCommandQueueProducer = 0x8;
 constexpr std::uint32_t kUmmuCommandQueueConsumer = 0xc;
 constexpr std::uint32_t kUmmuCommandQueueEnable = 1U << 31;
+constexpr std::uint32_t kUmmuReleasePermissionQueue = 0x1178;
+constexpr std::uint32_t kUmmuReleaseCompletion = 1U;
 
 template <typename T, typename Container>
 void StoreLe(Container& bytes, std::size_t offset, T value)
@@ -145,7 +192,11 @@ UdmaModel::UdmaModel(HostInterface& host, NetworkInterface& network,
     StoreLe<std::uint32_t>(ummu_registers_, 0x10, 0x00000b08);
     StoreLe<std::uint32_t>(ummu_registers_, 0x14, 0x00042208);
     StoreLe<std::uint32_t>(ummu_registers_, 0x18, 0x00009056);
-    StoreLe<std::uint32_t>(ummu_registers_, 0x1c, 0x00000010);
+    // CAP3.STALL_MODEL=1 selects terminate-on-fault.  This model implements
+    // SVA/MAPT translation, but not an EVENTQ-backed IOPF replay engine, so it
+    // must not advertise the stall model (STALL_MODEL=0/2) to the stock UMMU
+    // driver.
+    StoreLe<std::uint32_t>(ummu_registers_, 0x1c, 0x00001010);
     StoreLe<std::uint32_t>(ummu_registers_, 0x24, 0x00000011);
 }
 
@@ -208,6 +259,7 @@ bool
 UdmaModel::WriteMmio(std::uint64_t offset, std::uint32_t length,
                      std::uint64_t value)
 {
+    ++mmio_writes_;
     if (config_.extraction_test_abi) {
         if (offset != kRegisterDoorbell || length != sizeof(value) || value == 0)
             return false;
@@ -224,6 +276,14 @@ UdmaModel::WriteMmio(std::uint64_t offset, std::uint32_t length,
     if (offset >= kUmmuOffset && offset + length <= kUmmuOffset + kUmmuBytes) {
         const std::uint32_t reg = static_cast<std::uint32_t>(offset - kUmmuOffset);
         write_bytes(ummu_registers_.data() + reg);
+        // RELEASE_PERMQ is a command/status register.  The modeled queue is
+        // drained synchronously, so acknowledge completion by clearing the
+        // command bit exactly as hardware does before the driver's poll.
+        if (reg == kUmmuReleasePermissionQueue && length == 4 &&
+            (LoadLe<std::uint32_t>(ummu_registers_.data() + reg) &
+             kUmmuReleaseCompletion)) {
+            StoreLe<std::uint32_t>(ummu_registers_, reg, 0);
+        }
         if (reg <= kUmmuCr0 && reg + length >= kUmmuCr0 + 4)
             std::memcpy(ummu_registers_.data() + kUmmuCr0Ack,
                         ummu_registers_.data() + kUmmuCr0, 4);
@@ -280,6 +340,11 @@ UdmaModel::WriteMmio(std::uint64_t offset, std::uint32_t length,
         return true;
     }
     if (HandleJettyMmio(offset, length, value)) return true;
+    if (offset >= abi::kUdmaMemoryOffset &&
+        offset < abi::kUdmaMemoryOffset + 0x00100000) {
+        ++unknown_queue_writes_;
+        last_unknown_queue_offset_ = offset;
+    }
     return offset + length <= kOfficialApertureBytes;
 }
 
@@ -1094,6 +1159,7 @@ UdmaModel::HandleJettyMmio(std::uint64_t offset, std::uint32_t length,
     for (auto& [id, jetty] : jetty_contexts_) {
         if (offset >= jetty.device_page_offset &&
             offset + length <= jetty.device_page_offset + abi::kWqebbBytes) {
+            ++jetty_mmio_writes_;
             const std::uint32_t begin =
                 static_cast<std::uint32_t>(offset - jetty.device_page_offset);
             for (std::uint32_t i = 0; i < length; ++i) {
@@ -1116,6 +1182,8 @@ UdmaModel::HandleJettyMmio(std::uint64_t offset, std::uint32_t length,
         }
         if (offset == jetty.device_page_offset + abi::kDoorbellOffset &&
             length == 4) {
+            ++jetty_mmio_writes_;
+            ++sq_doorbells_;
             ProcessSq(id, static_cast<std::uint32_t>(value));
             return true;
         }
@@ -1130,7 +1198,14 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
     auto found = jetty_contexts_.find(jetty_id);
     if (found == jetty_contexts_.end()) return;
     QueueContext& jetty = found->second;
-    jetty.target_producer = producer;
+    // Doorbells may be coalesced while an earlier SQ DMA is still in flight.
+    // Never let the producer captured by that old asynchronous callback move
+    // the target backwards and hide newer work.  The signed delta is the
+    // conventional modulo-2^32 sequence comparison and remains correct as
+    // long as the queue has fewer than 2^31 outstanding WQEBBs.
+    if (static_cast<std::int32_t>(producer - jetty.target_producer) > 0)
+        jetty.target_producer = producer;
+    const std::uint32_t target_producer = jetty.target_producer;
     if (!direct.empty()) {
         if (direct.size() != abi::kWqebbBytes) return;
         std::copy(direct.begin(), direct.end(), jetty.direct_wqe.begin());
@@ -1143,19 +1218,24 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
     }
     const std::uint32_t outstanding =
         jetty.target_producer - static_cast<std::uint32_t>(jetty.consumer);
-    if (!jetty.depth || outstanding > jetty.depth) return;
+    if (!jetty.depth || outstanding > jetty.depth) {
+        ++sq_depth_rejects_;
+        return;
+    }
     jetty.busy = true;
     if (jetty.direct_pending && jetty.consumer + 1 == jetty.target_producer) {
         jetty.direct_pending = false;
-        HandleSqWqe(jetty_id, producer,
+        HandleSqWqe(jetty_id, target_producer,
             std::vector<std::uint8_t>(jetty.direct_wqe.begin(),
                                       jetty.direct_wqe.end()));
         return;
     }
     const std::uint64_t address = jetty.queue_iova +
         (jetty.consumer & (jetty.depth - 1U)) * abi::kWqebbBytes;
+    ++sq_dma_reads_;
     ReadToken(jetty.token, address, abi::kWqebbBytes,
-        [this, jetty_id, producer](bool ok, std::vector<std::uint8_t> raw) {
+        [this, jetty_id, target_producer]
+        (bool ok, std::vector<std::uint8_t> raw) {
             if (!ok || raw.size() != abi::kWqebbBytes) {
                 std::cerr << "udma-model: SQ DMA read failed jetty="
                           << jetty_id << " ok=" << ok
@@ -1170,15 +1250,16 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
             std::array<std::uint8_t, abi::kWqebbBytes> first{};
             std::copy(raw.begin(), raw.end(), first.begin());
             const std::uint32_t wqebbs = abi::SqWqe(first).wqebb_count();
-            const std::uint32_t outstanding = producer -
+            const std::uint32_t outstanding = target_producer -
                 static_cast<std::uint32_t>(found->second.consumer);
             if (!wqebbs || wqebbs > outstanding ||
                 wqebbs > found->second.depth) {
                 found->second.busy = false;
+                ++sq_decode_rejects_;
                 ++ubase_errors_;
                 return;
             }
-            ContinueSqWqe(jetty_id, producer, std::move(raw), wqebbs - 1,
+            ContinueSqWqe(jetty_id, target_producer, std::move(raw), wqebbs - 1,
                 (static_cast<std::uint32_t>(found->second.consumer) + 1) &
                     (found->second.depth - 1U));
         });
@@ -1247,6 +1328,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         std::cerr << "udma-model: rejected SQ WQE header\n";
         return fail();
     }
+    ++sq_wqes_;
     const auto route = tp_routes_.find(wqe.tpn());
     if (route == tp_routes_.end() || !route->second.active ||
         route->second.port >= link_up_.size() ||
@@ -1388,6 +1470,7 @@ UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
         if (found == jetty_contexts_.end()) return;
         if (!ok) { found->second.busy = false; ++ubase_errors_; return; }
         found->second.consumer += wqebbs;
+        ++sq_completions_;
         found->second.busy = false;
         ProcessSq(jetty_id, producer);
     };
@@ -2144,6 +2227,135 @@ UdmaModel::AdvanceTime(std::uint64_t now_ps)
     }
 }
 
+bool
+UdmaModel::IsQuiescent() const
+{
+    if (ubios_busy_ || ubase_busy_ || completion_event_busy_ ||
+        !completion_events_.empty() || !pending_.empty() || receive_busy_ ||
+        !receive_frames_.empty() || !pending_rma_.empty())
+        return false;
+    const auto queue_busy = [](const auto& contexts) {
+        return std::any_of(contexts.begin(), contexts.end(),
+            [](const auto& entry) {
+                const auto& queue = entry.second;
+                return queue.busy || queue.direct_pending ||
+                       queue.pending_completions != 0;
+            });
+    };
+    return !queue_busy(jfc_contexts_) && !queue_busy(jfr_contexts_) &&
+           !queue_busy(jetty_contexts_);
+}
+
+void
+UdmaModel::RebaseTime(std::uint64_t now_ps)
+{
+    if (!IsQuiescent())
+        return;
+    now_ps_ = now_ps;
+    for (auto& [id, jfc] : jfc_contexts_) {
+        (void)id;
+        jfc.moderation_deadline_ps = 0;
+    }
+}
+
+bool
+UdmaModel::SaveState(std::ostream& output) const
+{
+    if (!IsQuiescent()) return false;
+    const std::uint32_t version = 1;
+    const std::uint8_t has_token = generic_iova_token_.has_value();
+    const std::uint32_t token = generic_iova_token_.value_or(0);
+    if (!WritePod(output, kStateMagic) || !WritePod(output, version) ||
+        !WritePod(output, config_.mmio_base) ||
+        !WritePod(output, config_.port_count) ||
+        !WritePod(output, config_.endpoint_eid) ||
+        !WritePod(output, ummu_registers_) || !WritePod(output, has_token) ||
+        !WritePod(output, token) || !WritePod(output, ubios_message_queue_registers_) ||
+        !WritePod(output, ubase_command_queue_registers_) ||
+        !WritePod(output, ubase_command_source_) ||
+        !WritePodMap(output, ubios_root_config_) ||
+        !WritePodMap(output, ubios_endpoint_config_) ||
+        !WritePod(output, ubios_root_cna_) ||
+        !WritePod(output, ubios_endpoint_cna_) ||
+        !WritePod(output, ubios_target_producer_) ||
+        !WritePod(output, ubios_errors_) ||
+        !WritePod(output, ubase_target_producer_) ||
+        !WritePod(output, ubase_errors_) ||
+        !WritePod(output, msi_iova_) || !WritePod(output, msi_physical_) ||
+        !WritePod(output, aeq_iova_) || !WritePod(output, aeq_depth_) ||
+        !WritePod(output, aeq_producer_) || !WritePod(output, ceq_iova_) ||
+        !WritePod(output, ceq_depth_) || !WritePod(output, ceq_producer_) ||
+        !WritePodMap(output, jfc_contexts_) ||
+        !WritePodMap(output, jfr_contexts_) ||
+        !WritePodMap(output, jetty_contexts_) ||
+        !WritePodMap(output, tp_routes_) || !WritePod(output, next_tp_id_) ||
+        !WritePod(output, next_tp_port_) || !WritePod(output, next_sequence_) ||
+        !WritePod(output, next_rma_request_) || !WritePod(output, submitted_) ||
+        !WritePod(output, completed_))
+        return false;
+    const std::uint64_t links = link_up_.size();
+    if (!WritePod(output, links)) return false;
+    for (bool up : link_up_) {
+        const std::uint8_t value = up;
+        if (!WritePod(output, value)) return false;
+    }
+    return output.good();
+}
+
+bool
+UdmaModel::LoadState(std::istream& input)
+{
+    std::uint64_t magic{};
+    std::uint32_t version{};
+    std::uint64_t mmio_base{};
+    std::uint32_t port_count{};
+    std::uint32_t endpoint_eid{};
+    std::uint8_t has_token{};
+    std::uint32_t token{};
+    if (!ReadPod(input, magic) || magic != kStateMagic ||
+        !ReadPod(input, version) || version != 1 ||
+        !ReadPod(input, mmio_base) || mmio_base != config_.mmio_base ||
+        !ReadPod(input, port_count) || port_count != config_.port_count ||
+        !ReadPod(input, endpoint_eid) || endpoint_eid != config_.endpoint_eid ||
+        !ReadPod(input, ummu_registers_) || !ReadPod(input, has_token) ||
+        !ReadPod(input, token) || !ReadPod(input, ubios_message_queue_registers_) ||
+        !ReadPod(input, ubase_command_queue_registers_) ||
+        !ReadPod(input, ubase_command_source_) ||
+        !ReadPodMap(input, ubios_root_config_) ||
+        !ReadPodMap(input, ubios_endpoint_config_) ||
+        !ReadPod(input, ubios_root_cna_) ||
+        !ReadPod(input, ubios_endpoint_cna_) ||
+        !ReadPod(input, ubios_target_producer_) || !ReadPod(input, ubios_errors_) ||
+        !ReadPod(input, ubase_target_producer_) || !ReadPod(input, ubase_errors_) ||
+        !ReadPod(input, msi_iova_) || !ReadPod(input, msi_physical_) ||
+        !ReadPod(input, aeq_iova_) || !ReadPod(input, aeq_depth_) ||
+        !ReadPod(input, aeq_producer_) || !ReadPod(input, ceq_iova_) ||
+        !ReadPod(input, ceq_depth_) || !ReadPod(input, ceq_producer_) ||
+        !ReadPodMap(input, jfc_contexts_) || !ReadPodMap(input, jfr_contexts_) ||
+        !ReadPodMap(input, jetty_contexts_) || !ReadPodMap(input, tp_routes_) ||
+        !ReadPod(input, next_tp_id_) || !ReadPod(input, next_tp_port_) ||
+        !ReadPod(input, next_sequence_) || !ReadPod(input, next_rma_request_) ||
+        !ReadPod(input, submitted_) || !ReadPod(input, completed_))
+        return false;
+    generic_iova_token_ = has_token ? std::optional<std::uint32_t>(token)
+                                    : std::nullopt;
+    std::uint64_t links{};
+    if (!ReadPod(input, links) || links != config_.port_count) return false;
+    link_up_.assign(links, false);
+    for (std::uint64_t i = 0; i < links; ++i) {
+        std::uint8_t up{};
+        if (!ReadPod(input, up)) return false;
+        link_up_[i] = up != 0;
+    }
+    ubios_busy_ = ubase_busy_ = completion_event_busy_ = receive_busy_ = false;
+    completion_events_.clear();
+    pending_.clear();
+    receive_frames_.clear();
+    pending_rma_.clear();
+    now_ps_ = 0;
+    return input.good();
+}
+
 void
 UdmaModel::ReceiveWrite(Frame frame)
 {
@@ -2155,7 +2367,16 @@ UdmaModel::ReceiveWrite(Frame frame)
     WriteToken(frame.segment, frame.remote_address,
                         std::move(frame.bytes),
         [this, reply_basis](bool ok) mutable {
-            if (!ok) { ++ubase_errors_; return; }
+            if (!ok) {
+                std::cerr << "udma-model: remote WRITE translation failed"
+                          << " token=" << reply_basis.segment
+                          << " address=0x" << std::hex
+                          << reply_basis.remote_address << std::dec
+                          << " bytes=" << reply_basis.transfer_length
+                          << " request=" << reply_basis.request_id << '\n';
+                ++ubase_errors_;
+                return;
+            }
             Frame ack{};
             ack.sequence = next_sequence_++;
             ack.source_eid = reply_basis.destination_eid;
@@ -2185,6 +2406,13 @@ UdmaModel::ReceiveReadRequest(Frame frame)
                        frame.transfer_length,
         [this, reply_basis](bool ok, std::vector<std::uint8_t> payload) mutable {
             if (!ok || payload.size() != reply_basis.transfer_length) {
+                std::cerr << "udma-model: remote READ translation failed"
+                          << " token=" << reply_basis.segment
+                          << " address=0x" << std::hex
+                          << reply_basis.remote_address << std::dec
+                          << " expected=" << reply_basis.transfer_length
+                          << " received=" << payload.size()
+                          << " request=" << reply_basis.request_id << '\n';
                 ++ubase_errors_;
                 return;
             }

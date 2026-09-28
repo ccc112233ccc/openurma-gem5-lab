@@ -859,10 +859,10 @@ change the simulator/kernel ABI:
 
 | Component | Version or exact commit |
 | --- | --- |
-| gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `54c9d7cc2c6c3cb3bc215716ba1e632df18d84e4` |
-| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `0381d0b61a17c3614446b13a4e0d842045d69c01` |
+| gem5 | upstream `b1a44b89c7bae73fae2dc547bc1f871452075b85`, lab `387db831795fcc87f194a755b5f4be3b89864c61` |
+| OpenURMA | upstream `0ae5dce300154d761f97095864bda0cf2546b265`, lab `31e47bfbf0e1f8b22fcfb09df922a425f0f2fb74` |
 | OpenClickNP | `c1c6acc58032a1894507d88659b3cca668b0e1a5` |
-| vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `f84b90b8ddd8173b851334f55d332783d248bfc7` |
+| vendored UMDK | upstream `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58`, lab `8f272493e4138cd52cfb3ce11064a07c8d1be49f` |
 | openEuler OLK-6.6 | `5078a3a23a1e1825ec136485173ec98668cdd640` |
 
 The ARM firmware/resource bundle is gem5's official

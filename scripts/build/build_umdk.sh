@@ -6,7 +6,7 @@
 # remains clean and the result can be copied directly into the guest initramfs.
 set -euo pipefail
 
-PINNED_UMDK_SHA="f84b90b8ddd8173b851334f55d332783d248bfc7"
+PINNED_UMDK_SHA="8f272493e4138cd52cfb3ce11064a07c8d1be49f"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="${OPENURMA_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 UMDK_SRC="${UMDK_SRC:-$LAB_DIR/sources/OpenURMA/integration/umdk/vendor/umdk}"
@@ -15,6 +15,7 @@ BUILD_MODE="${OPENURMA_BUILD_MODE:-auto}"
 ARM64_SYSROOT="${OPENURMA_ARM64_SYSROOT:-}"
 JOBS="${JOBS:-2}"
 BUILD_STOCK_UDMA="${BUILD_STOCK_UDMA:-disable}"
+UMMU_MODE="${OPENURMA_UMMU_MODE:-official}"
 ALLOW_DIRTY_UMDK="${ALLOW_DIRTY_UMDK:-disable}"
 UMMU_DEPS="${UMMU_DEPS:-$LAB_DIR/deps/ummu}"
 UMDK_INTEGRATION_DIR="${UMDK_INTEGRATION_DIR:-$(dirname -- "$(dirname -- "$UMDK_SRC")")}"
@@ -93,6 +94,12 @@ esac
 BUILD_DIR="${UMDK_BUILD_DIR:-$default_build_dir}"
 UMMU_SHIM_SRC="${UMMU_SHIM_SRC:-$UMDK_INTEGRATION_DIR/ummu_shim}"
 UMMU_SHIM_BUILD_DIR="${UMMU_SHIM_BUILD_DIR:-${BUILD_DIR}-ummu-shim}"
+UMMU_OFFICIAL_BUILD_DIR="${UMMU_OFFICIAL_BUILD_DIR:-${BUILD_DIR}-ummu-official}"
+if [[ "$UMMU_MODE" == official ]]; then
+    UMMU_BUILD_DIR="$UMMU_OFFICIAL_BUILD_DIR"
+else
+    UMMU_BUILD_DIR="$UMMU_SHIM_BUILD_DIR"
+fi
 CROSS_COMPILE="${CROSS_COMPILE-$default_cross_compile}"
 GEM5_M5_LIB="${GEM5_M5_LIB:-$GEM5_ROOT/util/m5/build/$M5_ABI/out/libm5.a}"
 
@@ -123,6 +130,8 @@ fi
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 [[ "$BUILD_STOCK_UDMA" == "enable" || "$BUILD_STOCK_UDMA" == "disable" ]] || \
     die "BUILD_STOCK_UDMA must be 'enable' or 'disable'"
+[[ "$UMMU_MODE" == "official" || "$UMMU_MODE" == "shim" ]] || \
+    die "OPENURMA_UMMU_MODE must be 'official' or 'shim'"
 [[ "$ALLOW_DIRTY_UMDK" == "enable" || "$ALLOW_DIRTY_UMDK" == "disable" ]] || \
     die "ALLOW_DIRTY_UMDK must be 'enable' or 'disable'"
 [[ -n "$BUILD_DIR" && "$BUILD_DIR" != "/" ]] || die "unsafe UMDK_BUILD_DIR: $BUILD_DIR"
@@ -142,6 +151,7 @@ if [[ "$BUILD_MODE" == cross ]]; then
         -DCMAKE_SYSTEM_NAME=Linux
         -DCMAKE_SYSTEM_PROCESSOR=aarch64
         -DCMAKE_C_COMPILER="$compiler"
+        -DCMAKE_CXX_COMPILER="$LAB_DIR/tools/aarch64-umdk-cxx.py"
         -DCROSS_COMPILE="$compiler"
         -DCMAKE_FIND_ROOT_PATH="$ARM64_SYSROOT"
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
@@ -183,22 +193,29 @@ if [[ "$BUILD_STOCK_UDMA" == "enable" ]]; then
         die "official ummu_api.h not found under $UMMU_DEPS/include"
     [[ -f "$UMMU_DEPS/kernel_headers/ummu_core.h" ]] || \
         die "official ummu_core.h not found under $UMMU_DEPS/kernel_headers"
-    [[ -f "$UMMU_SHIM_SRC/CMakeLists.txt" ]] || \
-        die "simulation UMMU shim not found at $UMMU_SHIM_SRC"
-    [[ -n "$UMMU_SHIM_BUILD_DIR" && "$UMMU_SHIM_BUILD_DIR" != "/" ]] || \
-        die "unsafe UMMU_SHIM_BUILD_DIR: $UMMU_SHIM_BUILD_DIR"
-
-    echo "Building simulation-only libummu.so.1 ABI shim"
-    rm -rf -- "$UMMU_SHIM_BUILD_DIR"
-    cmake -S "$UMMU_SHIM_SRC" -B "$UMMU_SHIM_BUILD_DIR" \
+    if [[ "$UMMU_MODE" == official ]]; then
+        UMMU_SOURCE_DIR="$UMMU_DEPS"
+        UMMU_BUILD_DIR="$UMMU_OFFICIAL_BUILD_DIR"
+        UMMU_EXTRA_ARGS=(-DPROJECT_VERSION=1.0.0 -DLIB_SOVERSION=1)
+        echo "Building complete official libummu.so.1"
+    else
+        UMMU_SOURCE_DIR="$UMMU_SHIM_SRC"
+        UMMU_BUILD_DIR="$UMMU_SHIM_BUILD_DIR"
+        UMMU_EXTRA_ARGS=(-DUMMU_API_INCLUDE_DIR="$UMMU_DEPS/include" \
+                         -DUMMU_UAPI_INCLUDE_DIR="$UMMU_DEPS/kernel_headers")
+        echo "Building simulation-only libummu.so.1 ABI shim"
+    fi
+    [[ -f "$UMMU_SOURCE_DIR/CMakeLists.txt" ]] || die "UMMU source not found: $UMMU_SOURCE_DIR"
+    [[ -n "$UMMU_BUILD_DIR" && "$UMMU_BUILD_DIR" != "/" ]] || die "unsafe UMMU build directory"
+    rm -rf -- "$UMMU_BUILD_DIR"
+    cmake -S "$UMMU_SOURCE_DIR" -B "$UMMU_BUILD_DIR" \
         "${cmake_cross_args[@]}" \
-        -DUMMU_API_INCLUDE_DIR="$UMMU_DEPS/include" \
-        -DUMMU_UAPI_INCLUDE_DIR="$UMMU_DEPS/kernel_headers" \
+        "${UMMU_EXTRA_ARGS[@]}" \
         -DBUILD_TESTING="$([[ "$BUILD_MODE" == cross ]] && echo OFF || echo ON)" \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
-    cmake --build "$UMMU_SHIM_BUILD_DIR" --parallel "$JOBS"
-    if [[ "$BUILD_MODE" == native ]]; then
-        ctest --test-dir "$UMMU_SHIM_BUILD_DIR" --output-on-failure
+    cmake --build "$UMMU_BUILD_DIR" --parallel "$JOBS"
+    if [[ "$BUILD_MODE" == native && "$UMMU_MODE" == shim ]]; then
+        ctest --test-dir "$UMMU_BUILD_DIR" --output-on-failure
     else
         echo "Skipping target execution of the ARM64 UMMU self-test during cross-build"
     fi
@@ -206,7 +223,7 @@ if [[ "$BUILD_STOCK_UDMA" == "enable" ]]; then
     # The pinned UMDK build uses plain <ummu_api.h> and -lummu.  Supplying
     # compiler/linker search paths keeps the vendored source unmodified.
     export CPATH="$UMMU_DEPS/include:$UMMU_DEPS/kernel_headers${CPATH:+:$CPATH}"
-    export LIBRARY_PATH="$UMMU_SHIM_BUILD_DIR${LIBRARY_PATH:+:$LIBRARY_PATH}"
+    export LIBRARY_PATH="$UMMU_BUILD_DIR${LIBRARY_PATH:+:$LIBRARY_PATH}"
 fi
 
 cmake -S "$UMDK_SRC/src" -B "$BUILD_DIR" \
@@ -229,7 +246,7 @@ stock_udma="$BUILD_DIR/urma/hw/udma/liburma-udma.so"
 ubagg_provider="$BUILD_DIR/urma/lib/urma/bond/liburma_ubagg.so.0.0.1"
 ubagg_cli="$BUILD_DIR/urma/tools/ubagg_cli/ubagg_cli"
 libtpsa="$BUILD_DIR/urma/lib/uvs/core/libtpsa.so.0.0.1"
-ummu_shim="$UMMU_SHIM_BUILD_DIR/libummu.so.1"
+ummu_library="$UMMU_BUILD_DIR/libummu.so.1"
 
 verify_target() {
     local artifact="$1"
@@ -253,16 +270,16 @@ verify_target "$libtpsa"
 
 if [[ "$BUILD_STOCK_UDMA" == "enable" ]]; then
     verify_target "$stock_udma"
-    verify_target "$ummu_shim"
+    verify_target "$ummu_library"
     readelf -d "$stock_udma" | grep -Fq 'Shared library: [libummu.so.1]' || \
         die "stock UDMA provider is not linked against libummu.so.1"
-    readelf -d "$ummu_shim" | grep -Fq 'Library soname: [libummu.so.1]' || \
-        die "simulation UMMU shim has the wrong SONAME"
+    readelf -d "$ummu_library" | grep -Fq 'Library soname: [libummu.so.1]' || \
+        die "libummu has the wrong SONAME"
 fi
 
 printf '%s\n' "$PINNED_UMDK_SHA" > "$BUILD_DIR/UMDK_SOURCE_COMMIT"
 echo "UMDK build ready at $BUILD_DIR"
 if [[ "$BUILD_STOCK_UDMA" == "enable" ]]; then
     echo "Stock UDMA provider ready at $stock_udma"
-    echo "Simulation UMMU shim ready at $ummu_shim"
+    echo "UMMU mode $UMMU_MODE ready at $ummu_library"
 fi

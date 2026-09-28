@@ -7,7 +7,9 @@
 
 #include <cassert>
 #include <cstring>
+#include <deque>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -33,6 +35,36 @@ class MockHost final : public device::HostInterface {
                  device::ReadCompletion completion) override
     {
         events.emplace_back("dma-read");
+        if (defer_reads) {
+            pending_reads_.push_back(
+                PendingRead{address, length, std::move(completion)});
+            return;
+        }
+        CompleteRead(address, length, std::move(completion));
+    }
+
+    void FlushReads()
+    {
+        while (!pending_reads_.empty()) {
+            PendingRead pending = std::move(pending_reads_.front());
+            pending_reads_.pop_front();
+            CompleteRead(pending.address, pending.length,
+                         std::move(pending.completion));
+        }
+    }
+
+    bool defer_reads{};
+
+  private:
+    struct PendingRead {
+        std::uint64_t address;
+        std::size_t length;
+        device::ReadCompletion completion;
+    };
+
+    void CompleteRead(std::uint64_t address, std::size_t length,
+                      device::ReadCompletion completion)
+    {
         const auto found = memory_.find(address);
         if (found == memory_.end() || found->second.size() != length) {
             completion(false, {});
@@ -40,6 +72,8 @@ class MockHost final : public device::HostInterface {
         }
         completion(true, found->second);
     }
+
+  public:
 
     void DmaWrite(std::uint64_t address, std::vector<std::uint8_t> data,
                   device::Completion completion) override
@@ -90,6 +124,7 @@ class MockHost final : public device::HostInterface {
 
   private:
     std::unordered_map<std::uint64_t, std::vector<std::uint8_t>> memory_;
+    std::deque<PendingRead> pending_reads_;
 };
 
 class MockNetwork final : public device::NetworkInterface {
@@ -156,6 +191,18 @@ int main()
         "dma-read", "dma-read", "frame", "dma-write", "irq"};
     assert(host.events == expected);
 
+    std::stringstream checkpoint(
+        std::ios::in | std::ios::out | std::ios::binary);
+    assert(model.IsQuiescent());
+    assert(model.SaveState(checkpoint));
+    MockHost restored_host;
+    MockNetwork restored_network(restored_host);
+    device::UdmaModel restored_model(restored_host, restored_network, config);
+    checkpoint.seekg(0);
+    assert(restored_model.LoadState(checkpoint));
+    assert(restored_model.submitted() == model.submitted());
+    assert(restored_model.completed() == model.completed());
+
     // Production-mode control-plane contract copied from the official-driver
     // path: firmware discovery publishes absolute resources, UMMU capability
     // and handshake registers behave architecturally, and queue registers
@@ -179,10 +226,15 @@ int main()
     assert(official_model.ReadMmio(0x11000 + 56 + 32, 8, value) &&
            value == official_config.mmio_base + 0x12000);
     assert(official_model.ReadMmio(0xf00010, 4, value) && value == 0x00000b08);
+    assert(official_model.ReadMmio(0xf0001c, 4, value) && value == 0x00001010);
     assert(official_model.WriteMmio(0xf00030, 4, 0x55aa));
     assert(official_model.ReadMmio(0xf00034, 4, value) && value == 0x55aa);
     assert(official_model.WriteMmio(0xf00050, 4, 0x80000003));
     assert(official_model.ReadMmio(0xf00050, 4, value) && value == 3);
+    assert(official_model.WriteMmio(0xf0117c, 4, 7));
+    assert(official_model.WriteMmio(0xf01178, 4, 1));
+    assert(official_model.ReadMmio(0xf0117c, 4, value) && value == 7);
+    assert(official_model.ReadMmio(0xf01178, 4, value) && value == 0);
     assert(official_model.WriteMmio(0xf00108, 4, 0x80000007));
     assert(official_model.ReadMmio(0xf0010c, 4, value) &&
            value == 0x80000007);
@@ -407,7 +459,7 @@ int main()
     constexpr std::uint64_t jetty_context_iova = 0x101000;
     constexpr std::uint64_t sq_iova = 0x110000;
     std::vector<std::uint8_t> jetty_context(128, 0);
-    store32(jetty_context, 0, 1U << 19); // JETTY mode, one WQEBB
+    store32(jetty_context, 0, (1U << 19) | (6U << 8)); // JETTY, 64 WQEBBs
     store32(jetty_context, 4, static_cast<std::uint32_t>(sq_iova));
     store32(jetty_context, 4 * 4, 7 | (11U << 20)); // send JFC + JFR
     store32(jetty_context, 5 * 4, 7U << 12); // receive JFC
@@ -562,7 +614,8 @@ int main()
     constexpr std::uint64_t write_target = 0x170000;
     host.Store(write_source, std::vector<std::uint8_t>({'r','m','a','!'}));
     std::array<std::uint8_t, 64> write_wqe{};
-    const std::uint32_t write_flags = 2U | (0x20U << 16); // PI=2, CQE, owner=0
+    const std::uint32_t write_flags =
+        2U | (0x20U << 16) | (1U << 31); // PI=2, CQE, owner=1
     std::memcpy(write_wqe.data(), &write_flags, 4);
     const std::uint32_t write_command = 3U << 8;
     std::memcpy(write_wqe.data() + 4, &write_command, 4);
@@ -615,6 +668,30 @@ int main()
     assert(host.Load(read_target) == std::vector<std::uint8_t>({'r','m','a','!'}));
     assert(host.Contains(cq_iova + 192));
     assert(host.irq_pulses == 4 && host.Load(msi_address)[0] == 0x42);
+
+    // A busy device can observe several monotonically increasing doorbells
+    // before the first SQ DMA completes.  An old callback must not overwrite
+    // the newest target producer (the real send_bw/post-list failure mode).
+    std::array<std::uint8_t, 64> queued_wqe = send_wqe;
+    const std::uint32_t queued_flags =
+        3U | (0x40U << 16) | (1U << 31); // PI=3, inline, no CQE, owner=1
+    std::memcpy(queued_wqe.data(), &queued_flags, 4);
+    host.Store(sq_iova + 3 * 64,
+               std::vector<std::uint8_t>(queued_wqe.begin(), queued_wqe.end()));
+    const std::uint32_t queued_flags_2 =
+        4U | (0x40U << 16) | (1U << 31); // PI=4
+    std::memcpy(queued_wqe.data(), &queued_flags_2, 4);
+    host.Store(sq_iova + 4 * 64,
+               std::vector<std::uint8_t>(queued_wqe.begin(), queued_wqe.end()));
+    const std::size_t frames_before_coalesced = network.frames.size();
+    host.defer_reads = true;
+    assert(official_model.WriteMmio(jetty_page + 0x80, 4, 4));
+    assert(official_model.WriteMmio(jetty_page + 0x80, 4, 5));
+    host.FlushReads();
+    host.defer_reads = false;
+    assert(network.frames.size() == frames_before_coalesced + 2);
+    assert(official_model.sq_doorbells() == 2);
+    assert(official_model.sq_completions() >= 5);
 
     device::Frame invalid_token_write{};
     invalid_token_write.operation = device::Frame::Operation::Write;

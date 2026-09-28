@@ -67,6 +67,7 @@ struct Options {
     std::uint64_t rate_gbps{400};
     std::uint64_t sync_interval_ps{100000};
     SimbricksBaseIfSyncMode sync_mode{kSimbricksBaseIfSyncOptional};
+    bool lifecycle_sync{false};
 };
 
 EndpointOption ParseEndpoint(const std::string& value)
@@ -103,6 +104,8 @@ Options ParseOptions(int argc, char** argv)
             else if (mode == "optional") options.sync_mode = kSimbricksBaseIfSyncOptional;
             else if (mode == "required") options.sync_mode = kSimbricksBaseIfSyncRequired;
             else throw std::runtime_error("sync must be off, optional, or required");
+        } else if (arg == "--lifecycle-sync") {
+            options.lifecycle_sync = true;
         } else {
             throw std::runtime_error("unknown or incomplete option: " + arg);
         }
@@ -172,6 +175,9 @@ struct Endpoint {
     std::string socket;
     std::uint32_t eid{};
     std::deque<QueuedFrame> outgoing;
+    bool lifecycle_prepare{false};
+    std::uint64_t lifecycle_generation{};
+    bool lifecycle_enabled{false};
 };
 
 template <typename T>
@@ -221,6 +227,7 @@ class UbNetFabric {
 
     void Run()
     {
+        const auto wall_started = std::chrono::steady_clock::now();
         PublishLinks();
         std::cerr << "[NS3_UB_NET] connected " << endpoints_.size()
                   << " UB-NET endpoints"
@@ -228,6 +235,7 @@ class UbNetFabric {
                   << " rate_gbps=" << options_.rate_gbps
                   << " boundary=ub-net-v1\n";
         while (running.load()) {
+            ++loop_iterations_;
             const std::uint64_t now = NowPs();
             bool progress = false;
             bool all_terminated = true;
@@ -238,8 +246,56 @@ class UbNetFabric {
             }
             for (auto& endpoint : endpoints_)
                 progress = Flush(endpoint, now) || progress;
+            if (options_.lifecycle_sync &&
+                scheduled_packets_ == 0 && OutputsEmpty() &&
+                std::all_of(endpoints_.begin(), endpoints_.end(),
+                    [](const Endpoint& endpoint) {
+                        return endpoint.lifecycle_prepare;
+                    })) {
+                const std::uint64_t generation =
+                    endpoints_.front().lifecycle_generation;
+                const bool same_generation = std::all_of(
+                    endpoints_.begin(), endpoints_.end(),
+                    [generation](const Endpoint& endpoint) {
+                        return endpoint.lifecycle_generation == generation;
+                    });
+                if (!same_generation)
+                    throw std::runtime_error("lifecycle fence generation mismatch");
+                const bool enable = endpoints_.front().lifecycle_enabled;
+                const bool same_target = std::all_of(
+                    endpoints_.begin(), endpoints_.end(),
+                    [enable](const Endpoint& endpoint) {
+                        return endpoint.lifecycle_enabled == enable;
+                    });
+                if (!same_target || enable == lifecycle_active_)
+                    throw std::runtime_error("lifecycle fence target mismatch");
+                bool commits_sent = true;
+                for (auto& endpoint : endpoints_)
+                    commits_sent = SendLifecycleCommit(endpoint, now, generation,
+                                                       enable) &&
+                                   commits_sent;
+                if (!commits_sent) {
+                    ++output_backpressure_;
+                    std::this_thread::yield();
+                    continue;
+                }
+                const std::uint64_t absolute_now = AbsoluteNowPs();
+                for (auto& endpoint : endpoints_) {
+                    endpoint.interface.base.in_timestamp = enable ? 0 : absolute_now;
+                    endpoint.interface.base.out_timestamp = enable ? 0 : absolute_now;
+                    endpoint.interface.base.sync = enable;
+                    endpoint.lifecycle_prepare = false;
+                }
+                epoch_origin_ps_ = enable ? absolute_now : 0;
+                lifecycle_active_ = enable;
+                std::cerr << "[NS3_UB_NET_FENCE] generation=" << generation
+                          << " active=" << (enable ? 1 : 0)
+                          << " absolute_origin_ps=" << epoch_origin_ps_
+                          << " endpoints=" << endpoints_.size() << '\n';
+            }
             if (all_terminated && scheduled_packets_ == 0 && OutputsEmpty()) break;
             if (!OutputsEmpty()) {
+                ++output_backpressure_;
                 if (!progress)
                     std::this_thread::sleep_for(std::chrono::microseconds(50));
                 continue;
@@ -250,6 +306,7 @@ class UbNetFabric {
                     ubnet::UbNetOutSync(&endpoint.interface, now) != 0 ||
                     sync_blocked;
             if (sync_blocked) {
+                ++sync_backpressure_;
                 std::this_thread::yield();
                 continue;
             }
@@ -266,6 +323,7 @@ class UbNetFabric {
             if (synchronized && next > now &&
                 next != std::numeric_limits<std::uint64_t>::max()) {
                 AdvanceTo(next);
+                ++sync_steps_;
                 progress = true;
             } else if (!synchronized && scheduled_packets_) {
                 // ns-3-UB owns periodic maintenance events, so an unbounded
@@ -276,11 +334,22 @@ class UbNetFabric {
                 progress = true;
             }
             if (!progress)
+            {
+                ++idle_sleeps_;
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
         }
+        const auto wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - wall_started).count();
         std::cerr << "[NS3_UB_NET_STATS] forwarded=" << forwarded_
                   << " delivered=" << delivered_ << " payload_bytes="
-                  << payload_bytes_ << " virtual_ps=" << NowPs() << '\n';
+                  << payload_bytes_ << " virtual_ps=" << NowPs()
+                  << " wall_ns=" << wall_ns
+                  << " loops=" << loop_iterations_
+                  << " idle_sleeps=" << idle_sleeps_
+                  << " sync_steps=" << sync_steps_
+                  << " sync_backpressure=" << sync_backpressure_
+                  << " output_backpressure=" << output_backpressure_ << '\n';
     }
 
   private:
@@ -324,6 +393,8 @@ class UbNetFabric {
     void BuildTopology()
     {
         const DataRate rate(std::to_string(options_.rate_gbps) + "Gbps");
+        ingress_available_.assign(options_.endpoints.size() * options_.ports,
+                                  PicoSeconds(0));
         for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
             Ptr<Node> node = CreateObject<Node>();
             endpoint_nodes_.push_back(node);
@@ -420,6 +491,12 @@ class UbNetFabric {
             tag.traffic_class = ingress.traffic_class;
             tag.flags = ingress.flags;
             Inject(source, std::move(payload), tag);
+        } else if (type == ubnet::MessageType::Lifecycle &&
+                   message->lifecycle.action == static_cast<std::uint8_t>(
+                       ubnet::LifecycleAction::PrepareSync)) {
+            endpoint.lifecycle_prepare = true;
+            endpoint.lifecycle_generation = message->lifecycle.generation;
+            endpoint.lifecycle_enabled = message->lifecycle.enabled != 0;
         }
         ubnet::UbNetInDone(&endpoint.interface, message);
         return true;
@@ -449,8 +526,25 @@ class UbNetFabric {
         ++scheduled_packets_;
         ++forwarded_;
         payload_bytes_ += payload.size();
-        switch_->SwitchHandlePacket(
-            switch_ports_[source * options_.ports + tag.source_port], packet);
+        // Frames arrive from an external device process, rather than through
+        // an ns-3 UbPort.  Preserve the missing ingress-port serialization
+        // here: injecting a whole fragmented WQE at one timestamp can
+        // otherwise overflow a finite switch ingress buffer even though a
+        // physical 400-Gbit/s port would naturally pace those fragments.
+        const std::size_t ingress_index = source * options_.ports + tag.source_port;
+        const Time now = Simulator::Now();
+        const Time start = std::max(now, ingress_available_[ingress_index]);
+        const DataRate rate(std::to_string(options_.rate_gbps) + "Gbps");
+        const Time serialization = rate.CalculateBytesTxTime(packet->GetSize());
+        const Time arrival = start + serialization;
+        ingress_available_[ingress_index] = arrival;
+        Simulator::Schedule(arrival - now, &UbNetFabric::EnterSwitch, this,
+                            ingress_index, packet);
+    }
+
+    void EnterSwitch(std::size_t ingress_index, Ptr<Packet> packet)
+    {
+        switch_->SwitchHandlePacket(switch_ports_.at(ingress_index), packet);
     }
 
     void ReceiveAtEndpoint(Ptr<UbPort> port, Ptr<Packet> packet)
@@ -509,18 +603,39 @@ class UbNetFabric {
         return progress;
     }
 
+    bool SendLifecycleCommit(Endpoint& endpoint, std::uint64_t now,
+                             std::uint64_t generation, bool enabled)
+    {
+        auto* output = ubnet::UbNetOutAlloc(&endpoint.interface, now);
+        if (!output) return false;
+        ZeroVolatile(output->lifecycle);
+        output->lifecycle.generation = generation;
+        output->lifecycle.action = static_cast<std::uint8_t>(
+            ubnet::LifecycleAction::CommitSync);
+        output->lifecycle.enabled = enabled ? 1 : 0;
+        ubnet::UbNetOutSend(&endpoint.interface, output,
+            static_cast<std::uint8_t>(ubnet::MessageType::Lifecycle));
+        return true;
+    }
+
     bool OutputsEmpty() const
     {
         return std::all_of(endpoints_.begin(), endpoints_.end(),
             [](const Endpoint& endpoint) { return endpoint.outgoing.empty(); });
     }
 
-    static std::uint64_t NowPs()
+    static std::uint64_t AbsoluteNowPs()
     {
         return static_cast<std::uint64_t>(Simulator::Now().GetPicoSeconds());
     }
 
-    static void AdvanceTo(std::uint64_t target)
+    std::uint64_t NowPs() const
+    {
+        return lifecycle_active_ ? AbsoluteNowPs() - epoch_origin_ps_
+                                 : AbsoluteNowPs();
+    }
+
+    void AdvanceTo(std::uint64_t target)
     {
         const std::uint64_t now = NowPs();
         if (target <= now) return;
@@ -538,10 +653,18 @@ class UbNetFabric {
     Ptr<Node> switch_node_;
     Ptr<UbSwitch> switch_;
     std::vector<Ptr<UbPort>> switch_ports_;
+    std::vector<Time> ingress_available_;
     std::uint64_t scheduled_packets_{};
     std::uint64_t forwarded_{};
     std::uint64_t delivered_{};
     std::uint64_t payload_bytes_{};
+    std::uint64_t epoch_origin_ps_{};
+    std::uint64_t loop_iterations_{};
+    std::uint64_t idle_sleeps_{};
+    std::uint64_t sync_steps_{};
+    std::uint64_t sync_backpressure_{};
+    std::uint64_t output_backpressure_{};
+    bool lifecycle_active_{false};
 };
 
 } // namespace
@@ -561,7 +684,7 @@ int main(int argc, char** argv)
                      "--endpoint SOCKET,EID [--endpoint ...] [--ports N] "
                      "[--link-delay-ps N] [--switch-delay-ps N] "
                      "[--rate-gbps N] [--sync off|optional|required] "
-                     "[--sync-interval-ps N]\n";
+                     "[--sync-interval-ps N] [--lifecycle-sync]\n";
         return 1;
     }
 }

@@ -31,10 +31,12 @@ COMMANDS = {
     "status": Command("scripts/run/status-dual.sh", "show node and switch process state"),
     "stop": Command("scripts/run/stop-dual.sh", "stop the current multi-node simulation"),
     "sync": Command("scripts/run/sync-dual.sh", "finish guest network and time-sync setup"),
+    "checkpoint": Command("scripts/run/checkpoint-dual.sh", "save a coordinated gem5/UDMA checkpoint"),
     "latency": Command("scripts/run/run-latency.sh", "run the standard two-node send_lat test"),
     "latency-pair": Command("scripts/run/run-node-pair-latency.sh", "test an arbitrary server/client node pair"),
     "latency-pairs": Command("scripts/run/run-paired-latency.sh", "test adjacent node pairs concurrently"),
     "sweep-latency": Command("scripts/run/sweep-latency.sh", "scan send_lat across message sizes"),
+    "rma-regression": Command("scripts/run/run-rma-regression.sh", "run the timed modular SEND/READ/WRITE matrix"),
     "validate-server": Command("scripts/validation/validate-server-profile.sh", "validate the modeled server profile"),
 }
 
@@ -63,6 +65,7 @@ def _usage(stream=None) -> None:
         "  start             start N gem5 nodes plus the UB/OOB switches\n"
         "  status            show simulator process and guest readiness\n"
         "  sync              initialize the guest control network\n"
+        "  checkpoint NAME   save a shell-ready coordinated checkpoint\n"
         "  attach NODE       connect to node NODE's PL011 console\n"
         "  stop              stop the current simulation\n\n"
         "Experiments:\n"
@@ -70,6 +73,7 @@ def _usage(stream=None) -> None:
         "  latency-pair      run send_lat between arbitrary node IDs\n"
         "  latency-pairs     run adjacent pairs concurrently\n"
         "  sweep-latency     scan latency across message sizes\n\n"
+        "  rma-regression    run timed SEND/READ/WRITE fragmentation and SQ tests\n\n"
         "Build and validation:\n"
         "  build TARGET      TARGET: " + ", ".join(BUILD_TARGETS) + "\n"
         "  validate-server   validate the instantiated server profile\n"

@@ -1,0 +1,63 @@
+From 8f272493e4138cd52cfb3ce11064a07c8d1be49f Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Mon, 28 Sep 2026 21:21:25 +0800
+Subject: [PATCH] Use lifecycle fence as perftest synchronization rendezvous
+
+---
+ .../tools/urma_perftest/perftest_run_test.c   | 26 +++----------------
+ 1 file changed, 3 insertions(+), 23 deletions(-)
+
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index e2d600d..dcc2d26 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -646,18 +646,7 @@ static void *run_send_lat_simplex(void *arg)
+             goto free_cr;
+         }
+         dist_sync_active = true;
+-        /*
+-         * toggle_dist_sync schedules the first conservative barrier at a
+-         * common future tick; it does not block the calling CPU until that
+-         * tick.  Exchange one token over the already-connected OOB socket so
+-         * the leading guest waits and the lagging guest reaches that first
+-         * barrier while both still use the fast boot CPU.  Once this returns,
+-         * periodic synchronization bounds the subsequent switchcpu skew by
+-         * one configured quantum.
+-         */
+-        if (sync_time(cfg->comm.sock_fd[id], "send_lat_dist_active") != 0) {
+-            goto free_cr;
+-        }
++        /* The lifecycle COMMIT is already a collective endpoint fence. */
+     }
+     if (cpu_switch_requested()) {
+         if (gem5_switch_roi_cpu("enter ROI") != 0) {
+@@ -1918,9 +1907,7 @@ static void *run_send_lat_duplex(void *arg)
+             goto free_cr;
+         }
+         dist_sync_active = true;
+-        if (sync_time(cfg->comm.sock_fd[id], "send_lat_dist_active") != 0) {
+-            goto free_cr;
+-        }
++        /* The lifecycle COMMIT is already a collective endpoint fence. */
+     }
+     if (cpu_switch_requested()) {
+         if (gem5_switch_roi_cpu("enter ROI") != 0) {
+@@ -3570,14 +3557,7 @@ static int run_send_bw_once(perftest_context_t *ctx, perftest_config_t *cfg)
+             return -1;
+         }
+         dist_sync_active = true;
+-        for (i = 0; i < cfg->pair_num; i++) {
+-            ret = sync_time(cfg->comm.sock_fd[i], "send_bw_dist_active");
+-            if (ret != 0) {
+-                (void)fprintf(stderr,
+-                    "Failed to rendezvous after enabling send_bw distributed synchronization.\n");
+-                goto disable_dist_sync;
+-            }
+-        }
++        /* The lifecycle COMMIT is already a collective endpoint fence. */
+     }
+ 
+     if (cfg->bidirection &&
+-- 
+2.50.1 (Apple Git-155)
+

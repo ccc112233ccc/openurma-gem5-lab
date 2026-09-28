@@ -196,6 +196,9 @@ def create_olk66_compatible(args):
                 "OPENURMA_UDMA_HOST_POLL_INTERVAL", "1us"
             ),
             sync=os.environ.get("OPENURMA_UDMA_HOST_SYNC", "0") == "1",
+            lifecycle_sync=os.environ.get(
+                "OPENURMA_UDMA_HOST_LIFECYCLE_SYNC", "0"
+            ) == "1",
             link_latency=os.environ.get(
                 "OPENURMA_UDMA_HOST_LINK_LATENCY", "50ns"
             ),

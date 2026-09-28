@@ -17,6 +17,12 @@ enum class MessageType : std::uint8_t {
     Frame = 0x40,
     LinkState = 0x41,
     Credit = 0x42,
+    Lifecycle = 0x43,
+};
+
+enum class LifecycleAction : std::uint8_t {
+    PrepareSync = 1,
+    CommitSync = 2,
 };
 
 enum class LinkState : std::uint8_t {
@@ -58,14 +64,26 @@ struct [[gnu::packed]] LinkControl {
     std::uint8_t own_type;
 };
 
+struct [[gnu::packed]] Lifecycle {
+    std::uint64_t generation;
+    std::uint8_t action;
+    std::uint8_t enabled;
+    std::uint8_t reserved[38];
+    std::uint64_t timestamp;
+    std::uint8_t pad[7];
+    std::uint8_t own_type;
+};
+
 union Message {
     SimbricksProtoBaseMsg base;
     Frame frame;
     LinkControl link;
+    Lifecycle lifecycle;
 };
 
 static_assert(sizeof(Frame) == 64);
 static_assert(sizeof(LinkControl) == 64);
+static_assert(sizeof(Lifecycle) == 64);
 static_assert(sizeof(Message) == 64);
 static_assert(offsetof(Frame, timestamp) == 48);
 

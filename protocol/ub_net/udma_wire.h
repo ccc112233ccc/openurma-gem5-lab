@@ -6,6 +6,8 @@
 namespace openurma::proto::net {
 
 inline constexpr std::uint32_t kUdmaWireMagic = 0x31574455U; // "UDW1"
+inline constexpr std::uint16_t kUdmaWireFragmented = 1U << 0;
+inline constexpr std::uint16_t kUdmaWireLastFragment = 1U << 1;
 
 enum class UdmaOperation : std::uint8_t {
     Send = 0,
@@ -30,7 +32,8 @@ struct [[gnu::packed]] UdmaWireHeader {
     std::uint64_t request_id;
     std::uint32_t transfer_length;
     std::uint32_t payload_length;
+    std::uint32_t payload_offset;
 };
-static_assert(sizeof(UdmaWireHeader) == 56);
+static_assert(sizeof(UdmaWireHeader) == 60);
 
 } // namespace openurma::proto::net
