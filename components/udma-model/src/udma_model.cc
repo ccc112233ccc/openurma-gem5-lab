@@ -140,6 +140,7 @@ UdmaModel::UdmaModel(HostInterface& host, NetworkInterface& network,
                      Config config)
     : host_(host), network_(network), config_(config)
 {
+    link_up_.assign(config_.port_count, true);
     StoreLe<std::uint32_t>(ummu_registers_, 0x10, 0x00000b08);
     StoreLe<std::uint32_t>(ummu_registers_, 0x14, 0x00042208);
     StoreLe<std::uint32_t>(ummu_registers_, 0x18, 0x00009056);
@@ -783,9 +784,19 @@ UdmaModel::BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
             id = next_tp_id_;
         }
         const std::uint8_t* cfg = request.data() + Outer + Ctrl;
+        std::uint32_t port = 0;
+        bool found_port = false;
+        for (std::uint32_t attempt = 0; attempt < config_.port_count; ++attempt) {
+            const std::uint32_t candidate = config_.port_count ?
+                next_tp_port_++ % config_.port_count : 0;
+            if (candidate < link_up_.size() && link_up_[candidate]) {
+                port = candidate; found_port = true; break;
+            }
+        }
+        if (!found_port) return false;
         TpRoute route{id, id, LoadLe<std::uint32_t>(cfg) & 0xfffffU,
                       LoadLe<std::uint32_t>(cfg + 16) & 0xfffffU,
-                      config_.port_count ? next_tp_port_++ % config_.port_count : 0,
+                      port,
                       false};
         if (!route.local_eid || !route.remote_eid || tp_routes_.count(id))
             return false;
@@ -1142,7 +1153,9 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         (wqe.opcode() != 0 && wqe.opcode() != 1 &&
          wqe.opcode() != 3 && wqe.opcode() != 6)) return fail();
     const auto route = tp_routes_.find(wqe.tpn());
-    if (route == tp_routes_.end() || !route->second.active) return fail();
+    if (route == tp_routes_.end() || !route->second.active ||
+        route->second.port >= link_up_.size() ||
+        !link_up_[route->second.port]) return fail();
     if (wqe.opcode() == 6) {
         if (wqe.inline_payload() || wqe.sge_count() != 1) return fail();
         const abi::Sge local = wqe.first_sge();
@@ -1696,6 +1709,27 @@ UdmaModel::Receive(Frame frame)
       case Frame::Operation::ReadResponse:
         return ReceiveReadResponse(std::move(frame));
       default: ++ubase_errors_; return;
+    }
+}
+
+void
+UdmaModel::SetLinkState(std::uint32_t port, bool up)
+{
+    if (port >= link_up_.size()) { ++ubase_errors_; return; }
+    link_up_[port] = up;
+    if (up) return;
+    for (auto& [id, route] : tp_routes_) {
+        (void)id;
+        if (route.port != port) continue;
+        bool rebound = false;
+        for (std::uint32_t candidate = 0; candidate < link_up_.size(); ++candidate) {
+            if (link_up_[candidate]) {
+                route.port = candidate;
+                rebound = true;
+                break;
+            }
+        }
+        if (!rebound) route.active = false;
     }
 }
 

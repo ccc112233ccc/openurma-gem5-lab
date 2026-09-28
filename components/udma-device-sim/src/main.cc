@@ -375,6 +375,11 @@ class NetworkPort final : public device::NetworkInterface {
                 }
             }
             model_->Receive(std::move(frame));
+        } else if (type == net_proto::MessageType::LinkState &&
+                   model_ != nullptr) {
+            model_->SetLinkState(message->link.port,
+                message->link.state ==
+                    static_cast<std::uint8_t>(net_proto::LinkState::Up));
         }
         net_proto::UbNetInDone(&interface_, message);
         return true;

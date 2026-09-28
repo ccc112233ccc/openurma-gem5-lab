@@ -193,6 +193,9 @@ bootstrap slice:
 - once the official UBUS code programs its Type-1 MSI tuple through UBIOS,
   interrupt delivery translates the MSI IOVA through UMMU and issues the
   programmed data as a host-bus write. Logical pin pulses are bootstrap-only.
+- UB-NET link-state messages update per-port hardware state. A TP whose port
+  goes down is rebound to an available modeled port; WQEs cannot transmit on a
+  route whose port is down.
 
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in

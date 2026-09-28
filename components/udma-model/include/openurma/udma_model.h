@@ -145,6 +145,7 @@ class UdmaModel {
     bool WriteMmio(std::uint64_t offset, std::uint32_t length,
                    std::uint64_t value);
     void Receive(Frame frame);
+    void SetLinkState(std::uint32_t port, bool up);
 
     std::uint64_t submitted() const { return submitted_; }
     std::uint64_t completed() const { return completed_; }
@@ -341,6 +342,7 @@ class UdmaModel {
     std::unordered_map<std::uint32_t, TpRoute> tp_routes_;
     std::uint32_t next_tp_id_{1};
     std::uint32_t next_tp_port_{};
+    std::vector<bool> link_up_;
     std::uint64_t next_sequence_{1};
     std::uint64_t next_rma_request_{1};
     std::uint64_t submitted_{0};

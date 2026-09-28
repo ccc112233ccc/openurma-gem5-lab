@@ -604,6 +604,8 @@ int main()
     invalid_token_write.bytes = {'x'};
     official_model.Receive(std::move(invalid_token_write));
     assert(!host.Contains(0x190000));
+    official_model.SetLinkState(0, false);
+    assert(official_model.tp_port(tp_id) == 1);
     assert(!official_model.ReadMmio(
         device::UdmaModel::kOfficialApertureBytes, 1, value));
 
