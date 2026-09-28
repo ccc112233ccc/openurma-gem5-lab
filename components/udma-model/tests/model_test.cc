@@ -467,6 +467,64 @@ int main()
     assert((receive_cqe[0] & 7) == 7); // receive + Jetty + owner
     assert(receive_cqe[16] == 3);
     assert(host.irq_vector == 2 && host.irq_pulses == 6);
+
+    constexpr std::uint64_t write_source = 0x160000;
+    constexpr std::uint64_t write_target = 0x170000;
+    host.Store(write_source, std::vector<std::uint8_t>({'r','m','a','!'}));
+    std::array<std::uint8_t, 64> write_wqe{};
+    const std::uint32_t write_flags = 2U | (0x20U << 16); // PI=2, CQE, owner=0
+    std::memcpy(write_wqe.data(), &write_flags, 4);
+    const std::uint32_t write_command = 3U << 8;
+    std::memcpy(write_wqe.data() + 4, &write_command, 4);
+    const std::uint32_t write_tpn_sge = tp_id | (1U << 24);
+    std::memcpy(write_wqe.data() + 8, &write_tpn_sge, 4);
+    std::memcpy(write_wqe.data() + 12, &remote_jetty, 4);
+    std::memcpy(write_wqe.data() + 40, &write_target, 8);
+    const std::uint32_t rma_bytes = 4;
+    const std::uint32_t local_token = 5;
+    std::memcpy(write_wqe.data() + 48, &rma_bytes, 4);
+    std::memcpy(write_wqe.data() + 52, &local_token, 4);
+    std::memcpy(write_wqe.data() + 56, &write_source, 8);
+    for (std::size_t offset = 0; offset < write_wqe.size(); offset += 8) {
+        std::uint64_t word{};
+        std::memcpy(&word, write_wqe.data() + offset, 8);
+        assert(official_model.WriteMmio(jetty_page + offset, 8, word));
+    }
+    const device::Frame write_frame = network.frames.back();
+    assert(write_frame.operation == device::Frame::Operation::Write);
+    official_model.Receive(write_frame);
+    assert(host.Load(write_target) == std::vector<std::uint8_t>({'r','m','a','!'}));
+    const device::Frame write_ack = network.frames.back();
+    assert(write_ack.operation == device::Frame::Operation::WriteAck);
+    official_model.Receive(write_ack);
+    assert(host.Contains(cq_iova + 128));
+
+    constexpr std::uint64_t read_target = 0x180000;
+    std::array<std::uint8_t, 64> read_wqe{};
+    const std::uint32_t read_flags = 3U | (0x20U << 16) | (1U << 31);
+    std::memcpy(read_wqe.data(), &read_flags, 4);
+    const std::uint32_t read_command = 6U << 8;
+    std::memcpy(read_wqe.data() + 4, &read_command, 4);
+    std::memcpy(read_wqe.data() + 8, &write_tpn_sge, 4);
+    std::memcpy(read_wqe.data() + 12, &remote_jetty, 4);
+    std::memcpy(read_wqe.data() + 40, &write_target, 8);
+    std::memcpy(read_wqe.data() + 48, &rma_bytes, 4);
+    std::memcpy(read_wqe.data() + 52, &local_token, 4);
+    std::memcpy(read_wqe.data() + 56, &read_target, 8);
+    for (std::size_t offset = 0; offset < read_wqe.size(); offset += 8) {
+        std::uint64_t word{};
+        std::memcpy(&word, read_wqe.data() + offset, 8);
+        assert(official_model.WriteMmio(jetty_page + offset, 8, word));
+    }
+    const device::Frame read_request = network.frames.back();
+    assert(read_request.operation == device::Frame::Operation::ReadRequest);
+    official_model.Receive(read_request);
+    const device::Frame read_response = network.frames.back();
+    assert(read_response.operation == device::Frame::Operation::ReadResponse);
+    official_model.Receive(read_response);
+    assert(host.Load(read_target) == std::vector<std::uint8_t>({'r','m','a','!'}));
+    assert(host.Contains(cq_iova + 192));
+    assert(host.irq_vector == 2 && host.irq_pulses == 8);
     assert(!official_model.ReadMmio(
         device::UdmaModel::kOfficialApertureBytes, 1, value));
 

@@ -182,6 +182,10 @@ bootstrap slice:
 - the receive slice resolves the destination Jetty/JFR, consumes the official
   RQ producer and index rings, scatters payload over posted SGEs, advances the
   hardware consumer, and creates a receive CQE with peer identity metadata.
+- WRITE completion is held until a remote-DMA ACK returns; READ retains its
+  local SGE and token until the matching response is DMA-written. RMA packets
+  carry transaction IDs, remote segment tokens, addresses, and lengths in the
+  simulator-neutral UDMA wire header.
 
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in

@@ -1139,9 +1139,43 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
     QueueContext& jetty = found->second;
     const bool expected_owner = ((jetty.consumer / jetty.depth) & 1U) == 0;
     if (wqe.owner() != expected_owner || wqe.wqebb_count() != 1 ||
-        (wqe.opcode() != 0 && wqe.opcode() != 1)) return fail();
+        (wqe.opcode() != 0 && wqe.opcode() != 1 &&
+         wqe.opcode() != 3 && wqe.opcode() != 6)) return fail();
     const auto route = tp_routes_.find(wqe.tpn());
     if (route == tp_routes_.end() || !route->second.active) return fail();
+    if (wqe.opcode() == 6) {
+        if (wqe.inline_payload() || wqe.sge_count() != 1) return fail();
+        const abi::Sge local = wqe.first_sge();
+        if (!local.address || !local.length || !wqe.remote_address()) return fail();
+        const std::uint64_t request_id = next_rma_request_++;
+        const std::uint16_t completed_index = static_cast<std::uint16_t>(
+            jetty.consumer & (jetty.depth - 1U));
+        pending_rma_[request_id] = PendingRma{
+            jetty_id, producer, completed_index, wqe.opcode(), local.length,
+            0, wqe.completion(), local.token, local.address};
+        Frame frame{};
+        frame.sequence = next_sequence_++;
+        frame.source_eid = config_.endpoint_eid + jetty.eid_index * 0x10000U;
+        frame.destination_eid = route->second.remote_eid;
+        frame.source_port = static_cast<std::uint16_t>(route->second.port);
+        frame.destination_port = UINT16_MAX;
+        frame.operation = Frame::Operation::ReadRequest;
+        frame.source_jetty = jetty_id;
+        frame.destination_jetty = wqe.remote_jetty();
+        frame.tpn = wqe.tpn();
+        frame.segment = wqe.remote_segment();
+        frame.remote_address = wqe.remote_address();
+        frame.request_id = request_id;
+        frame.transfer_length = local.length;
+        network_.Send(std::move(frame), [this, request_id, jetty_id](bool ok) {
+            if (ok) return;
+            pending_rma_.erase(request_id);
+            auto found = jetty_contexts_.find(jetty_id);
+            if (found != jetty_contexts_.end()) found->second.busy = false;
+            ++ubase_errors_;
+        });
+        return;
+    }
     if (wqe.inline_payload()) {
         if (wqe.inline_length() > 16) return fail();
         SubmitSqPayload(jetty_id, producer, std::move(raw),
@@ -1186,25 +1220,40 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
     frame.source_port = static_cast<std::uint16_t>(route->second.port);
     frame.destination_port = UINT16_MAX;
     frame.operation = wqe.opcode() == 0 ? Frame::Operation::Send :
-                                           Frame::Operation::SendImmediate;
+        (wqe.opcode() == 1 ? Frame::Operation::SendImmediate :
+                             Frame::Operation::Write);
     frame.source_jetty = jetty_id;
     frame.destination_jetty = wqe.remote_jetty();
     frame.tpn = wqe.tpn();
     frame.immediate = wqe.immediate();
+    frame.segment = wqe.remote_segment();
+    frame.remote_address = wqe.remote_address();
     frame.bytes = std::move(payload);
     const std::uint32_t count = static_cast<std::uint32_t>(frame.bytes.size());
     const std::uint16_t completed_index = static_cast<std::uint16_t>(
         jetty.consumer & (jetty.depth - 1U));
+    std::uint64_t request_id = 0;
+    if (wqe.opcode() == 3) {
+        request_id = next_rma_request_++;
+        frame.request_id = request_id;
+        frame.transfer_length = count;
+        pending_rma_[request_id] = PendingRma{
+            jetty_id, producer, completed_index, wqe.opcode(), count,
+            wqe.immediate(), wqe.completion(), 0, 0};
+    }
     network_.Send(std::move(frame),
         [this, jetty_id, producer, completed_index, opcode = wqe.opcode(),
-         count, immediate = wqe.immediate(), completion = wqe.completion()]
+         count, immediate = wqe.immediate(), completion = wqe.completion(),
+         request_id]
         (bool ok) {
             if (!ok) {
+                if (request_id) pending_rma_.erase(request_id);
                 auto found = jetty_contexts_.find(jetty_id);
                 if (found != jetty_contexts_.end()) found->second.busy = false;
                 ++ubase_errors_;
                 return;
             }
+            if (opcode == 3) return;
             CompleteSq(jetty_id, producer, 1, completed_index, opcode, count,
                        immediate, completion);
         });
@@ -1424,13 +1473,125 @@ UdmaModel::Finish(std::uint64_t sequence, const Descriptor& descriptor,
 void
 UdmaModel::Receive(Frame frame)
 {
-    if (frame.operation != Frame::Operation::Send &&
-        frame.operation != Frame::Operation::SendImmediate) {
+    switch (frame.operation) {
+      case Frame::Operation::Send:
+      case Frame::Operation::SendImmediate:
+        receive_frames_.push_back(std::move(frame));
+        ProcessReceiveQueue();
+        return;
+      case Frame::Operation::Write: return ReceiveWrite(std::move(frame));
+      case Frame::Operation::ReadRequest:
+        return ReceiveReadRequest(std::move(frame));
+      case Frame::Operation::WriteAck: return ReceiveWriteAck(std::move(frame));
+      case Frame::Operation::ReadResponse:
+        return ReceiveReadResponse(std::move(frame));
+      default: ++ubase_errors_; return;
+    }
+}
+
+void
+UdmaModel::ReceiveWrite(Frame frame)
+{
+    if (!frame.remote_address || frame.bytes.size() != frame.transfer_length) {
         ++ubase_errors_;
         return;
     }
-    receive_frames_.push_back(std::move(frame));
-    ProcessReceiveQueue();
+    const Frame reply_basis = frame;
+    host_.DmaWriteToken(frame.segment, frame.remote_address,
+                        std::move(frame.bytes),
+        [this, reply_basis](bool ok) mutable {
+            if (!ok) { ++ubase_errors_; return; }
+            Frame ack{};
+            ack.sequence = next_sequence_++;
+            ack.source_eid = reply_basis.destination_eid;
+            ack.destination_eid = reply_basis.source_eid;
+            ack.source_port = reply_basis.destination_port;
+            ack.destination_port = reply_basis.source_port;
+            ack.operation = Frame::Operation::WriteAck;
+            ack.source_jetty = reply_basis.destination_jetty;
+            ack.destination_jetty = reply_basis.source_jetty;
+            ack.tpn = reply_basis.tpn;
+            ack.request_id = reply_basis.request_id;
+            network_.Send(std::move(ack), [this](bool sent) {
+                if (!sent) ++ubase_errors_;
+            });
+        });
+}
+
+void
+UdmaModel::ReceiveReadRequest(Frame frame)
+{
+    if (!frame.remote_address || !frame.transfer_length) {
+        ++ubase_errors_;
+        return;
+    }
+    const Frame reply_basis = frame;
+    host_.DmaReadToken(frame.segment, frame.remote_address,
+                       frame.transfer_length,
+        [this, reply_basis](bool ok, std::vector<std::uint8_t> payload) mutable {
+            if (!ok || payload.size() != reply_basis.transfer_length) {
+                ++ubase_errors_;
+                return;
+            }
+            Frame response{};
+            response.sequence = next_sequence_++;
+            response.source_eid = reply_basis.destination_eid;
+            response.destination_eid = reply_basis.source_eid;
+            response.source_port = reply_basis.destination_port;
+            response.destination_port = reply_basis.source_port;
+            response.operation = Frame::Operation::ReadResponse;
+            response.source_jetty = reply_basis.destination_jetty;
+            response.destination_jetty = reply_basis.source_jetty;
+            response.tpn = reply_basis.tpn;
+            response.request_id = reply_basis.request_id;
+            response.transfer_length = reply_basis.transfer_length;
+            response.bytes = std::move(payload);
+            network_.Send(std::move(response), [this](bool sent) {
+                if (!sent) ++ubase_errors_;
+            });
+        });
+}
+
+void
+UdmaModel::ReceiveWriteAck(Frame frame)
+{
+    auto found = pending_rma_.find(frame.request_id);
+    if (found == pending_rma_.end() || found->second.opcode != 3) {
+        ++ubase_errors_;
+        return;
+    }
+    const PendingRma pending = found->second;
+    pending_rma_.erase(found);
+    CompleteSq(pending.jetty_id, pending.producer, 1,
+               pending.completed_index, pending.opcode, pending.byte_count,
+               pending.immediate, pending.completion);
+}
+
+void
+UdmaModel::ReceiveReadResponse(Frame frame)
+{
+    auto found = pending_rma_.find(frame.request_id);
+    if (found == pending_rma_.end() || found->second.opcode != 6 ||
+        frame.bytes.size() != found->second.byte_count) {
+        ++ubase_errors_;
+        return;
+    }
+    const PendingRma pending = found->second;
+    pending_rma_.erase(found);
+    host_.DmaWriteToken(pending.local_token, pending.local_address,
+                        std::move(frame.bytes),
+        [this, pending](bool ok) {
+            if (!ok) {
+                auto jetty = jetty_contexts_.find(pending.jetty_id);
+                if (jetty != jetty_contexts_.end()) jetty->second.busy = false;
+                ++ubase_errors_;
+                return;
+            }
+            CompleteSq(pending.jetty_id, pending.producer, 1,
+                       pending.completed_index, pending.opcode,
+                       pending.byte_count, pending.immediate,
+                       pending.completion);
+        });
 }
 
 void

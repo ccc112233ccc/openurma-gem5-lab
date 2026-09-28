@@ -34,6 +34,19 @@ class HostInterface {
     {
         DmaWrite(address, std::move(data), std::move(completion));
     }
+    virtual void DmaReadToken(std::uint32_t token, std::uint64_t address,
+                              std::size_t length, ReadCompletion completion)
+    {
+        (void)token;
+        DmaReadIoVirtual(address, length, std::move(completion));
+    }
+    virtual void DmaWriteToken(std::uint32_t token, std::uint64_t address,
+                               std::vector<std::uint8_t> data,
+                               Completion completion)
+    {
+        (void)token;
+        DmaWriteIoVirtual(address, std::move(data), std::move(completion));
+    }
     virtual void SetInterrupt(std::uint32_t vector, bool asserted) = 0;
     virtual void PulseInterrupt(std::uint32_t vector)
     {
@@ -65,6 +78,7 @@ struct Frame {
     std::uint64_t remote_address{};
     std::uint64_t immediate{};
     std::uint64_t request_id{};
+    std::uint32_t transfer_length{};
     std::vector<std::uint8_t> bytes;
 };
 
@@ -201,6 +215,10 @@ class UdmaModel {
                     std::uint32_t copied);
     void FinishReceive(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
                        std::uint32_t rqe_index);
+    void ReceiveWrite(Frame frame);
+    void ReceiveReadRequest(Frame frame);
+    void ReceiveWriteAck(Frame frame);
+    void ReceiveReadResponse(Frame frame);
     void ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
                            std::uint32_t descriptor_count,
                            std::vector<std::uint8_t> context);
@@ -277,11 +295,24 @@ class UdmaModel {
     std::uint32_t next_tp_id_{1};
     std::uint32_t next_tp_port_{};
     std::uint64_t next_sequence_{1};
+    std::uint64_t next_rma_request_{1};
     std::uint64_t submitted_{0};
     std::uint64_t completed_{0};
     std::unordered_map<std::uint64_t, Descriptor> pending_;
     std::deque<Frame> receive_frames_;
     bool receive_busy_{};
+    struct PendingRma {
+        std::uint32_t jetty_id{};
+        std::uint32_t producer{};
+        std::uint16_t completed_index{};
+        std::uint8_t opcode{};
+        std::uint32_t byte_count{};
+        std::uint64_t immediate{};
+        bool completion{};
+        std::uint32_t local_token{};
+        std::uint64_t local_address{};
+    };
+    std::unordered_map<std::uint64_t, PendingRma> pending_rma_;
 };
 
 } // namespace openurma::device

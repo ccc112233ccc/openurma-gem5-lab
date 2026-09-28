@@ -20,7 +20,8 @@ migrated merely because an old in-gem5 fallback still implements it.
 | UMMU translation tables and invalidation | pending | implement in device or negotiate translated DMA service |
 | official SQ doorbell and WQE decode | SEND migrated | direct SQE and ring doorbell, official owner/opcode/SGE fields |
 | SEND transmit and receive payload DMA | migrated | SQ SGE/inline DMA plus JFR PI/index/SGE receive DMA |
-| remote memory semantics | RMA pending | WRITE ACK and READ request/response state machines required |
+| WRITE/READ request-response state machines | migrated | WRITE-after-remote-DMA ACK and READ response-to-local-SGE tests |
+| UMMU token permission enforcement | pending | UB-HOST carries PASID/token; gem5 adapter translation remains |
 | CQE creation and CEQ production | SEND TX/RX migrated | CI check, owner bit, 64-byte CQE, CEQE and vector 2 |
 | completion moderation | pending | model CEQ coalescing policy and timer |
 | multi-port TP selection | migrated | control-plane round-robin TP-to-port binding |

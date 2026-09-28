@@ -28,8 +28,9 @@ struct [[gnu::packed]] UdmaWireHeader {
     std::uint64_t remote_address;
     std::uint64_t immediate;
     std::uint64_t request_id;
+    std::uint32_t transfer_length;
     std::uint32_t payload_length;
 };
-static_assert(sizeof(UdmaWireHeader) == 52);
+static_assert(sizeof(UdmaWireHeader) == 56);
 
 } // namespace openurma::proto::net

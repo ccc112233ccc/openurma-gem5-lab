@@ -126,6 +126,24 @@ class HostPort final : public device::HostInterface {
                 host_proto::AddressKind::IoVirtual);
     }
 
+    void DmaReadToken(std::uint32_t token, std::uint64_t address,
+                      std::size_t length,
+                      device::ReadCompletion completion) override
+    {
+        if (length > PayloadCapacity()) return completion(false, {});
+        SendDma(address, length, true, std::move(completion), {}, nullptr,
+                host_proto::AddressKind::IoVirtual, token);
+    }
+
+    void DmaWriteToken(std::uint32_t token, std::uint64_t address,
+                       std::vector<std::uint8_t> data,
+                       device::Completion completion) override
+    {
+        if (data.size() > PayloadCapacity()) return completion(false);
+        SendDma(address, data.size(), false, {}, std::move(completion), &data,
+                host_proto::AddressKind::IoVirtual, token);
+    }
+
     void SetInterrupt(std::uint32_t vector, bool asserted) override
     {
         SendInterrupt(vector, asserted ? host_proto::InterruptAction::Raise
@@ -186,7 +204,8 @@ class HostPort final : public device::HostInterface {
                  device::Completion write_completion,
                  const std::vector<std::uint8_t>* payload = nullptr,
                  host_proto::AddressKind address_kind =
-                     host_proto::AddressKind::GuestPhysical)
+                     host_proto::AddressKind::GuestPhysical,
+                 std::uint32_t pasid = 0)
     {
         auto* message = host_proto::UbHostD2HOutAlloc(&interface_, now_);
         if (message == nullptr) {
@@ -200,6 +219,7 @@ class HostPort final : public device::HostInterface {
         message->dma.address = address;
         message->dma.length = static_cast<std::uint32_t>(length);
         message->dma.address_kind = static_cast<std::uint8_t>(address_kind);
+        message->dma.pasid = pasid;
         if (payload != nullptr) {
             auto* destination = reinterpret_cast<volatile std::uint8_t*>(message) +
                                 sizeof(host_proto::D2HMessage);
@@ -285,6 +305,7 @@ class NetworkPort final : public device::NetworkInterface {
             header.remote_address = frame.remote_address;
             header.immediate = frame.immediate;
             header.request_id = frame.request_id;
+            header.transfer_length = frame.transfer_length;
             header.payload_length = static_cast<std::uint32_t>(frame.bytes.size());
             const auto* first = reinterpret_cast<const std::uint8_t*>(&header);
             wire.assign(first, first + sizeof(header));
@@ -348,6 +369,7 @@ class NetworkPort final : public device::NetworkInterface {
                     frame.remote_address = header.remote_address;
                     frame.immediate = header.immediate;
                     frame.request_id = header.request_id;
+                    frame.transfer_length = header.transfer_length;
                     frame.bytes.erase(frame.bytes.begin(),
                                       frame.bytes.begin() + sizeof(header));
                 }
