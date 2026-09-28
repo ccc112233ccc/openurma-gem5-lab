@@ -276,6 +276,7 @@ int main()
     std::vector<std::uint8_t> jfc_context(128, 0);
     store32(jfc_context, 0, static_cast<std::uint32_t>(cq_iova));
     store32(jfc_context, 2 * 4, 9);
+    store32(jfc_context, 4 * 4, 1U << 22); // interrupt every CQE
     store32(jfc_context, 6 * 4, static_cast<std::uint32_t>(ci_iova >> 6));
     host.Store(jfc_context_iova, jfc_context);
     std::vector<std::uint8_t> create_jfc(32, 0);

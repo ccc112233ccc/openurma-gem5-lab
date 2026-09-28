@@ -973,6 +973,9 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
             ((std::uint64_t(dw(7) & 0x03ffffffU) << 32) | dw(6)) << 6;
         queue.depth = shift < 31 ? 1U << shift : 0;
         queue.token = dw(2) & 0x000fffffU;
+        queue.moderation_count = dw(4) >> 22;
+        if (!queue.moderation_count) queue.moderation_count = 1;
+        queue.moderation_period = (dw(5) >> 22) & 0x7U;
         if (!queue.queue_iova || !queue.index_iova || !queue.depth)
             return FailUbase();
         jfc_contexts_[tag] = queue;
@@ -1333,6 +1336,13 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                     if (!write_ok || found == jfc_contexts_.end())
                         return completion(false);
                     ++found->second.producer;
+                    ++found->second.pending_completions;
+                    if (found->second.pending_completions <
+                        found->second.moderation_count) {
+                        completion(true);
+                        return;
+                    }
+                    found->second.pending_completions = 0;
                     EmitCompletionEvent(jfc_id, std::move(completion));
                 });
         });

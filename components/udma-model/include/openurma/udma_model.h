@@ -319,6 +319,9 @@ class UdmaModel {
         std::uint32_t target_producer{};
         std::uint32_t max_sge{1};
         std::uint32_t entry_stride{16};
+        std::uint32_t moderation_count{1};
+        std::uint32_t moderation_period{};
+        std::uint32_t pending_completions{};
         std::array<std::uint8_t, 64> direct_wqe{};
         std::uint64_t direct_valid{};
     };
