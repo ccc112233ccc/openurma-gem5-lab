@@ -50,6 +50,12 @@ all official hardware modules as one coherent runtime bundle after the final
 kernel configuration succeeds.  It also rebuilds IPv6 against that final
 kernel.
 
+The first cold-start attempt also exposed that `setup` fetched ns-3-UB but did
+not invoke its adapter build, even though the default modular runtime requires
+`ns3.44-ub-net-adapter`.  The all-components build now compiles that adapter,
+runs both asynchronous and conservative process-contract tests, and checks the
+executable as a required final artifact.
+
 ## Startup-race regression
 
 An immediate `./lab sync` after `./lab start` previously could fail with

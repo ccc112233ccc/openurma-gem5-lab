@@ -34,6 +34,8 @@ echo "[build-all] gem5"
 echo "[build-all] simulator-neutral UDMA model and process boundaries"
 "$lab/scripts/build/build_udma_model.sh"
 "$lab/scripts/build/build_udma_device_sim.sh"
+echo "[build-all] ns-3-UB fabric adapter and process contracts"
+OPENURMA_BUILD_JOBS="$jobs" "$lab/scripts/build-ns3ub-adapter.sh"
 echo "[build-all] official UMDK and UDMA provider"
 BUILD_STOCK_UDMA=enable "$lab/scripts/build/build_umdk.sh"
 echo "[build-all] OLK-6.6 and official kernel drivers"
@@ -47,6 +49,7 @@ KSRC="$kernel_root" ARM_BUILD="$UMDK_BUILD_DIR" BUSYBOX_ARM64="$busybox_arm64" \
     "$lab/official-udma/build_initramfs.sh"
 for artifact in \
     "$lab/gem5/build/ARM/gem5.opt" \
+    "$lab/sources/ns-3-ub/build-linux/scratch/ns3.44-ub-net-adapter" \
     "$lab/artifacts/kernel/vmlinux" \
     "$lab/artifacts/umdk-build/urma/tools/urma_perftest/urma_perftest" \
     "$lab/artifacts/umdk-build/urma/hw/udma/liburma-udma.so" \
