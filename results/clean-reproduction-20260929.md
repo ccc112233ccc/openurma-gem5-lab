@@ -56,6 +56,14 @@ not invoke its adapter build, even though the default modular runtime requires
 runs both asynchronous and conservative process-contract tests, and checks the
 executable as a required final artifact.
 
+A subsequent no-checkpoint startup exposed a separate cold-boot-only issue in
+`sync`: it waited for an early `arch_timer` line in `system.terminal`, while
+gem5 discards PL011 bytes when no terminal client is attached.  Checkpoint
+runs skipped that wait using recorded timer evidence, which had hidden the
+problem.  `sync` now waits for the live shell and verifies the retained timer
+line directly through guest `dmesg`; the same UART transaction then configures
+the OOB interface.  The default cold-boot allowance is 1800 seconds.
+
 ## Startup-race regression
 
 An immediate `./lab sync` after `./lab start` previously could fail with
