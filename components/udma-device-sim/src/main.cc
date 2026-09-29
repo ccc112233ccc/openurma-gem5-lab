@@ -26,6 +26,7 @@ namespace net_proto = openurma::proto::net;
 namespace {
 
 std::atomic<bool> running{true};
+constexpr std::size_t kPollBatch = 256;
 
 void Stop(int) { running.store(false); }
 
@@ -122,6 +123,8 @@ class HostPort final : public device::HostInterface {
     bool PrepareSeen() const { return prepare_seen_; }
     std::uint64_t Generation() const { return generation_; }
     bool TargetEnabled() const { return target_enabled_; }
+    std::uint64_t AsyncTimestampJumps() const { return async_timestamp_jumps_; }
+    std::uint64_t AsyncTimestampJumpPs() const { return async_timestamp_jump_ps_; }
     bool PendingEmpty() const { return pending_.empty(); }
 
     void FinishFence() { prepare_seen_ = false; }
@@ -229,6 +232,19 @@ class HostPort final : public device::HostInterface {
     {
         auto* message = host_proto::UbHostH2DInPoll(&interface_, now_);
         if (message == nullptr) return false;
+        // With synchronization disabled SimBricks deliberately makes every
+        // queued message immediately visible.  Preserve causality without a
+        // fixed-step polling loop by adopting the sender timestamp before the
+        // hardware action is evaluated.
+        if (!SimbricksBaseIfSyncEnabled(&interface_.base)) {
+            const std::uint64_t message_time = message->base.header.timestamp;
+            if (message_time > now_) {
+                ++async_timestamp_jumps_;
+                async_timestamp_jump_ps_ += message_time - now_;
+            }
+            now_ = std::max(now_, message_time);
+            if (model_ != nullptr) model_->AdvanceTime(now_);
+        }
         const auto type = static_cast<host_proto::H2DType>(
             host_proto::UbHostH2DInType(&interface_, message));
         if (type == host_proto::H2DType::MmioRead ||
@@ -347,6 +363,8 @@ class HostPort final : public device::HostInterface {
     bool prepare_seen_{false};
     bool target_enabled_{false};
     std::uint64_t generation_{};
+    std::uint64_t async_timestamp_jumps_{};
+    std::uint64_t async_timestamp_jump_ps_{};
 };
 
 class NetworkPort final : public device::NetworkInterface {
@@ -361,6 +379,8 @@ class NetworkPort final : public device::NetworkInterface {
     std::uint64_t FragmentsQueued() const { return fragments_queued_; }
     std::uint64_t FragmentsSent() const { return fragments_sent_; }
     std::uint64_t SendBackpressure() const { return send_backpressure_; }
+    std::uint64_t AsyncTimestampJumps() const { return async_timestamp_jumps_; }
+    std::uint64_t AsyncTimestampJumpPs() const { return async_timestamp_jump_ps_; }
 
     bool SendPrepare(std::uint64_t generation, bool enabled)
     {
@@ -475,6 +495,15 @@ class NetworkPort final : public device::NetworkInterface {
     {
         auto* message = net_proto::UbNetInPoll(&interface_, now_);
         if (message == nullptr) return false;
+        if (!SimbricksBaseIfSyncEnabled(&interface_.base)) {
+            const std::uint64_t message_time = message->base.header.timestamp;
+            if (message_time > now_) {
+                ++async_timestamp_jumps_;
+                async_timestamp_jump_ps_ += message_time - now_;
+            }
+            now_ = std::max(now_, message_time);
+            if (model_ != nullptr) model_->AdvanceTime(now_);
+        }
         const auto type = static_cast<net_proto::MessageType>(
             net_proto::UbNetInType(&interface_, message));
         if (type == net_proto::MessageType::Frame && model_ != nullptr) {
@@ -572,6 +601,8 @@ class NetworkPort final : public device::NetworkInterface {
     std::uint64_t fragments_queued_{};
     std::uint64_t fragments_sent_{};
     std::uint64_t send_backpressure_{};
+    std::uint64_t async_timestamp_jumps_{};
+    std::uint64_t async_timestamp_jump_ps_{};
 };
 
 int Run(const Options& options)
@@ -656,8 +687,15 @@ int Run(const Options& options)
         ++loop_iterations;
         model.AdvanceTime(now);
         bool progress = false;
-        while (host.Poll()) progress = true;
-        while (network.Poll()) progress = true;
+        // Bound each drain pass.  In synchronized mode a peer can keep the
+        // ring continuously populated with SYNC messages; an unbounded drain
+        // then starves the outer-loop signal check and the other interface.
+        for (std::size_t count = 0;
+             count < kPollBatch && running.load() && host.Poll(); ++count)
+            progress = true;
+        for (std::size_t count = 0;
+             count < kPollBatch && running.load() && network.Poll(); ++count)
+            progress = true;
         while (network.FlushOne()) progress = true;
         if (options.lifecycle_sync && host.PrepareSeen() &&
             !prepare_forwarded && host.PendingEmpty() &&
@@ -725,9 +763,19 @@ int Run(const Options& options)
             };
         constrain(host_if.base);
         constrain(net_if.base);
-        if (!synchronized)
-            now += options.sync_interval_ps;
-        else if (next > now && next != std::numeric_limits<std::uint64_t>::max()) {
+        if (!synchronized) {
+            // In functional/asynchronous mode external messages carry their
+            // own timestamps (adopted by Poll()).  Only autonomous device
+            // deadlines require local time advancement, and those can be
+            // reached in one event-driven jump.
+            const std::uint64_t deadline = model.NextEventTime();
+            if (deadline > now &&
+                deadline != std::numeric_limits<std::uint64_t>::max()) {
+                now = deadline;
+                model.AdvanceTime(now);
+                progress = true;
+            }
+        } else if (next > now && next != std::numeric_limits<std::uint64_t>::max()) {
             now = next;
             ++sync_steps;
         }
@@ -745,6 +793,10 @@ int Run(const Options& options)
               << " idle_sleeps=" << idle_sleeps
               << " sync_steps=" << sync_steps
               << " sync_backpressure=" << sync_backpressure
+              << " async_timestamp_jumps="
+              << host.AsyncTimestampJumps() + network.AsyncTimestampJumps()
+              << " async_timestamp_jump_ps="
+              << host.AsyncTimestampJumpPs() + network.AsyncTimestampJumpPs()
               << " net_fragments_queued=" << network.FragmentsQueued()
               << " net_fragments_sent=" << network.FragmentsSent()
               << " net_send_backpressure=" << network.SendBackpressure()

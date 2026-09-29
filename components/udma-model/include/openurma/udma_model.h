@@ -155,6 +155,11 @@ class UdmaModel {
     // Advance device virtual time in picoseconds. Timed hardware behavior is
     // driven only through this method; the model never reads host wall time.
     void AdvanceTime(std::uint64_t now_ps);
+    // Return the next autonomous hardware deadline, or UINT64_MAX when the
+    // model is waiting exclusively for an external host/network message.
+    // Process adapters use this to jump directly to useful work in
+    // unsynchronized mode instead of polling virtual time in fixed quanta.
+    std::uint64_t NextEventTime() const;
     bool IsQuiescent() const;
     void RebaseTime(std::uint64_t now_ps = 0);
     bool SaveState(std::ostream& output) const;

@@ -37,4 +37,9 @@ wait "$switch_pid" 2>/dev/null || true
 grep -q 'routed reply and link-state PASS' "$work/a.log"
 grep -q 'routed request and reply PASS' "$work/b.log"
 grep -q 'connected 2 UB-NET endpoints' "$work/switch.log"
+if [[ "$sync_mode" == off ]] && grep -q '\[NS3_UB_NET_STATS\]' "$work/switch.log"; then
+    virtual_ps=$(sed -n 's/.*\[NS3_UB_NET_STATS\].* virtual_ps=\([0-9][0-9]*\).*/\1/p' \
+        "$work/switch.log")
+    [[ -n "$virtual_ps" && "$virtual_ps" -ge 5000000000 ]]
+fi
 echo 'ub-switch process contract: PASS'

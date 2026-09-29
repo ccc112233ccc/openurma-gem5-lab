@@ -9,6 +9,7 @@
 #include <cstring>
 #include <deque>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -581,9 +582,13 @@ int main()
     assert((send_cqe[0] & 6) == 6); // Jetty + owner
     assert(send_cqe[16] == 3);
     assert(!host.Contains(ceq_iova));
+    assert(official_model.NextEventTime() == 4000000);
     official_model.AdvanceTime(3999999);
+    assert(official_model.NextEventTime() == 4000000);
     assert(!host.Contains(ceq_iova));
     official_model.AdvanceTime(4000000);
+    assert(official_model.NextEventTime() ==
+           std::numeric_limits<std::uint64_t>::max());
     const auto& completion_event = host.Load(ceq_iova);
     assert((completion_event[0] & 0x7f) == 7);
     assert(host.irq_pulses == 4);

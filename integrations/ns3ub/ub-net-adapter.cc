@@ -38,6 +38,7 @@ namespace ubnet = openurma::proto::net;
 namespace {
 
 std::atomic<bool> running{true};
+constexpr std::size_t kPollBatch = 256;
 void StopProcess(int) { running.store(false); }
 
 std::uint64_t ParseUnsigned(const std::string& text, const char* name,
@@ -236,14 +237,19 @@ class UbNetFabric {
                   << " boundary=ub-net-v1\n";
         while (running.load()) {
             ++loop_iterations_;
-            const std::uint64_t now = NowPs();
+            std::uint64_t now = NowPs();
             bool progress = false;
             bool all_terminated = true;
             for (std::size_t i = 0; i < endpoints_.size(); ++i) {
-                while (PollOne(i, now)) progress = true;
+                for (std::size_t count = 0;
+                     count < kPollBatch && running.load() && PollOne(i, now);
+                     ++count)
+                    progress = true;
                 all_terminated = all_terminated &&
                     SimbricksBaseIfInTerminated(&endpoints_[i].interface.base);
             }
+            // PollOne may jump asynchronous time to an incoming message.
+            now = NowPs();
             for (auto& endpoint : endpoints_)
                 progress = Flush(endpoint, now) || progress;
             if (options_.lifecycle_sync &&
@@ -349,6 +355,8 @@ class UbNetFabric {
                   << " idle_sleeps=" << idle_sleeps_
                   << " sync_steps=" << sync_steps_
                   << " sync_backpressure=" << sync_backpressure_
+                  << " async_timestamp_jumps=" << async_timestamp_jumps_
+                  << " async_timestamp_jump_ps=" << async_timestamp_jump_ps_
                   << " output_backpressure=" << output_backpressure_ << '\n';
     }
 
@@ -463,6 +471,16 @@ class UbNetFabric {
         auto& endpoint = endpoints_[source];
         auto* message = ubnet::UbNetInPoll(&endpoint.interface, now);
         if (!message) return false;
+        const std::uint64_t message_time = message->base.header.timestamp;
+        if (!SimbricksBaseIfSyncEnabled(&endpoint.interface.base) &&
+            message_time > NowPs()) {
+            // Async peers do not exchange conservative horizons.  The input
+            // timestamp is nevertheless the event time and can be reached in
+            // one jump instead of replaying every synchronization quantum.
+            async_timestamp_jump_ps_ += message_time - NowPs();
+            ++async_timestamp_jumps_;
+            AdvanceTo(message_time);
+        }
         const auto type = static_cast<ubnet::MessageType>(
             ubnet::UbNetInType(&endpoint.interface, message));
         if (type == ubnet::MessageType::Frame) {
@@ -664,6 +682,8 @@ class UbNetFabric {
     std::uint64_t sync_steps_{};
     std::uint64_t sync_backpressure_{};
     std::uint64_t output_backpressure_{};
+    std::uint64_t async_timestamp_jumps_{};
+    std::uint64_t async_timestamp_jump_ps_{};
     bool lifecycle_active_{false};
 };
 

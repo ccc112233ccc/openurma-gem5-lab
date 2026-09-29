@@ -2230,6 +2230,18 @@ UdmaModel::AdvanceTime(std::uint64_t now_ps)
     }
 }
 
+std::uint64_t
+UdmaModel::NextEventTime() const
+{
+    std::uint64_t next = std::numeric_limits<std::uint64_t>::max();
+    for (const auto& [jfc_id, jfc] : jfc_contexts_) {
+        (void)jfc_id;
+        if (jfc.pending_completions && jfc.moderation_deadline_ps)
+            next = std::min(next, jfc.moderation_deadline_ps);
+    }
+    return next;
+}
+
 bool
 UdmaModel::IsQuiescent() const
 {

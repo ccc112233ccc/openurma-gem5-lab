@@ -16,6 +16,8 @@ namespace net_proto = openurma::proto::net;
 
 namespace {
 
+constexpr std::uint64_t kAsyncMessageTimePs = 5000000000ULL;
+
 template <typename T>
 void ZeroVolatile(volatile T& object)
 {
@@ -67,7 +69,11 @@ int RunHost(const std::string& socket)
     std::vector<std::uint8_t> descriptor_bytes(sizeof(descriptor));
     std::memcpy(descriptor_bytes.data(), &descriptor, sizeof(descriptor));
 
-    auto* doorbell = host_proto::UbHostH2DOutAlloc(&interface, 0);
+    // A far-future timestamp proves that the async device adapter consumes
+    // the event directly.  A fixed 100-ns stepping implementation cannot
+    // satisfy the process test's wall-clock timeout.
+    auto* doorbell = host_proto::UbHostH2DOutAlloc(
+        &interface, kAsyncMessageTimePs);
     if (doorbell == nullptr) return 12;
     ZeroVolatile(doorbell->mmio);
     doorbell->mmio.request_id = 1;

@@ -59,3 +59,54 @@ guest tick deltas; it is reported for provenance and is not host wall time.
 Rerun suite wall time: **251.265 seconds**.  Raw UART captures and the JSON/CSV
 report were generated under the ignored experiment directory
 `experiments/rma-regression-20260929-tick-e2e/`.
+
+## Event-driven asynchronous-adapter rerun
+
+The asynchronous adapters were changed to adopt incoming SimBricks message
+timestamps and jump directly to autonomous UDMA deadlines. They no longer
+advance idle virtual time in fixed 100 ns increments. A process-contract
+request timestamped at 5 ms completed in 0.334 ms wall time with seven UDMA
+main-loop iterations. The ns-3 contract likewise advanced directly to
+5.0005 ms and routed both frames in 30.2 ms wall time:
+
+```text
+[UDMA_PROFILE] ... wall_ns=334292 virtual_ps=5000500000 loops=7 idle_sleeps=3 ... async_timestamp_jumps=1 async_timestamp_jump_ps=5000500000 ...
+[NS3_UB_NET_STATS] forwarded=2 delivered=2 ... virtual_ps=5000500000 wall_ns=30228250 loops=36 ... async_timestamp_jumps=2 async_timestamp_jump_ps=5000300000 ...
+```
+
+The complete ten-case functional suite was then repeated against the real two
+guest/five-process topology. All cases passed; results include gem5 tick
+deltas on both nodes.
+
+| Case | Wall seconds | Max simulated ns | Result |
+|---|---:|---:|---:|
+| `send_bw_128_wrap` | 24.510 | 3839880789.486 | PASS |
+| `send_bw_4096` | 15.512 | 698308999.326 | PASS |
+| `write_lat_128` | 12.567 | 309869610.543 | PASS |
+| `read_lat_128` | 12.413 | 349601458.257 | PASS |
+| `write_bw_4096_out16` | 15.578 | 360009289.008 | PASS |
+| `read_bw_4096_out16` | 15.251 | 319370851.125 | PASS |
+| `write_bw_65536_frag` | 21.207 | 344622090.942 | PASS |
+| `read_bw_65536_frag` | 21.346 | 374690944.656 | PASS |
+| `write_bw_1m_frag` | 52.742 | 445300316.271 | PASS |
+| `read_bw_1m_frag` | 52.752 | 438318183.726 | PASS |
+
+Suite wall time: **243.917 seconds**. Raw evidence is under the ignored
+directory `experiments/rma-regression-20260929-event-driven-full/`.
+
+This is a correctness and scheduler-overhead improvement, not a claimed
+workload speedup: the previous tick-accounting run took 251.265 seconds, so the
+7.348-second difference is small enough to include ordinary host-load noise.
+
+## Conservative ROI observation
+
+A four-case conservative-sync smoke run was also attempted. Its first
+eight-iteration `send_lat` case remained in the measured loop for more than
+three minutes while both gem5 processes used about one core each and the two
+UDMA plus ns-3 processes each used roughly 64--68% of a core. This is CPU
+oversubscription and fine-grained conservative polling, not the asynchronous
+fixed-step defect above. The run was deliberately interrupted and is not
+counted as a passing result. Adapter drain batches are now bounded so a
+continuous stream of SYNC messages cannot starve signal handling or the other
+interface; subsequent `lab stop` testing confirmed every process exited within
+two seconds after `SIGTERM`.

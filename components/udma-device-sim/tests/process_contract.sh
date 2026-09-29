@@ -44,4 +44,6 @@ kill "$device_pid" 2>/dev/null || true
 wait "$device_pid" 2>/dev/null || true
 device_pid=
 grep -q "udma-device-sim: connected" "$device_log"
+virtual_ps=$(sed -n 's/.*\[UDMA_PROFILE\].* virtual_ps=\([0-9][0-9]*\).*/\1/p' "$device_log")
+[[ -n "$virtual_ps" && "$virtual_ps" -ge 5000000000 ]]
 echo "three-process UDMA contract: PASS"

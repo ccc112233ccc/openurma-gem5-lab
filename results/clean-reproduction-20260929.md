@@ -72,3 +72,28 @@ connections now retry within the caller's existing total timeout.  Mock tests
 cover delayed-listener success and timeout diagnostics.  A real two-node
 restore followed immediately by `./lab sync` completed on both UARTs with
 return code 0 and configured both OOB addresses successfully.
+
+## Cold-boot performance boundary
+
+The live cold-boot path is not yet fast enough for interactive use on the M2
+Docker host. With two `AtomicSimpleCPU` guests, synchronization disabled, and
+the final event-driven UDMA/ns-3 adapters, a UART client attached for 300
+seconds did not observe a shell prompt. Including startup before the UART
+wait, the run lasted about 386 seconds.
+
+The shutdown profiles establish where that time was *not* spent:
+
+```text
+[UDMA_PROFILE] ... wall_ns=386261967259 virtual_ps=100000 loops=385662 idle_sleeps=385661 ... contexts=0 mmio_writes=0 ...
+[UDMA_PROFILE] ... wall_ns=386329280550 virtual_ps=100000 loops=385739 idle_sleeps=385738 ... contexts=0 mmio_writes=0 ...
+[NS3_UB_NET_STATS] forwarded=0 delivered=0 ... virtual_ps=99999 wall_ns=388492502469 loops=388290 idle_sleeps=388288 ...
+```
+
+The external processes no longer manufacture virtual time by repeatedly
+adding 100 ns: each adopted only the initial 100 ns link-state timestamp, no
+UDMA MMIO was issued, and no network frame existed. During the run each gem5
+process consumed about one full core, while each UDMA process used about 1.5%
+and ns-3 about 0.5%. The remaining cold-start bottleneck is therefore the
+pre-driver gem5/firmware/kernel execution path. Checkpoint restore remains the
+validated interactive workflow; direct-kernel/boot-path optimization is a
+separate follow-up rather than an adapter synchronization fix.

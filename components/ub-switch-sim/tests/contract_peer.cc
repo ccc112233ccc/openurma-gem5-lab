@@ -13,6 +13,8 @@ namespace net = openurma::proto::net;
 
 namespace {
 
+constexpr std::uint64_t kAsyncMessageTimePs = 5000000000ULL;
+
 template <typename T>
 void ZeroVolatile(volatile T& object)
 {
@@ -63,7 +65,9 @@ int Run(const std::string& role, const std::string& socket,
     for (std::uint64_t spins = 0; spins < 20000000; ++spins) {
         net::UbNetOutSync(&interface, now);
         if (sender && link_up && !sent) {
-            auto* output = net::UbNetOutAlloc(&interface, now);
+            const std::uint64_t send_time =
+                sync_mode == "off" ? kAsyncMessageTimePs : now;
+            auto* output = net::UbNetOutAlloc(&interface, send_time);
             if (output != nullptr) {
                 ZeroVolatile(output->frame);
                 output->frame.sequence = 7;
@@ -95,6 +99,9 @@ int Run(const std::string& role, const std::string& socket,
         }
         const auto type = static_cast<net::MessageType>(
             net::UbNetInType(&interface, input));
+        if (!SimbricksBaseIfSyncEnabled(&interface.base))
+            now = std::max(now,
+                static_cast<std::uint64_t>(input->base.header.timestamp));
         if (type == net::MessageType::LinkState) {
             link_up = input->link.state ==
                       static_cast<std::uint8_t>(net::LinkState::Up);
