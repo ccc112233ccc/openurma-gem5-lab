@@ -25,15 +25,9 @@ fi
 manifest="$run_root/run-manifest.txt"
 network_backend="$(ou_exec awk -F= \
     '$1 == "network_backend" { print $2; exit }' "$manifest" 2>/dev/null || true)"
-if [[ "$network_backend" == modular-ns3ub ]]; then
-    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/sources/ns-3-ub/build-linux/scratch/ns3.44-ub-net-adapter}"
-    runtime_arch="$(ou_exec uname -m)"
-    udma_device_binary="${OPENURMA_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
-elif [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
-    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/sources/ns-3-ub/build-linux/scratch/ns3.44-ub-gem5-adapter}"
-else
-    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
-fi
+ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/sources/ns-3-ub/build-linux/scratch/ns3.44-ub-net-adapter}"
+runtime_arch="$(ou_exec uname -m)"
+udma_device_binary="${OPENURMA_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
 
 stop_one() {
     label=$1
@@ -64,12 +58,10 @@ node_count=${node_count:-2}
 for ((node = 0; node < node_count; ++node)); do
     stop_one "node$node" "$run_root/node$node/gem5.pid" "$run_root/node$node"
 done
-if [[ "$network_backend" == modular-ns3ub ]]; then
-    for ((node = 0; node < node_count; ++node)); do
-        stop_one "udma$node" "$run_root/udma-node$node/udma.pid" \
-            "$udma_device_binary"
-    done
-fi
+for ((node = 0; node < node_count; ++node)); do
+    stop_one "udma$node" "$run_root/udma-node$node/udma.pid" \
+        "$udma_device_binary"
+done
 stop_one switch "$run_root/switch/gem5.pid" "$run_root/switch"
 stop_one ub-switch "$run_root/ub-switch/gem5.pid" "$ub_switch_binary"
 if ou_exec test -r "$run_root/oob-switch/relay.pid"; then

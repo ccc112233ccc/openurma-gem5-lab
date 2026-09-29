@@ -12,20 +12,11 @@ supports both asynchronous execution and SimBricks-style synchronization.
 subdirectory. It compiles the portable SimBricks transport in the same process
 without introducing a dependency on gem5.
 
-The following files are retained temporarily for the current full-system
-launcher while its endpoint is moved out of gem5:
-
-- `ub-gem5-adapter.cc` is the standalone ns-3 process.
-- `ub-external-adapter-protocol.h` is its shared-memory ring ABI.
-- `register-adapter-header.patch` registers the ABI header with the upstream
-  ns-3 module build.
-
 The upstream ns-3-UB checkout is a generated dependency under
 `sources/ns-3-ub` at the revision recorded in `SOURCE_REVISIONS.md`. During
 `./lab build ns3ub`, the checked-in overlays are installed into that checkout
-and both adapters are built. The build then runs UB-NET process contracts with
-synchronization disabled and required. This proves the new boundary without
-pretending that the legacy full-system launcher has already been cut over.
+and the UB-NET adapter is built. The build then runs UB-NET process contracts
+with synchronization disabled and required.
 
 Keeping the complete adapter here makes the integration reviewable from this
 repository. It also avoids depending on unpublished commits in a sibling

@@ -19,7 +19,7 @@ Build and launch the verified single-node probe with:
 ```
 
 `start-qemu` uses TCG, GICv2, a Cortex-A72 CPU model, and the unchanged
-official OLK/OpenURMA userspace and kernel stack.  The command launches a
+official openEuler OLK and UMDK userspace/kernel stack. The command launches a
 standalone UDMA process and terminates its network interface with the contract
 peer; it is meant to verify discovery/MMIO/DMA/driver probe interactively.
 The expected terminal evidence is `/dev/uburma/udma0` plus four ACTIVE EIDs in

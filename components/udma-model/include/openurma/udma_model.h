@@ -101,7 +101,7 @@ class NetworkInterface {
 
 // First simulator-independent execution slice. The descriptor format is an
 // internal model contract used only by the extraction tests; official UDMA WQE
-// decoders will replace/extend it as they move out of NICTopologySC.
+// production decoders replace/extend it for official queue formats.
 struct Descriptor {
     std::uint8_t opcode;
     std::uint8_t source_port;

@@ -64,8 +64,7 @@ the adapter so the boundary delay is not charged twice.
 The complete process and protocol implementation is reviewable in
 `integrations/ns3ub/ub-net-adapter.cc` and `protocol/ub_net/`. The public
 ns-3-UB source tree is a pinned generated dependency, not the owner of this
-lab-specific ABI. The version-4 mmap adapter remains a temporary launcher
-compatibility path only.
+lab-specific ABI.
 
 ## Virtual time
 
@@ -83,21 +82,11 @@ axis. SYNC terminates at the adjacent fabric adapter and carries no EID, TP,
 pair, workload or ROI state. EIDs route FRAME only. This lets independent flows
 start at different times without creating pair-specific epochs or barriers.
 
-## Delivery stages
+## Current and future coverage
 
-1. `compatibility bridge` (**complete**): consume the current version-4 ring, execute fabric
-   events in an ns-3 process, and reproduce the existing switch timing test.
-2. `native fabric` (**UB-NET contract complete; launcher cutover pending**):
-   translate the opaque endpoint carrier to an ns-3-UB frame
-   at switch ingress and use native switch queues, routing, egress ports, and
-   links. The first milestone disables flow control while validating the
-   lossless base path.
-3. `fabric features`: enable native flow control, congestion feedback, link
-   faults, and topology-driven routing without moving transaction semantics.
-4. `scale`: the adapter/switch ABI is validated for two and four endpoints and
-   one and two physical ports. Larger full-system runs, MTP profiling, and
-   optional MPI partitioning inside ns-3-UB remain future work.
-
-Each stage must retain deterministic unit tests and an A/B test against the
-preceding stage.  Native transport or transaction-layer ownership is outside
-this plan; moving it later requires a new boundary decision.
+The native fabric and full-system launcher cutover are complete. Contract
+tests cover synchronized and asynchronous execution, while full-system runs
+cover multiple endpoints and physical ports. Native flow control, congestion
+feedback, link faults, larger-scale MTP profiling and optional MPI
+partitioning inside ns-3-UB remain future work. Transaction-layer ownership
+stays in the UDMA device model.

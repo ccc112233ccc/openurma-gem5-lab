@@ -69,7 +69,7 @@ fi
 for ((node = 0; node < node_count; ++node)); do
     transcript="$run_root/node$node/system.terminal"
     if ou_exec test -r "$transcript"; then
-        if ou_exec grep -aq 'OpenURMA Tier-G interactive guest' "$transcript"; then
+        if ou_exec grep -aq 'Official UDMA full-system guest' "$transcript"; then
             echo "node$node   guest shell ready"
         else
             echo "node$node   booting (see $transcript)"

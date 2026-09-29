@@ -1,0 +1,358 @@
+From d7a08a8b84b0a393a91e259025c0ab123ad60a6b Mon Sep 17 00:00:00 2001
+From: Burger <cczjum@outlook.com>
+Date: Tue, 29 Sep 2026 10:54:27 +0800
+Subject: [PATCH] Add modular UB adapter synchronization support
+
+---
+ configs/common/MemConfig.py   | 22 ++++++++++++--
+ src/cpu/o3/thread_context.cc  |  2 ++
+ src/cpu/simple_thread.cc      |  2 ++
+ src/dev/net/dist_iface.cc     | 18 +++++++++++-
+ src/dev/net/dist_iface.hh     |  7 +++++
+ src/dev/net/ethertap.cc       | 16 +++++++---
+ src/sim/pseudo_inst.cc        | 15 ++++++++++
+ src/sim/system.cc             | 21 ++++++++++++-
+ src/sim/system.hh             |  2 ++
+ src/systemc/core/scheduler.hh | 55 +++++++++++++++++++++++++++++------
+ 10 files changed, 143 insertions(+), 17 deletions(-)
+
+diff --git a/configs/common/MemConfig.py b/configs/common/MemConfig.py
+index 717ffa5fa..d7cb8a885 100644
+--- a/configs/common/MemConfig.py
++++ b/configs/common/MemConfig.py
+@@ -41,7 +41,15 @@ from common import (
+ import m5.objects
+ 
+ 
+-def create_mem_intf(intf, r, i, intlv_bits, intlv_size, xor_low_bit):
++def create_mem_intf(
++    intf,
++    r,
++    i,
++    intlv_bits,
++    intlv_size,
++    xor_low_bit,
++    addr_mapping=None,
++):
+     """
+     Helper function for creating a single memory controller from the given
+     options.  This function is invoked multiple times in config_mem function
+@@ -66,6 +74,14 @@ def create_mem_intf(intf, r, i, intlv_bits, intlv_size, xor_low_bit):
+     # mapping and row-buffer size
+     interface = intf()
+ 
++    # A full-system experiment must be able to freeze the controller's
++    # address decoder rather than silently inheriting the selected media
++    # class's default.  Apply this before computing the channel-interleave
++    # bits below; changing it after the range is constructed can make the
++    # range selector and DRAM decoder disagree.
++    if addr_mapping and issubclass(intf, m5.objects.DRAMInterface):
++        interface.addr_mapping = addr_mapping
++
+     # Only do this for DRAMs
+     if issubclass(intf, m5.objects.DRAMInterface):
+         # If the channel bits are appearing after the column
+@@ -144,6 +160,7 @@ def config_mem(options, system):
+     opt_dram_powerdown = getattr(options, "enable_dram_powerdown", None)
+     opt_mem_channels_intlv = getattr(options, "mem_channels_intlv", 128)
+     opt_xor_low_bit = getattr(options, "xor_low_bit", 0)
++    opt_mem_addr_mapping = getattr(options, "mem_addr_mapping", None)
+ 
+     if opt_mem_type == "HMC_2500_1x32":
+         HMChost = HMC.config_hmc_host_ctrl(options, system)
+@@ -217,7 +234,8 @@ def config_mem(options, system):
+             if opt_mem_type and (not opt_nvm_type or range_iter % 2 != 0):
+                 # Create the DRAM interface
+                 dram_intf = create_mem_intf(
+-                    intf, r, i, intlv_bits, intlv_size, opt_xor_low_bit
++                    intf, r, i, intlv_bits, intlv_size, opt_xor_low_bit,
++                    opt_mem_addr_mapping,
+                 )
+ 
+                 # Set the number of ranks based on the command-line
+diff --git a/src/cpu/o3/thread_context.cc b/src/cpu/o3/thread_context.cc
+index 06210de07..1ec826c2c 100644
+--- a/src/cpu/o3/thread_context.cc
++++ b/src/cpu/o3/thread_context.cc
+@@ -70,6 +70,8 @@ ThreadContext::activate()
+     DPRINTF(O3CPU, "Calling activate on Thread Context %d\n",
+             threadId());
+ 
++    if (getSystemPtr()->threads.activationDeferred(contextId()))
++        return;
+     if (thread->status() == gem5::ThreadContext::Active)
+         return;
+ 
+diff --git a/src/cpu/simple_thread.cc b/src/cpu/simple_thread.cc
+index c28359a4e..9fc6bb523 100644
+--- a/src/cpu/simple_thread.cc
++++ b/src/cpu/simple_thread.cc
+@@ -132,6 +132,8 @@ SimpleThread::unserialize(CheckpointIn &cp)
+ void
+ SimpleThread::activate()
+ {
++    if (system->threads.activationDeferred(contextId()))
++        return;
+     if (status() == ThreadContext::Active)
+         return;
+ 
+diff --git a/src/dev/net/dist_iface.cc b/src/dev/net/dist_iface.cc
+index 824139bc3..7de458c0b 100644
+--- a/src/dev/net/dist_iface.cc
++++ b/src/dev/net/dist_iface.cc
+@@ -881,12 +881,28 @@ DistIface::toggleSync(ThreadContext *tc)
+         // activation here, since we know exactly when the next sync will
+         // occur.
+         for (auto *tc: primary->sys->threads) {
+-            if (tc->status() == ThreadContext::Active)
++            // A thread executing the pseudo instruction may already appear
++            // Suspended because of a nearby syscall/WFI transition.  It can
++            // still have an earlier resume event, so always replace that
++            // event with the collective synchronization tick.  Otherwise a
++            // later invocation can issue traffic before all peers arrive.
++            if (tc->status() != ThreadContext::Halted &&
++                tc->status() != ThreadContext::Halting)
+                 tc->quiesceTick(primary->syncEvent->when() + 1);
+         }
+     }
+ }
+ 
++Tick
++DistIface::startupSyncTick()
++{
++    if (!syncEvent || !sync || !syncEvent->scheduled())
++        return 0;
++    const Tick next = syncEvent->when();
++    const Tick repeat = sync->repeatTick();
++    return next > curTick() && next - curTick() > repeat ? next : 0;
++}
++
+ bool
+ DistIface::readyToExit(Tick delay)
+ {
+diff --git a/src/dev/net/dist_iface.hh b/src/dev/net/dist_iface.hh
+index 3d6243e65..5e59fec30 100644
+--- a/src/dev/net/dist_iface.hh
++++ b/src/dev/net/dist_iface.hh
+@@ -161,6 +161,8 @@ class DistIface : public Drainable, public Serializable
+         friend class SyncEvent;
+ 
+       public:
++        Tick repeatTick() const { return nextRepeat; }
++
+         /**
+          * Initialize periodic sync params.
+          *
+@@ -636,6 +638,11 @@ class DistIface : public Drainable, public Serializable
+      * Getter for the dist size param.
+      */
+     static uint64_t sizeParam();
++    /**
++     * Return the first synchronization tick while CPUs are being aligned.
++     * Once periodic synchronization is active, return zero.
++     */
++    static Tick startupSyncTick();
+     /**
+      * Trigger the primary to start/stop synchronization.
+      */
+diff --git a/src/dev/net/ethertap.cc b/src/dev/net/ethertap.cc
+index c66723b55..2be7060d9 100644
+--- a/src/dev/net/ethertap.cc
++++ b/src/dev/net/ethertap.cc
+@@ -135,10 +135,14 @@ EtherTapBase::unserialize(CheckpointIn &cp)
+     bool tapevent_present;
+     UNSERIALIZE_SCALAR(tapevent_present);
+     if (tapevent_present) {
+-        event = new TapEvent(this, 0, 0);
+-        event->unserialize(cp);
+-        if (event->queued())
+-            pollQueue.schedule(event);
++        // A host poll event cannot survive a process restart: its fd belongs
++        // to the old EtherTap socket.  The newly constructed tap has already
++        // installed (or will install) a poll event for its current fd.  Read
++        // the serialized event solely to consume the checkpoint fields and
++        // discard it instead of replacing the live event with a stale fd.
++        auto *stale_event = new TapEvent(this, 0, 0);
++        stale_event->unserialize(cp);
++        delete stale_event;
+     }
+ }
+ 
+@@ -312,6 +316,10 @@ EtherTapStub::unserialize(CheckpointIn &cp)
+     EtherTapBase::unserialize(cp);
+ 
+     UNSERIALIZE_SCALAR(socket);
++    // The serialized descriptor belonged to the checkpointing process.  A
++    // restored stub must accept a fresh connection instead of treating that
++    // integer as an already-live socket (and closing the newly accepted fd).
++    socket = -1;
+     UNSERIALIZE_SCALAR(buffer_used);
+     UNSERIALIZE_SCALAR(frame_len);
+ }
+diff --git a/src/sim/pseudo_inst.cc b/src/sim/pseudo_inst.cc
+index 084be5a41..1b8845a62 100644
+--- a/src/sim/pseudo_inst.cc
++++ b/src/sim/pseudo_inst.cc
+@@ -47,6 +47,7 @@
+ 
+ #include <array>
+ #include <cerrno>
++#include <cstdlib>
+ #include <fstream>
+ #include <string>
+ #include <vector>
+@@ -478,6 +479,20 @@ void
+ togglesync(ThreadContext *tc)
+ {
+     DPRINTF(PseudoInst, "pseudo_inst::togglesync()\n");
++    // A SimBricks-style adapter is synchronized for the entire simulation and
++    // has no DistIface object. Older guest binaries still contain this
++    // perftest marker, so treat it as a compatibility no-op. It must neither
++    // exit to Python nor change adapter state. Stock dist-gem5 behavior is
++    // preserved when the explicit adapter environment flag is absent.
++    const char *lifecycle_sync = std::getenv("OPENURMA_LIFECYCLE_SYNC");
++    if (lifecycle_sync && *lifecycle_sync && *lifecycle_sync != '0') {
++        exitSimLoop("openurma lifecycle sync fence");
++        return;
++    }
++    const char *adapter_sync = std::getenv("OPENURMA_ADAPTER_LOCAL_SYNC");
++    if (adapter_sync && *adapter_sync && *adapter_sync != '0') {
++        return;
++    }
+     DistIface::toggleSync(tc);
+ }
+ 
+diff --git a/src/sim/system.cc b/src/sim/system.cc
+index 806eca3dd..f23db1725 100644
+--- a/src/sim/system.cc
++++ b/src/sim/system.cc
+@@ -70,6 +70,11 @@ std::vector<System *> System::systemList;
+ void
+ System::Threads::Thread::resume()
+ {
++    if (quiesceUntil > curTick()) {
++        context->getCpuPtr()->reschedule(resumeEvent, quiesceUntil, true);
++        return;
++    }
++    quiesceUntil = 0;
+     DPRINTFS(Quiesce, context->getCpuPtr(), "activating\n");
+     context->activate();
+ }
+@@ -157,9 +162,23 @@ System::Threads::quiesceTick(ContextID id, Tick when)
+     BaseCPU *cpu = t.context->getCpuPtr();
+ 
+     DPRINTFS(Quiesce, cpu, "quiesceTick until %u\n", when);
++    t.quiesceUntil = std::max(t.quiesceUntil, when);
+     t.quiesce();
+ 
+-    cpu->reschedule(t.resumeEvent, when, true);
++    cpu->reschedule(t.resumeEvent, t.quiesceUntil, true);
++}
++
++bool
++System::Threads::activationDeferred(ContextID id)
++{
++    auto &t = thread(id);
++    if (t.quiesceUntil <= curTick()) {
++        t.quiesceUntil = 0;
++        return false;
++    }
++    t.context->getCpuPtr()->reschedule(
++        t.resumeEvent, t.quiesceUntil, true);
++    return true;
+ }
+ 
+ int System::numSystemsRunning = 0;
+diff --git a/src/sim/system.hh b/src/sim/system.hh
+index bb64f639b..c16d726da 100644
+--- a/src/sim/system.hh
++++ b/src/sim/system.hh
+@@ -121,6 +121,7 @@ class System : public SimObject, public PCEventScope
+             ThreadContext *context = nullptr;
+             bool active = false;
+             Event *resumeEvent = nullptr;
++            Tick quiesceUntil = 0;
+ 
+             void resume();
+             std::string name() const;
+@@ -223,6 +224,7 @@ class System : public SimObject, public PCEventScope
+ 
+         void quiesce(ContextID id);
+         void quiesceTick(ContextID id, Tick when);
++        bool activationDeferred(ContextID id);
+ 
+         const_iterator begin() const { return const_iterator(*this, 0); }
+         const_iterator end() const { return const_iterator(*this, size()); }
+diff --git a/src/systemc/core/scheduler.hh b/src/systemc/core/scheduler.hh
+index 49ad6c6f0..0f376398a 100644
+--- a/src/systemc/core/scheduler.hh
++++ b/src/systemc/core/scheduler.hh
+@@ -276,6 +276,25 @@ class Scheduler
+     }
+ 
+     // For descheduling delayed/timed notifications/timeouts.
++    //
++    // OpenURMA patch (2026-05): the upstream implementation looks up the
++    // owning time slot by matching event->when() against
++    // (*tsit)->targeted_when. That cached when() value can drift from the
++    // slot the event is actually parked on whenever a notify(t) races a
++    // recycled TimeSlot (acquireTimeSlot reuses an entry from
++    // freeTimeSlots, resets targeted_when and clears events, but any
++    // event still pointing at &slot.events via _events is now adrift of
++    // its old when()). The authoritative source of truth is
++    // event->scheduledOn() — that pointer matches the live time slot's
++    // events list exactly. Walk by pointer identity first; fall back to
++    // the legacy when()-based lookup for the common path; and if both
++    // fail, gracefully deschedule by event-local state instead of
++    // panicking. This restores end-to-end SC pipeline operation in
++    // gem5 FS for cascades like the OpenRoCE doorbell→qptx→bthb→
++    // dcqcn→retrans→txmux→ethenc chain that synchronously notify()
++    // through seven _tick events in a single b_transport call. See
++    // OpenURMA eval/twonode/gem5_scaffold/patches/gem5_sc_deschedule.patch
++    // for the rationale and a smaller reproducer.
+     void
+     deschedule(ScEvent *event)
+     {
+@@ -288,15 +307,33 @@ class Scheduler
+             return;
+         }
+ 
+-        // Timed notification/timeout.
+-        auto tsit = timeSlots.begin();
+-        while (tsit != timeSlots.end() &&
+-               (*tsit)->targeted_when < event->when())
+-            tsit++;
+-
+-        panic_if(tsit == timeSlots.end() ||
+-                 (*tsit)->targeted_when != event->when(),
+-                "Descheduling event at time with no events.");
++        // Timed notification/timeout — first try to find the owning slot
++        // by pointer identity (authoritative), then by when() (legacy).
++        auto tsit = timeSlots.end();
++        for (auto it = timeSlots.begin(); it != timeSlots.end(); ++it) {
++            if (&(*it)->events == on) { tsit = it; break; }
++        }
++        if (tsit == timeSlots.end()) {
++            auto it = timeSlots.begin();
++            while (it != timeSlots.end() &&
++                   (*it)->targeted_when < event->when())
++                it++;
++            if (it != timeSlots.end() &&
++                (*it)->targeted_when == event->when() &&
++                &(*it)->events == on)
++                tsit = it;
++        }
++
++        if (tsit == timeSlots.end()) {
++            // The owning time slot is no longer in the active map (most
++            // commonly because it was just recycled via
++            // releaseTimeSlot/acquireTimeSlot). The event itself still
++            // holds a valid iterator into the slot's events list, so a
++            // direct deschedule is safe and leaves no dangling state.
++            event->deschedule();
++            return;
++        }
++
+         TimeSlot *ts = *tsit;
+         ScEvents &events = ts->events;
+         assert(on == &events);

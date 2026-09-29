@@ -4,8 +4,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab="${OPENURMA_LAB_ROOT:-$(cd "$script_dir/.." && pwd)}"
-openurma="$lab/sources/OpenURMA"
-openclicknp="$lab/sources/OpenClickNP"
+umdk="$lab/sources/umdk"
 kernel_root="${KSRC:-$lab/oe66}"
 jobs="${JOBS:-2}"
 build_mode="${OPENURMA_BUILD_MODE:-native}"
@@ -22,11 +21,9 @@ else
 fi
 
 export OPENURMA_LAB_ROOT="$lab"
-export OPENURMA_ROOT="$openurma"
-export OPENCLICKNP_ROOT="$openclicknp"
 export GEM5_ROOT="$lab/gem5"
 export KSRC="$kernel_root"
-export UMDK_SRC="$openurma/integration/umdk/vendor/umdk"
+export UMDK_SRC="$umdk"
 export UMMU_DEPS="$lab/deps/ummu"
 export UMDK_BUILD_DIR="$lab/artifacts/umdk-build"
 export ARTIFACT_DIR="$lab/artifacts/kernel"
@@ -37,7 +34,6 @@ echo "[build-all] gem5"
 echo "[build-all] simulator-neutral UDMA model and process boundaries"
 "$lab/scripts/build/build_udma_model.sh"
 "$lab/scripts/build/build_udma_device_sim.sh"
-"$lab/scripts/build/build_ub_switch_sim.sh"
 echo "[build-all] official UMDK and UDMA provider"
 BUILD_STOCK_UDMA=enable "$lab/scripts/build/build_umdk.sh"
 echo "[build-all] OLK-6.6 and official kernel drivers"
@@ -49,19 +45,12 @@ KSRC="$kernel_root" ARM_BUILD="$UMDK_BUILD_DIR" BUSYBOX_ARM64="$busybox_arm64" \
     OPENURMA_ARM64_SYSROOT="$arm64_sysroot" \
     OUT="$lab/out/official-udma.cpio.gz" \
     "$lab/official-udma/build_initramfs.sh"
-echo "[build-all] interactive initramfs"
-KSRC="$kernel_root" ARM_BUILD="$UMDK_BUILD_DIR" BUSYBOX_ARM64="$busybox_arm64" \
-    OPENURMA_ARM64_SYSROOT="$arm64_sysroot" \
-    OUT="$lab/out/openurma-interactive.cpio.gz" \
-    "$lab/scripts/build/build-interactive-initramfs.sh"
-
 for artifact in \
     "$lab/gem5/build/ARM/gem5.opt" \
     "$lab/artifacts/kernel/vmlinux" \
     "$lab/artifacts/umdk-build/urma/tools/urma_perftest/urma_perftest" \
     "$lab/artifacts/umdk-build/urma/hw/udma/liburma-udma.so" \
-    "$lab/out/official-udma.cpio.gz" \
-    "$lab/out/openurma-interactive.cpio.gz"; do
+    "$lab/out/official-udma.cpio.gz"; do
     [[ -s "$artifact" ]] || { echo "[build-all] missing $artifact" >&2; exit 1; }
 done
 echo "[build-all] PASS: complete runnable stack is ready"

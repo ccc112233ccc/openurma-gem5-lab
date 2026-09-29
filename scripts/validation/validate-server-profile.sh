@@ -605,18 +605,13 @@ validate_node_config() {
     assert_ini_match "$cfg" system.iocache mem_side \
         '^system\.membus\.cpu_side_ports\[[0-9]+\]$'
 
-    assert_ini "$cfg" system.nic type NICTopologySC
-    assert_ini "$cfg" system.nic dma_backend udma
-    assert_ini "$cfg" system.nic dma_max_outstanding 16
-    assert_ini "$cfg" system.nic udma_iotlb_entries 64
-    assert_ini_match "$cfg" system.nic dma \
+    assert_ini "$cfg" system.external_udma type UbHostAdapter
+    assert_ini_match "$cfg" system.external_udma dma \
         '^system\.iobus\.cpu_side_ports\[[0-9]+\]$'
-    assert_ini "$cfg" system.nic udma_poll_interval 10000
-    assert_ini "$cfg" system.nic direct_wqe_latency 0
-    assert_ini "$cfg" system.nic sq_fetch_latency 0
-    assert_ini "$cfg" system.nic sq_wqebb_latency 0
-    assert_ini "$cfg" system.nic payload_dma_latency 0
-    assert_ini "$cfg" system.nic payload_dma_bandwidth 0.000000
+    assert_ini_match "$cfg" system.external_udma msi \
+        '^system\.membus\.cpu_side_ports\[[0-9]+\]$'
+    assert_ini "$cfg" system.external_udma pio_addr 754974720
+    assert_ini "$cfg" system.external_udma pio_size 16777216
 
     count=$(ini_section_count "$cfg" 'system\.mem_ctrls[0-9]+')
     assert_eq "$count" 8 "$node memory-controller count"

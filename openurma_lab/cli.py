@@ -27,7 +27,6 @@ class Command:
 
 COMMANDS = {
     "start": Command("scripts/run/run-dual.sh", "start the multi-node full-system simulation"),
-    "start-single": Command("scripts/run/run.sh", "start the legacy single-node simulation"),
     "start-qemu": Command("scripts/run/run-qemu.sh", "start the QEMU UB-HOST probe environment"),
     "start-qemu-dual": Command("scripts/run/run-qemu-dual.sh", "start two QEMU guests on the modular ns-3 UB fabric"),
     "status-qemu": Command("scripts/run/status-qemu-dual.sh", "show the QEMU dual-node process and boot state"),
@@ -50,7 +49,7 @@ BUILD_TARGETS = {
     "qemu": "scripts/build/build_qemu.sh",
     "kernel": "scripts/build/build_olk66.sh",
     "umdk": "scripts/build/build_umdk.sh",
-    "initramfs": "scripts/build/build-interactive-initramfs.sh",
+    "initramfs": "official-udma/build_initramfs.sh",
     "ns3ub": "scripts/build-ns3ub-adapter.sh",
     "udma-model": "scripts/build/build_udma_model.sh",
     "udma-device": "scripts/build/build_udma_device_sim.sh",
@@ -82,7 +81,6 @@ def _usage(stream=None) -> None:
         "Build and validation:\n"
         "  build TARGET      TARGET: " + ", ".join(BUILD_TARGETS) + "\n"
         "  validate-server   validate the instantiated server profile\n"
-        "  start-single      start the legacy single-node environment\n\n"
         "  start-qemu        start the interactive QEMU/UDMA probe environment\n\n"
         "  start-qemu-dual   start two QEMU guests plus UDMA and ns-3 UB fabric\n"
         "  attach-qemu NODE  connect to a QEMU guest serial console\n"

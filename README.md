@@ -1,7 +1,7 @@
 # OpenURMA gem5 full-system lab
 
 This repository boots independent ARM64 gem5 full-system nodes, loads the
-official openEuler/OpenURMA software stack in each guest, and connects their
+official openEuler OLK and UMDK software stack in each guest, and connects their
 modeled UB devices through a standalone UB network process.  The stable host
 interface is the Python command `./lab`; files below `scripts/` are internal
 build and runtime backends.
@@ -40,7 +40,7 @@ uses Docker. Stop the current experiment with `./lab stop`.
 Lifecycle:   setup, start, status, sync, attach NODE, stop
 Experiments: latency, latency-pair, latency-pairs, sweep-latency
 Build:       build all|gem5|qemu|kernel|umdk|initramfs|ns3ub|mooncake|udma-model|udma-device|ub-switch
-Validation:  validate-server, start-single, start-qemu, start-qemu-dual
+Validation:  validate-server, start-qemu, start-qemu-dual
 ```
 
 Examples:
@@ -86,12 +86,12 @@ reclaims only a stale `m5term` client for that node; it does not stop gem5.
 ```text
 lab                  Python CLI; the only supported host entry point
 openurma_lab/        CLI routing, runtime selection, and node addressing
-configs/             gem5 full-system machine and OpenURMA device topology
+configs/             lab-owned ARM64 full-system machine configuration
 protocol/            simulator-neutral UB-HOST and UB-NET wire protocols
 components/
   udma-model/         simulator-neutral UDMA device behavior and unit tests
   udma-device-sim/    standalone SimBricks host/network device process
-  ub-switch-sim/      simulator-neutral multi-endpoint UB-NET switch process
+  ub-switch-sim/      simulator-neutral UB-NET contract reference and tests
 scripts/
   build/             heavyweight gem5/kernel/UMDK/initramfs builders
   run/               internal launch, lifecycle, synchronization, benchmarks
@@ -123,8 +123,8 @@ The separation is intentional:
   types. The current gem5 model is being migrated behind that boundary.
 - `integrations/qemu/` contains no UDMA semantics: it forwards guest MMIO,
   DMA, and interrupts to the same standalone device process used by gem5.
-- `configs/` and the C++ code in `tools/` contain the existing integrated model
-  and network implementations while that migration is in progress.
+- `configs/arm64_fs.py` is the lab-owned full-system machine; it instantiates
+  only the thin UB-HOST adapter and contains no in-process UDMA model.
 - official Linux/UMDK code remains under the pinned upstream source trees;
   reproducible patches live under `patches/`.
 
@@ -141,8 +141,8 @@ Each node is an independent gem5 process running OLK 6.6, the official UBUS,
 UMMU, UBASE/UBCORE and UDMA kernel modules, the official UMDK `liburma` stack,
 and `urma_perftest`.  An out-of-process UB switch routes traffic by destination
 EID.  A separate Ethernet switch carries the benchmark control connection.
-The `adapter-local`, global-barrier, and unsynchronized KVM policies are
-selected by `./lab start` options; they are not encoded in wrapper scripts.
+The adapter-local conservative synchronization and unsynchronized KVM policies
+are selected by `./lab start` options; they are not encoded in wrapper scripts.
 
 For the complete model knobs, evidence, source revisions, and troubleshooting,
 see [the reference guide](docs/reference-guide.md),
@@ -156,7 +156,7 @@ see [the reference guide](docs/reference-guide.md),
 The CLI and host helpers use only the Python standard library:
 
 ```bash
-PYTHONPATH=tools:. python3 -m unittest tools.test_lab_cli tools.test_ethernet_relay tools.test_ub_switch_sim
+PYTHONPATH=tools:. python3 -m unittest tools.test_lab_cli tools.test_ethernet_relay
 bash -n scripts/run/*.sh scripts/build/*.sh scripts/*.sh
 ./lab --runtime native build udma-model
 ./lab --runtime native build udma-device
@@ -201,16 +201,13 @@ silently producing a nonfunctional full-system image.
 
 ## ns-3-UB adapter source
 
-Both the temporary gem5 compatibility adapter and the simulator-neutral
-UB-NET v1 adapter are checked in under `integrations/ns3ub/`; neither is hidden
-in a sibling development checkout.
+The simulator-neutral UB-NET v1 adapter is checked in under
+`integrations/ns3ub/`; it is not hidden in a sibling development checkout.
 `./lab setup --sources-only` fetches the pinned public ns-3-UB baseline into
 `sources/ns-3-ub`, and the build command installs the reviewed adapter overlay:
 
 ```bash
 ./lab build ns3ub
-./lab start --network-backend ns3ub-native
-
 # Simulator-neutral five-process path (2 gem5 + 2 UDMA + 1 ns-3 fabric):
 ./lab --runtime docker build udma-device
 ./lab --runtime docker start --profile fast --provider official \
@@ -218,8 +215,7 @@ in a sibling development checkout.
 ```
 
 The build runs bidirectional UB-NET process contracts with synchronization
-disabled and required. `ns3ub-native` retains the version-4 compatibility path
-as a regression baseline. `modular-ns3ub` selects UB-HOST v1 from each gem5 to
+disabled and required. `modular-ns3ub` selects UB-HOST v1 from each gem5 to
 an independent UDMA process and UB-NET v1 from those devices to native ns-3-UB.
 The modular mode requires the official provider. `--sync` makes both UB-HOST
 links and both UB-NET links participate from tick zero. The configured

@@ -6,9 +6,8 @@ changes code in one of those repositories.
 
 | Component | Path | Upstream baseline | Stage commit |
 | --- | --- | --- | --- |
-| OpenURMA integration and scaffold | `sources/OpenURMA` | `0ae5dce300154d761f97095864bda0cf2546b265` | `31e47bfbf0e1f8b22fcfb09df922a425f0f2fb74` |
-| vendored official UMDK | `sources/OpenURMA/integration/umdk/vendor/umdk` | `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58` | `8f272493e4138cd52cfb3ce11064a07c8d1be49f` |
-| gem5 | `./gem5` | `b1a44b89c7bae73fae2dc547bc1f871452075b85` | `387db831795fcc87f194a755b5f4be3b89864c61` |
+| official UMDK | `sources/umdk` | `4eab3e4ad170b06bfe5d5c1014341e81edb9bf58` | `8f272493e4138cd52cfb3ce11064a07c8d1be49f` |
+| gem5 | `./gem5` | `b1a44b89c7bae73fae2dc547bc1f871452075b85` | `d7a08a8b84b0a393a91e259025c0ab123ad60a6b` |
 | OpenEuler OLK 6.6 | `./oe66` | `5078a3a23a1e1825ec136485173ec98668cdd640` | unchanged; local case-folding noise is not committed |
 | UMMU userspace dependency | `./deps/ummu` | `f1930d006e08bbe96dfa6fa037ff8a386f535425` | unchanged |
 | ns-3-UB fabric | `sources/ns-3-ub` | `d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b` | unchanged; complete lab adapter is under `integrations/ns3ub/` |

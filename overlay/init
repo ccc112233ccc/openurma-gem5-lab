@@ -1,5 +1,5 @@
 #!/bin/sh
-# Interactive PID 1 for the OpenURMA Tier-G gem5 guest.
+# Interactive PID 1 for the official UDMA full-system guest.
 
 export PATH=/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 export LD_LIBRARY_PATH=/lib:/usr/lib
@@ -23,7 +23,7 @@ exec </dev/console >/dev/console 2>&1
 # The same initramfs serves the standalone guest and every multi-node guest.
 # gem5 appends a non-negative openurma_node=N to the kernel command line.
 OPENURMA_NODE=""
-OPENURMA_PROVIDER=legacy
+OPENURMA_PROVIDER=official
 OPENURMA_CPU_SWITCH=""
 OPENURMA_BENCH_CPU=""
 OPENURMA_M5OPS_MODE=inst
@@ -37,9 +37,6 @@ for arg in $(cat /proc/cmdline); do
                 *) OPENURMA_NODE=$node_value ;;
             esac
             ;;
-        openurma_provider=legacy) OPENURMA_PROVIDER=legacy ;;
-        openurma_provider=udma) OPENURMA_PROVIDER=udma ;;
-        openurma_provider=official) OPENURMA_PROVIDER=official ;;
         openurma_cpu_switch=server_o3) OPENURMA_CPU_SWITCH=server_o3 ;;
         openurma_bench_cpu=*) OPENURMA_BENCH_CPU=${arg#*=} ;;
         openurma_m5ops_mode=inst) OPENURMA_M5OPS_MODE=inst ;;
@@ -57,12 +54,8 @@ case "$OPENURMA_NODE" in
         guest_ip="10.0.0.$((OPENURMA_NODE + 1))"
         ;;
 esac
-if [ "$OPENURMA_PROVIDER" = official ]; then
-    eid_suffix=$(printf '%04x' "$((0x100 + ${OPENURMA_NODE:-0}))")
-    eid_display="0000:0000:0000:0000:0000:0000:0000:$eid_suffix"
-else
-    eid_display="fe80::$eid_last_byte"
-fi
+eid_suffix=$(printf '%04x' "$((0x100 + ${OPENURMA_NODE:-0}))")
+eid_display="0000:0000:0000:0000:0000:0000:0000:$eid_suffix"
 
 load_one() {
     module="$1"
@@ -82,7 +75,7 @@ load_one() {
 emergency_shell() {
     echo
     echo "[openurma-init] FAIL CLOSED: $1"
-    echo "[openurma-init] the UDMA-compatible kernel provider was not loaded"
+    echo "[openurma-init] the official UDMA stack was not loaded"
     echo "[openurma-init] inspect /etc/openurma-available-providers, then rebuild the initramfs"
     echo "[openurma-init] starting an emergency shell; exit restarts it"
     while true; do
@@ -96,36 +89,18 @@ echo
 echo "[openurma-init] mounting guest filesystems"
 load_one ipv6.ko || true
 ip link set lo up 2>/dev/null || echo "[openurma-init] warning: could not bring lo up"
-udma_compat=0
-if [ "$OPENURMA_PROVIDER" = udma ] || [ "$OPENURMA_PROVIDER" = official ]; then
-    if ! grep -qw udma /etc/openurma-available-providers 2>/dev/null ||
-       [ ! -r /lib/urma/liburma-udma.so ] || [ ! -r /lib/libummu.so.1 ]; then
-        emergency_shell \
-            "openurma_provider=udma requested, but stock provider/shim is not packaged"
-    fi
-    udma_compat=1
-fi
-if ! load_one ubcore.ko; then
-    [ "$OPENURMA_PROVIDER" = legacy ] || emergency_shell "ubcore.ko failed to load"
-fi
-if ! load_one uburma.ko; then
-    [ "$OPENURMA_PROVIDER" = legacy ] || emergency_shell "uburma.ko failed to load"
-fi
-if [ "$OPENURMA_PROVIDER" = official ]; then
-    for module in ubfi.ko ubus.ko openurma_ub_v2m.ko ummu-core.ko ummu.ko \
-                  hisi_ubus.ko ubase.ko udma.ko ubagg.ko; do
-        load_one "$module" || emergency_shell "$module failed to load"
-    done
-else
-    if ! load_one openurma_ubcore.ko "eid_last_byte=$eid_last_byte" \
-        "udma_compat=$udma_compat"; then
-        [ "$OPENURMA_PROVIDER" != udma ] || \
-            emergency_shell "openurma_ubcore.ko failed to load in UDMA-compatible mode"
-    fi
-fi
+grep -qw udma /etc/openurma-available-providers 2>/dev/null &&
+    [ -r /lib/urma/liburma-udma.so ] && [ -r /lib/libummu.so.1 ] ||
+    emergency_shell "official UDMA provider or libummu is not packaged"
+load_one ubcore.ko || emergency_shell "ubcore.ko failed to load"
+load_one uburma.ko || emergency_shell "uburma.ko failed to load"
+for module in ubfi.ko ubus.ko openurma_ub_v2m.ko ummu-core.ko ummu.ko \
+              hisi_ubus.ko ubase.ko udma.ko ubagg.ko; do
+    load_one "$module" || emergency_shell "$module failed to load"
+done
 
 # The e1000 device and TCP/IP are used only for urma_perftest's OOB handshake;
-# OpenURMA payloads use the simulated UB peer ring.  In a distributed run the
+# URMA payloads use the external UB fabric.  In a distributed run the
 # e1000 is a DistEtherLink endpoint.  Do the slow hardware bring-up before the
 # fine-grained barrier starts, but disable IPv6 and leave the interface without
 # an address so it cannot emit DAD/ARP traffic across the process boundary.
@@ -148,11 +123,7 @@ fi
 # Give ubcore's asynchronous registration path a brief chance to populate
 # sysfs/devtmpfs before the first interactive command.
 i=0
-if [ "$OPENURMA_PROVIDER" = official ]; then
-    expected_device=udma0
-else
-    expected_device=openurma0
-fi
+expected_device=udma0
 export OPENURMA_DEVICE="$expected_device"
 while [ "$i" -lt 50 ] && [ ! -e "/sys/class/ubcore/$expected_device" ]; do
     sleep 0.02
@@ -161,21 +132,13 @@ done
 
 echo
 echo "=============================================================="
-echo " OpenURMA Tier-G interactive guest"
-echo " provider mode: $OPENURMA_PROVIDER"
-if [ "$OPENURMA_PROVIDER" = official ]; then
-    echo " path: stock liburma-udma.so -> official udma.ko -> modeled UBASE/UMMU/UDMA"
-elif [ "$OPENURMA_PROVIDER" = udma ]; then
-    echo " path: stock liburma-udma.so -> UDMA-compatible kmod -> OpenURMA NIC"
-else
-    echo " path: liburma_openurma.so -> openurma kmod -> OpenURMA NIC"
-fi
+echo " Official UDMA full-system guest"
+echo " path: official liburma-udma.so -> official udma.ko -> external UDMA model"
 echo "=============================================================="
 if [ -n "$OPENURMA_NODE" ]; then
     echo "Node $OPENURMA_NODE: EID $eid_display, OOB IPv4 $guest_ip"
 fi
 echo "Type 'ou-help' for examples and 'ou-status' to inspect the stack."
-echo "Run 'ou-dataplane' for the 14-check data-path exercise."
 echo "Exit restarts the shell; 'poweroff -f' stops the guest."
 echo
 ou-status

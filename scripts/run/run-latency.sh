@@ -15,7 +15,7 @@ Run synchronized send_lat on the two guests. The default benchmark profile is
 the real-machine comparison shape: CTP, RM, SEND_IMM, inline threshold 128 B,
 and one Jetty.
 
-  --profile ctp-rm-send-imm-i128|legacy
+  --profile ctp-rm-send-imm-i128
   --samples N                 measured samples (default: 100)
   --size BYTES                message bytes (default: 128)
   --port PORT                 TCP setup port (default: 21115)
@@ -88,7 +88,6 @@ done
 
 case "$profile" in
     ctp-rm-send-imm-i128|ctp-rm-send-imm-inline128) profile=ctp-rm-send-imm-i128 ;;
-    legacy) ;;
     *) die "unknown profile '$profile'" ;;
 esac
 case "$samples:$size:$port:$uart0:$uart1" in

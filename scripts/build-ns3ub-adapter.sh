@@ -25,9 +25,6 @@ if [[ "$OPENURMA_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
 fi
 cache_dir="${OPENURMA_NS3UB_CACHE:-$source_root/cmake-cache-$build_suffix}"
 output_dir="${OPENURMA_NS3UB_OUTPUT:-$source_root/build-$build_suffix}"
-adapter_source="$runtime_lab/integrations/ns3ub/ub-gem5-adapter.cc"
-adapter_protocol="$runtime_lab/integrations/ns3ub/ub-external-adapter-protocol.h"
-adapter_cmake_patch="$runtime_lab/integrations/ns3ub/register-adapter-header.patch"
 ubnet_adapter_source="$runtime_lab/integrations/ns3ub/ub-net-adapter.cc"
 ubnet_adapter_cmake="$runtime_lab/integrations/ns3ub/ub-net-adapter.CMakeLists.txt"
 simbricks_base_source="$runtime_lab/components/udma-device-sim/simbricks_base_portable.c"
@@ -51,8 +48,12 @@ actual_source_revision="$(ou_exec git -C "$source_root" rev-parse HEAD)"
     echo "ns-3-UB is at $actual_source_revision; expected $expected_source_revision" >&2
     exit 2
 }
-ou_exec install -m 0644 "$adapter_source" "$source_root/scratch/ub-gem5-adapter.cc"
-ou_exec install -m 0644 "$adapter_protocol" \
+# Remove files installed by the retired ring-v4 adapter. The source checkout is
+# generated and pinned, so restoring this one upstream build file is safe and
+# keeps repeated builds independent of the removed compatibility path.
+ou_exec git -C "$source_root" restore --source "$expected_source_revision" -- \
+    src/unified-bus/CMakeLists.txt
+ou_exec rm -f "$source_root/scratch/ub-gem5-adapter.cc" \
     "$source_root/src/unified-bus/model/ub-external-adapter-protocol.h"
 ou_exec mkdir -p "$source_root/scratch/openurma-ub-net"
 ou_exec install -m 0644 "$ubnet_adapter_source" \
@@ -61,18 +62,9 @@ ou_exec install -m 0644 "$ubnet_adapter_cmake" \
     "$source_root/scratch/openurma-ub-net/CMakeLists.txt"
 ou_exec install -m 0644 "$simbricks_base_source" \
     "$source_root/scratch/openurma-ub-net/simbricks-base-portable.c"
-if ou_exec git -C "$source_root" apply --reverse --check "$adapter_cmake_patch" \
-        >/dev/null 2>&1; then
-    : # already applied
-elif ou_exec git -C "$source_root" apply --check "$adapter_cmake_patch"; then
-    ou_exec git -C "$source_root" apply "$adapter_cmake_patch"
-else
-    echo "ns-3-UB CMake integration does not match the pinned source" >&2
-    exit 1
-fi
 if ! ou_exec mkdir -p "$cache_dir" "$output_dir/include/ns3" 2>/dev/null; then
-    cache_dir=/tmp/ns3ub-native-cache
-    output_dir=/tmp/ns3ub-native-build
+    cache_dir=/tmp/ns3ub-modular-cache
+    output_dir=/tmp/ns3ub-modular-build
     ou_exec mkdir -p "$cache_dir" "$output_dir/include/ns3"
     echo "ns-3-UB source-local build directory is unavailable; using $output_dir" >&2
 fi
@@ -92,14 +84,9 @@ ou_exec cmake -S "$source_root" -B "$cache_dir" \
     -DNS3_OUTPUT_DIRECTORY="$output_dir"
 
 ou_exec cmake --build "$cache_dir" \
-    --target scratch_ub-gem5-adapter scratch_ub-net-adapter \
+    --target scratch_ub-net-adapter \
     -j "${OPENURMA_BUILD_JOBS:-8}"
 
-ou_exec test -x \
-    "$output_dir/scratch/ns3.44-ub-gem5-adapter"
-ou_exec env PYTHONPATH="$runtime_lab/tools:$runtime_lab" python3 \
-    "$runtime_lab/tools/test_ns3ub_native_adapter.py" \
-    "$output_dir/scratch/ns3.44-ub-gem5-adapter"
 ou_exec test -x "$output_dir/scratch/ns3.44-ub-net-adapter"
 
 if [[ "$OPENURMA_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
@@ -120,5 +107,4 @@ else
             "/tmp/openurma-ns3ub-contract-$sync_mode" "$sync_mode"
     done
 fi
-echo "ns-3-UB gem5 adapter built: $output_dir/scratch/ns3.44-ub-gem5-adapter"
 echo "ns-3-UB UB-NET adapter built: $output_dir/scratch/ns3.44-ub-net-adapter"

@@ -11,7 +11,7 @@ jobs="${JOBS:-2}"
 lab_dir="$OPENURMA_LAB_ROOT"
 artifact_dir="$MOONCAKE_URMA_ARTIFACT_DIR"
 build_dir="$MOONCAKE_DIR/$build_dir_name"
-urma_include="$lab_dir/sources/OpenURMA/integration/umdk/vendor/umdk/src/urma/lib/urma/core/include"
+urma_include="$lab_dir/sources/umdk/src/urma/lib/urma/core/include"
 urma_library="$lab_dir/artifacts/umdk-build/urma/lib/urma/core/liburma.so"
 urma_common_dir="$lab_dir/artifacts/umdk-build/urma/common"
 
@@ -49,7 +49,7 @@ install -m 0755 "$libasio" "$artifact_dir/lib/libasio.so"
 sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 cat > "$artifact_dir/manifest.txt" <<EOF
 mooncake_commit=$(git -C "$MOONCAKE_DIR" rev-parse HEAD)
-umdk_commit=$(git -C "$lab_dir/sources/OpenURMA/integration/umdk/vendor/umdk" rev-parse HEAD)
+umdk_commit=$(git -C "$lab_dir/sources/umdk" rev-parse HEAD)
 use_ub=ON
 build_type=Release
 binary=bin/transfer_engine_bench

@@ -2,8 +2,8 @@
 
 ## Objective
 
-The lab is moving from a gem5-specific device implementation to the same
-separation principle used by SimBricks: host simulators, device simulators, and
+The lab follows the same separation principle used by SimBricks: host
+simulators, device simulators, and
 network simulators are independent processes joined by narrow, timestamped
 interfaces. The official guest driver and UMDK remain unchanged. Hardware
 behavior belongs in a reusable UDMA model rather than in a gem5 or QEMU
@@ -21,8 +21,8 @@ adapter.
                  +------------ ns-3-UB fabric ---------------+
 ```
 
-This is a target architecture and a migration boundary, not a claim that the
-old monolithic `NICTopologySC` implementation has already disappeared.
+This is the only supported full-system architecture. The earlier monolithic
+SystemC device and peer-ring paths have been removed.
 
 ## Responsibility boundaries
 
@@ -43,17 +43,12 @@ The first gem5 implementation is
 `DmaDevice`: guest PIO becomes `UB-HOST` MMIO, device-originated requests use
 gem5's DMA port, and protocol interrupts drive an `ArmInterruptPin`. It has no
 UDMA descriptor or packet logic. The reproducible gem5 builder overlays this
-source into its generated EXTRAS tree, leaving the pinned OpenURMA checkout
-unchanged.
+source into a generated EXTRAS tree without importing another device model.
 
-This adapter is selected explicitly by `--network-backend modular-ns3ub` and
-negotiates required SimBricks synchronization when the launcher enables
-virtual time. The legacy SystemC NIC remains instantiated only as a
-compatibility child: its MMIO
-aperture and peer are disabled, while the standalone model owns official
-discovery/MMIO, DMA, interrupts, descriptors, and packet behavior. The default
-backend remains unchanged so the prior bootable path is still a regression
-baseline.
+This adapter is selected by the sole supported backend, `modular-ns3ub`, and
+negotiates SimBricks synchronization when the launcher enables virtual time.
+The standalone model owns official discovery/MMIO, DMA, interrupts,
+descriptors, and packet behavior.
 
 ### UDMA device model
 
@@ -110,10 +105,8 @@ Run it with:
 ./lab --runtime native build udma-model
 ```
 
-The temporary 32-byte descriptor in this test is an extraction harness, not a
-new guest ABI. It will be replaced by the official UDMA WQE decoder moved out
-of `NICTopologySC`. Keeping that distinction explicit prevents a test-only
-format from becoming accidental architecture.
+The temporary 32-byte descriptor in this unit test is an explicit test ABI,
+not a guest ABI. Production mode decodes the official UDMA queue format.
 
 `components/udma-device-sim/` is the corresponding standalone process. It
 listens on two independent SimBricks interfaces, exchanges typed introduction
@@ -152,8 +145,7 @@ The ns-3-UB backend implements the same UB-NET boundary in
 `integrations/ns3ub/ub-net-adapter.cc`. It uses native `UbSwitch`, `UbPort`,
 and `UbLink` objects and passes bidirectional process contracts with
 synchronization disabled and required. The full-system launcher now exposes
-this boundary as `modular-ns3ub`; the old mmap ring-v4 modes remain only as
-explicit compatibility baselines and are not the target API.
+this boundary as `modular-ns3ub`.
 
 When SimBricks synchronization is negotiated, gem5, both device processes,
 and the network fabric participate from tick zero. Each process advances to
@@ -185,28 +177,12 @@ JFC completion-period moderation therefore uses the official encoded
 of host scheduling speed. The official MODIFY_JFC context/mask operation can
 change count and period without recreating the queue.
 
-## Migration sequence
+## Completed cutover
 
-1. Freeze and test `UB-HOST`/`UB-NET` layouts and the simulator-neutral core.
-2. Run the core as an independent process over SimBricks shared-memory queues
-   using mock host and network peers. **Complete.**
-3. Replace one gem5 control path at a time: discovery/MMIO, DMA, interrupt,
-   SEND, then READ/WRITE and receive queues. The thin MMIO/DMA/IRQ adapter and
-   the standalone official register/WQE behavior are implemented and launched
-   end to end in the explicit modular mode.
-4. Connect ns-3-UB at the frame boundary and remove transaction shortcuts.
-   **UB-NET process contracts, explicit full-system launcher cutover, and
-   lifecycle-fenced five-process synchronization, coordinated checkpointing,
-   and the timed modular SEND/READ/WRITE regression are implemented.  The
-   enable fence and all functional data paths are verified; an end-to-end
-   disable-fence test is still impractical with AtomicCPU at 100 ns lookahead.**
-5. Add a QEMU adapter that implements the same `UB-HOST` protocol; the device
-   and network processes remain unchanged.
-6. Remove the duplicated hardware behavior from `NICTopologySC` only after
-   official-driver equivalence tests pass.
-
-This ordering keeps every checkpoint bootable and makes regressions attributable
-to one boundary at a time.
+The UB-HOST/UB-NET contracts, standalone device process, gem5 and QEMU host
+adapters, ns-3 fabric, lifecycle synchronization, coordinated checkpoints and
+SEND/READ/WRITE paths are implemented. The old in-gem5 device behavior is no
+longer a build or runtime input.
 
 ## Migration status
 
@@ -255,7 +231,5 @@ bootstrap slice:
 The temporary descriptor used by the original process contract is now behind
 the explicit `--test-abi` switch. A normal `udma-device-sim` process starts in
 official-aperture mode; test-only registers no longer overlap production MMIO.
-The feature-by-feature extraction status is tracked in
-[`device-model-migration.md`](device-model-migration.md); “migrated” there
-means the behavior is executed by the standalone model through UB-HOST, not by
-the legacy in-gem5 implementation.
+Production behavior is executed by the standalone model through UB-HOST; the
+test-only ABI remains isolated behind `--test-abi`.

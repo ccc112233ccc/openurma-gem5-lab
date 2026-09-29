@@ -23,7 +23,7 @@ show_process udma1 "$run_dir/udma-node1/udma.pid"
 show_process ns3-fabric "$run_dir/ub-fabric/ns3.pid"
 for node in 0 1; do
     terminal="$run_dir/node$node/system.terminal"
-    if [[ -r "$terminal" ]] && grep -aq 'OpenURMA Tier-G interactive guest' "$terminal"; then
+    if [[ -r "$terminal" ]] && grep -aq 'Official UDMA full-system guest' "$terminal"; then
         echo "node$node      guest shell ready"
     elif [[ -r "$terminal" ]]; then
         echo "node$node      booting (see $terminal)"

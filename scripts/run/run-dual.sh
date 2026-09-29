@@ -17,7 +17,7 @@ can also be supplied through the environment variable shown below.
 
 Profiles:
   --nodes N                     OPENURMA_NODE_COUNT (default: 2; 2..8)
-  --profile fast|kvm|server|udma400|legacy
+  --profile fast|kvm|server|udma400
                                 OPENURMA_DUAL_PROFILE (default: fast;
                                 fast is the AtomicSimpleCPU functional path)
   --restore-checkpoint NAME     restore coordinated state from checkpoints/NAME
@@ -128,18 +128,14 @@ CPU, cache, and memory:
   --mem-ctrl-command-window T   OPENURMA_MEM_CTRL_COMMAND_WINDOW
 
 UB link:
-  --network-backend MODE        OPENURMA_NETWORK_BACKEND
-                                (builtin|ns3ub-compat|ns3ub-native|
-                                modular-ns3ub;
-                                default: builtin)
-  --ub-transport MODE           OPENURMA_UB_TRANSPORT
-                                (switch-adapter|direct-ring; default:
-                                switch-adapter)
+  --network-backend modular-ns3ub
+                                OPENURMA_NETWORK_BACKEND (only supported path)
+  --ub-transport switch-adapter OPENURMA_UB_TRANSPORT (only supported path)
   --ub-port-count N             OPENURMA_UB_PORT_COUNT
   --peer-topology MODE          OPENURMA_PEER_TOPOLOGY (direct|l1-switch)
   --peer-port-map LIST          OPENURMA_PEER_PORT_MAP (for example 0,1)
   --peer-port-selection MODE    OPENURMA_PEER_PORT_SELECTION
-                                (tp-context|legacy-hash; default: tp-context)
+                                (tp-context; default: tp-context)
   --peer-latency-ns NS          OPENURMA_PEER_LATENCY_NS
   --sync-quantum-ns NS          OPENURMA_SYNC_QUANTUM_NS (default: lookahead)
   --sync                        force inter-simulator virtual-time sync on
@@ -147,10 +143,7 @@ UB link:
   --no-sync                     force inter-simulator virtual-time sync off
                                 OPENURMA_SYNC=(auto|on|roi|off; default: auto;
                                 roi for modular Atomic, off for KVM)
-  --sync-mode MODE              OPENURMA_SYNC_MODE
-                                mechanism used when synchronization is on
-                                (global-barrier|adapter-local; default:
-                                adapter-local)
+  --sync-mode adapter-local     OPENURMA_SYNC_MODE (only supported mode)
   --peer-link-rate-gbps N       OPENURMA_PEER_LINK_RATE_GBPS
   --peer-serialization-stages N OPENURMA_PEER_SERIALIZATION_STAGES
   --peer-switch-delay TIME      OPENURMA_PEER_SWITCH_DELAY
@@ -171,9 +164,8 @@ UDMA front end:
   --dma-max-outstanding N       OPENURMA_DMA_MAX_OUTSTANDING
 
 Other:
-  --provider legacy|udma|official
-                                OPENURMA_PROVIDER (default: profile-specific;
-                                official loads the unmodified OLK UDMA stack)
+  --provider official           OPENURMA_PROVIDER (only supported path; loads
+                                the unmodified OLK UDMA stack)
   --print-config                Print the resolved model without starting it
   -h, --help                    Show this help
 
@@ -568,8 +560,8 @@ done
 # the historical one-core/cache defaults; the server profile overrides every
 # CPU/cache/memory field below and records the resolved contract in its
 # manifest.
-profile_provider=legacy
-profile_revision=legacy-v1
+profile_provider=official
+profile_revision=official-udma-v1
 profile_num_cpus=1
 profile_benchmark_cpu=-1
 profile_o3_width=8
@@ -670,7 +662,7 @@ case "$profile" in
         # and the 400-Gbit/s direct UB link, but execute the full guest with
         # AtomicSimpleCPU and no timing caches.  Use this for interactive
         # bring-up and correctness checks, not for CPU/cache latency studies.
-        profile_provider=udma
+        profile_provider=official
         profile_revision=udma400-atomic-fast-functional-v2
         profile_cpu_mode=atomic_fast
         profile_cpu_freq=3GHz
@@ -694,7 +686,7 @@ case "$profile" in
         # KVM accelerates guest instructions only.  UDMA, UMMU, interrupts,
         # the UB adapter and switch remain simulator-owned.  The host CPU is
         # intentionally not presented as a timing model.
-        profile_provider=udma
+        profile_provider=official
         profile_revision=udma400-kvm-functional-v2
         profile_cpu_mode=kvm
         profile_cpu_freq=3GHz
@@ -713,16 +705,15 @@ case "$profile" in
         profile_sq_wqebb_latency=0ns
         profile_payload_dma_latency=0ns
         profile_payload_dma_rate_gbps=0
-        # The lifetime adapter event owns peer-ring delivery. This value is
-        # retained for RNR retry and non-adapter compatibility transports; it
-        # no longer polls an empty synchronized peer ring.
+        # KVM defaults to a coarse host/device polling interval so functional
+        # boot is not interrupted by high-frequency adapter events.
         profile_udma_poll_interval=1ms
         ;;
     server)
         # Generic reduced-core Arm server slice.  It deliberately does not
         # claim to reproduce a named CPU: stock gem5 ArmO3 supplies the core,
         # and the cache/memory capacities are explicit, overrideable inputs.
-        profile_provider=udma
+        profile_provider=official
         profile_revision=server-o3-ddr4-coherent-tdma-v5
         profile_cpu_mode=server_o3
         profile_cpu_freq=3GHz
@@ -778,7 +769,7 @@ case "$profile" in
         profile_payload_dma_rate_gbps=0
         ;;
     udma400)
-        profile_provider=udma
+        profile_provider=official
         profile_revision=udma400-atomic-cache-v1
         profile_cpu_mode=atomic_cache
         profile_cpu_freq=3GHz
@@ -803,24 +794,7 @@ case "$profile" in
         # second, synthetic bandwidth term in the default profile.
         profile_payload_dma_rate_gbps=0
         ;;
-    legacy)
-        profile_cpu_mode=atomic
-        profile_cpu_freq=3GHz
-        profile_peer_link_rate_gbps=100
-        profile_peer_serialization_stages=1
-        profile_peer_switch_delay=0ns
-        profile_peer_link_overhead_bytes=0
-        profile_sq_control_bytes=0
-        profile_wqebb_bytes=64
-        profile_sq_sge_bytes=16
-        profile_direct_wqe_max_blocks=0
-        profile_direct_wqe_latency=0ns
-        profile_sq_fetch_latency=0ns
-        profile_sq_wqebb_latency=0ns
-        profile_payload_dma_latency=0ns
-        profile_payload_dma_rate_gbps=0
-        ;;
-    *) die "unknown profile '$profile'; expected fast, kvm, server, udma400, or legacy" ;;
+    *) die "unknown profile '$profile'; expected fast, kvm, server, or udma400" ;;
 esac
 
 cpu_mode="${OPENURMA_CPU_MODE:-${OPENURMA_DUAL_CPU:-$profile_cpu_mode}}"
@@ -914,7 +888,7 @@ mem_ctrl_frontend_latency="${OPENURMA_MEM_CTRL_FRONTEND_LATENCY:-$profile_mem_ct
 mem_ctrl_backend_latency="${OPENURMA_MEM_CTRL_BACKEND_LATENCY:-$profile_mem_ctrl_backend_latency}"
 mem_ctrl_command_window="${OPENURMA_MEM_CTRL_COMMAND_WINDOW:-$profile_mem_ctrl_command_window}"
 ub_port_count="${OPENURMA_UB_PORT_COUNT:-$profile_ub_port_count}"
-network_backend="${OPENURMA_NETWORK_BACKEND:-builtin}"
+network_backend="${OPENURMA_NETWORK_BACKEND:-modular-ns3ub}"
 ub_transport="${OPENURMA_UB_TRANSPORT:-switch-adapter}"
 peer_topology="${OPENURMA_PEER_TOPOLOGY:-$profile_peer_topology}"
 peer_port_map="${OPENURMA_PEER_PORT_MAP:-$profile_peer_port_map}"
@@ -941,7 +915,7 @@ external_udma_poll_interval="${OPENURMA_UDMA_HOST_POLL_INTERVAL:-1us}"
 external_udma_host_latency_ns="${OPENURMA_UDMA_HOST_LATENCY_NS:-$sync_quantum_ns}"
 udma_iotlb_entries="${OPENURMA_UDMA_IOTLB_ENTRIES:-$profile_udma_iotlb_entries}"
 dma_max_outstanding="${OPENURMA_DMA_MAX_OUTSTANDING:-$profile_dma_max_outstanding}"
-provider="${OPENURMA_PROVIDER:-$profile_provider}"
+provider="${OPENURMA_PROVIDER:-official}"
 
 [[ -n "$cli_cpu_mode" ]] && cpu_mode=$cli_cpu_mode
 [[ -n "$cli_m5ops_base" ]] && m5ops_base=$cli_m5ops_base
@@ -1069,32 +1043,20 @@ if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]] &&
     udma_poll_interval=1ms
 fi
 
-if [[ "$provider" == official ]]; then
-    default_dma_backend=udma
-else
-    default_dma_backend=$provider
-fi
+default_dma_backend=udma
 dma_backend="${OPENURMA_DMA_BACKEND:-$default_dma_backend}"
 kvm_host_cpu_contract=not_applicable
 if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]]; then
-    if [[ "$provider" == official ]]; then
-        kvm_host_cpu_contract=official_provider_host_dependent_ksva
-        echo "run-dual.sh: warning: the official provider under KVM sees host ARM CPU address-width/ASID capabilities; if they exceed the modeled UMMU (currently 40-bit OAS), UMMU_FEAT_SVA is cleared and KSVA enable fails. Use --provider udma for portable KVM validation." >&2
-    else
-        kvm_host_cpu_contract=portable_udma_provider
-    fi
+    kvm_host_cpu_contract=official_provider_host_dependent_ksva
+    echo "run-dual.sh: warning: the official provider under KVM sees host ARM CPU address-width/ASID capabilities; if they exceed the modeled UMMU (currently 40-bit OAS), UMMU_FEAT_SVA is cleared and KSVA enable fails." >&2
 fi
 
 # These labels describe executable simulator mechanisms, not latency-fit
-# inputs.  Every non-legacy DMA operation enters the native gem5 RequestPort;
+# inputs. Every DMA operation enters the native gem5 RequestPort;
 # the port chooses atomic or timing requests from the System's current memory
 # mode.  UDMA virtual addresses are rooted in the creating process's page
 # table, carried by the versioned simulation control ABI.
-if [ "$dma_backend" = legacy ]; then
-    dma_transport=legacy_functional
-else
-    dma_transport=native_gem5_request_port_dynamic
-fi
+dma_transport=native_gem5_request_port_dynamic
 udma_address_translation=context_pgd_control_abi_v2
 dma_request_segmentation=cacheline_and_4KiB_boundaries
 udma_iotlb_policy=fully_associative_lru_4KiB_context_tagged
@@ -1181,46 +1143,22 @@ container="$OPENURMA_CONTAINER"
 gem5="${OPENURMA_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
 m5_path="${OPENURMA_M5_PATH:-$lab/system}"
 kernel="${OPENURMA_KERNEL:-$lab/artifacts/kernel/vmlinux}"
-if [[ "$provider" == official ]]; then
-    default_initrd="$lab/out/official-udma.cpio.gz"
-else
-    default_initrd="$lab/out/openurma-interactive.cpio.gz"
-fi
+default_initrd="$lab/out/official-udma.cpio.gz"
 initrd="${OPENURMA_INITRD:-$default_initrd}"
-config="${OPENURMA_CONFIG:-$lab/configs/single_node_fs_openurma.py}"
-switch_config="${OPENURMA_SWITCH_CONFIG:-$lab/gem5/configs/dist/sw.py}"
-ub_switch_source="${OPENURMA_UB_SWITCH_SOURCE:-$lab/tools/ub_switch_sim.cc}"
-if [[ "$network_backend" == modular-ns3ub ]]; then
-    ns3ub_root="${OPENURMA_NS3UB_ROOT:-$lab/sources/ns-3-ub}"
-    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-net-adapter}"
-    runtime_arch="${OPENURMA_RUNTIME_ARCH:-$(uname -m)}"
-    [[ "$runtime_arch" != arm64 ]] || runtime_arch=aarch64
-    udma_device_binary="${OPENURMA_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
-    ub_switch_ready_pattern='\[NS3_UB_NET\] connected'
-elif [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
-    ns3ub_root="${OPENURMA_NS3UB_ROOT:-$lab/sources/ns-3-ub}"
-    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-gem5-adapter}"
-    if [[ -z "${OPENURMA_UB_SWITCH_BINARY:-}" && ! -x "$ub_switch_binary" && \
-          -x /tmp/ns3ub-native-build/scratch/ns3.44-ub-gem5-adapter ]]; then
-        ub_switch_binary=/tmp/ns3ub-native-build/scratch/ns3.44-ub-gem5-adapter
-    fi
-    ub_switch_ready_pattern='\[NS3_UB_ADAPTER\] ready'
-else
-    ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/out/ub-switch-sim}"
-    ub_switch_ready_pattern='\[UB_SWITCH\] ready'
-fi
+config="${OPENURMA_CONFIG:-$lab/configs/arm64_fs.py}"
+ns3ub_root="${OPENURMA_NS3UB_ROOT:-$lab/sources/ns-3-ub}"
+ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-net-adapter}"
+runtime_arch="${OPENURMA_RUNTIME_ARCH:-$(uname -m)}"
+[[ "$runtime_arch" != arm64 ]] || runtime_arch=aarch64
+udma_device_binary="${OPENURMA_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
+ub_switch_ready_pattern='\[NS3_UB_NET\] connected'
 run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
-ring="${OPENURMA_DUAL_RING:-/tmp/openurma-dual.peer-ring}"
-ring0="${OPENURMA_DUAL_RING0:-/tmp/openurma-dual.node0.adapter}"
-ring1="${OPENURMA_DUAL_RING1:-/tmp/openurma-dual.node1.adapter}"
 tap0="${OPENURMA_DUAL_TAP0:-/tmp/openurma-dual.eth0.sock}"
 tap1="${OPENURMA_DUAL_TAP1:-/tmp/openurma-dual.eth1.sock}"
 uart0="${OPENURMA_DUAL_UART0:-3460}"
 uart1="${OPENURMA_DUAL_UART1:-3470}"
 pipe_data="${OPENURMA_PIPE_DATA:-0}"
 packet_trace="${OPENURMA_TRACE_PACKETS:-0}"
-dist_port="${OPENURMA_DIST_PORT:-2200}"
-dist_link_speed="${OPENURMA_DIST_LINK_SPEED:-${peer_link_rate_gbps}Gbps}"
 oob_link_speed="${OPENURMA_OOB_LINK_SPEED:-100Gbps}"
 
 uart_stride=$((uart1 - uart0))
@@ -1229,11 +1167,6 @@ node_uart() {
     if (( $1 == 0 )); then echo "$uart0";
     elif (( $1 == 1 )); then echo "$uart1";
     else echo "$((uart0 + $1 * uart_stride))"; fi
-}
-node_ring_path() {
-    if (( $1 == 0 )); then echo "$ring0";
-    elif (( $1 == 1 )); then echo "$ring1";
-    else echo "/tmp/openurma-dual.node$1.adapter"; fi
 }
 node_tap_path() {
     if (( $1 == 0 )); then echo "$tap0";
@@ -1252,13 +1185,8 @@ node_udma_shm_path() {
 [[ "$node_count" =~ ^[0-9]+$ ]] &&
     (( node_count >= 2 && node_count <= 8 )) ||
     die "--nodes must be an integer between 2 and 8"
-endpoint_eids=""
-for ((node = 0; node < node_count; ++node)); do
-    (( node > 0 )) && endpoint_eids+=,
-    endpoint_eids+="$((0x100 + node))"
-done
 
-case "$node_count:$uart0:$uart1:$dist_port:$ub_port_count:$peer_latency_ns:$sync_quantum_ns:$peer_link_rate_gbps:$peer_serialization_stages:$peer_link_overhead_bytes:$sq_control_bytes:$wqebb_bytes:$sq_sge_bytes:$direct_wqe_max_blocks:$payload_dma_rate_gbps:$dma_max_outstanding:$udma_iotlb_entries:$num_cpus:$o3_width:$o3_rob_entries:$o3_iq_entries:$o3_lq_entries:$o3_sq_entries:$o3_load_ports:$o3_store_ports:$o3_fetch_buffer_bytes:$o3_fetch_queue_entries:$o3_phys_int_regs:$o3_phys_float_regs:$o3_phys_vec_regs:$o3_phys_vec_pred_regs:$o3_phys_mat_regs:$cache_line_size:$last_cache_level:$l1i_assoc:$l1i_mshrs:$l1i_targets:$l1i_write_buffers:$l1d_assoc:$l1d_mshrs:$l1d_targets:$l1d_write_buffers:$l2_assoc:$l2_mshrs:$l2_targets:$l2_write_buffers:$l3_assoc:$l3_mshrs:$l3_targets:$l3_write_buffers:$fabric_width_bytes:$coherent_bus_frontend_latency:$coherent_bus_forward_latency:$coherent_bus_response_latency:$coherent_bus_header_latency:$io_bus_frontend_latency:$io_bus_forward_latency:$io_bus_response_latency:$io_bus_header_latency:$io_cache_assoc:$io_cache_mshrs:$io_cache_targets:$io_cache_write_buffers:$mem_channels:$mem_channels_intlv:$mem_channel_xor_low_bit:$mem_ranks:$mem_read_buffer_size:$mem_write_buffer_size:$mem_max_accesses_per_row:$mem_write_high_thresh:$mem_write_low_thresh:$mem_min_writes_per_switch:$mem_min_reads_per_switch" in
+case "$node_count:$uart0:$uart1:$ub_port_count:$peer_latency_ns:$sync_quantum_ns:$peer_link_rate_gbps:$peer_serialization_stages:$peer_link_overhead_bytes:$sq_control_bytes:$wqebb_bytes:$sq_sge_bytes:$direct_wqe_max_blocks:$payload_dma_rate_gbps:$dma_max_outstanding:$udma_iotlb_entries:$num_cpus:$o3_width:$o3_rob_entries:$o3_iq_entries:$o3_lq_entries:$o3_sq_entries:$o3_load_ports:$o3_store_ports:$o3_fetch_buffer_bytes:$o3_fetch_queue_entries:$o3_phys_int_regs:$o3_phys_float_regs:$o3_phys_vec_regs:$o3_phys_vec_pred_regs:$o3_phys_mat_regs:$cache_line_size:$last_cache_level:$l1i_assoc:$l1i_mshrs:$l1i_targets:$l1i_write_buffers:$l1d_assoc:$l1d_mshrs:$l1d_targets:$l1d_write_buffers:$l2_assoc:$l2_mshrs:$l2_targets:$l2_write_buffers:$l3_assoc:$l3_mshrs:$l3_targets:$l3_write_buffers:$fabric_width_bytes:$coherent_bus_frontend_latency:$coherent_bus_forward_latency:$coherent_bus_response_latency:$coherent_bus_header_latency:$io_bus_frontend_latency:$io_bus_forward_latency:$io_bus_response_latency:$io_bus_header_latency:$io_cache_assoc:$io_cache_mshrs:$io_cache_targets:$io_cache_write_buffers:$mem_channels:$mem_channels_intlv:$mem_channel_xor_low_bit:$mem_ranks:$mem_read_buffer_size:$mem_write_buffer_size:$mem_max_accesses_per_row:$mem_write_high_thresh:$mem_write_low_thresh:$mem_min_writes_per_switch:$mem_min_reads_per_switch" in
     *[!0-9:]*) die "ports, nanosecond values, rates, stages, and byte counts must be decimal integers" ;;
 esac
 if (( node_count != 2 )) && [[ "$ub_transport" != switch-adapter ]]; then
@@ -1288,12 +1216,12 @@ fi
 (( m5ops_base == 0x10010000 )) ||
     die "VExpress_GEM5_V1 reserves m5ops at 0x10010000; another address needs another platform memory map"
 case "$provider" in
-    legacy|udma|official) ;;
-    *) die "invalid provider '$provider'; expected legacy, udma, or official" ;;
+    official) ;;
+    *) die "--provider must be official" ;;
 esac
 case "$dma_backend" in
-    legacy|timing|udma) ;;
-    *) die "invalid DMA backend '$dma_backend'; expected legacy, timing, or udma" ;;
+    udma) ;;
+    *) die "OPENURMA_DMA_BACKEND must be udma" ;;
 esac
 case "$cpu_freq" in
     ""|*[!0-9A-Za-z.+_-]*) die "invalid CPU frequency '$cpu_freq'" ;;
@@ -1367,7 +1295,6 @@ esac
 (( uart1 >= 1024 && uart1 <= 65531 )) || die "invalid node1 UART base: $uart1"
 (( uart0 + 3 < uart1 || uart1 + 3 < uart0 )) ||
     die "UART ranges overlap: $uart0-$((uart0 + 3)) and $uart1-$((uart1 + 3))"
-(( dist_port >= 1024 && dist_port <= 65535 )) || die "invalid dist switch port: $dist_port"
 (( peer_latency_ns > 0 )) || die "peer lookahead must be positive"
 (( sync_quantum_ns > 0 && sync_quantum_ns <= peer_latency_ns )) ||
     die "sync quantum must satisfy 0 < quantum <= peer latency"
@@ -1443,38 +1370,27 @@ case "$peer_topology" in
     *) die "peer topology must be direct or l1-switch" ;;
 esac
 case "$ub_transport" in
-    direct-ring|switch-adapter) ;;
-    *) die "UB transport must be direct-ring or switch-adapter" ;;
+    switch-adapter) ;;
+    *) die "--ub-transport must be switch-adapter" ;;
 esac
 case "$network_backend" in
-    builtin|ns3ub-compat|ns3ub-native|modular-ns3ub) ;;
-    *) die "network backend must be builtin, ns3ub-compat, ns3ub-native, or modular-ns3ub" ;;
+    modular-ns3ub) ;;
+    *) die "--network-backend must be modular-ns3ub" ;;
 esac
 if [[ "$network_backend" != builtin && "$ub_transport" != switch-adapter ]]; then
     die "$network_backend requires --ub-transport switch-adapter"
 fi
 case "$sync_mode" in
-    global-barrier|adapter-local) ;;
-    *) die "sync mode must be global-barrier or adapter-local" ;;
+    adapter-local) ;;
+    *) die "only adapter-local synchronization is supported" ;;
 esac
-if (( sync_enabled )) && [[ "$sync_mode" == adapter-local ]]; then
-    [[ "$ub_transport" == switch-adapter ]] ||
-        die "adapter-local sync requires --ub-transport switch-adapter"
-fi
-if (( ! sync_enabled )) && [[ "$network_backend" != builtin && \
-                              "$network_backend" != modular-ns3ub ]]; then
-    die "unsynchronized adapter execution currently requires --network-backend builtin"
-fi
-if [[ "$network_backend" == modular-ns3ub ]]; then
-    [[ "$provider" == official ]] ||
-        die "modular-ns3ub requires --provider official"
-fi
+[[ "$provider" == official ]] || die "modular-ns3ub requires --provider official"
 if [[ "$ub_transport" == switch-adapter && "$peer_topology" != l1-switch ]]; then
     die "switch-adapter requires --peer-topology l1-switch"
 fi
 case "$peer_port_selection" in
-    tp-context|legacy-hash) ;;
-    *) die "peer port selection must be tp-context or legacy-hash" ;;
+    tp-context) ;;
+    *) die "--peer-port-selection must be tp-context" ;;
 esac
 if [[ -n "$peer_port_map" ]]; then
     IFS=',' read -r -a peer_port_map_entries <<<"$peer_port_map"
@@ -1493,18 +1409,12 @@ fi
 (( udma_iotlb_entries >= 0 )) || die "UDMA IOTLB entries must be non-negative"
 (( dma_max_outstanding > 0 )) || die "DMA max outstanding must be positive"
 
-# AdapterRing has an 8-KiB index/control header plus one 64 x 8-KiB queue for
-# every direction and physical port. Keep this formula synchronized with
-# NICTopologySC::PeerRing and its slot-offset calculation.
-peer_ring_bytes=$((8192 + 2 * ub_port_count * 64 * 8192))
-
 print_resolved_config() {
     cat <<EOF
 manifest_version=1
 execution_mode=$OPENURMA_EXECUTION_MODE
 node_count=$node_count
 routing=dynamic_eid
-endpoint_eids=$endpoint_eids
 profile=$profile
 profile_revision=$profile_revision
 provider=$provider
@@ -1635,7 +1545,6 @@ network_backend=$network_backend
 peer_topology=$peer_topology
 peer_port_map=${peer_port_map:-identity}
 peer_port_selection=$peer_port_selection
-peer_ring_bytes=$peer_ring_bytes
 peer_link_rate_gbps=$peer_link_rate_gbps
 peer_serialization_stages=$peer_serialization_stages
 peer_switch_delay=$peer_switch_delay
@@ -1654,7 +1563,6 @@ external_udma_poll_interval=$external_udma_poll_interval
 external_udma_host_latency_ns=$external_udma_host_latency_ns
 udma_iotlb_entries=$udma_iotlb_entries
 dma_max_outstanding=$dma_max_outstanding
-dist_link_speed=$dist_link_speed
 oob_link_speed=$oob_link_speed
 pipe_data=$pipe_data
 packet_trace=$packet_trace
@@ -1674,7 +1582,7 @@ fi
 
 ou_runtime_start
 
-for path in "$gem5" "$kernel" "$initrd" "$config" "$switch_config" \
+for path in "$gem5" "$kernel" "$initrd" "$config" \
             "$lab/tools/run-background.sh"; do
     ou_exec test -f "$path" || die "missing in runtime environment: $path"
 done
@@ -1685,7 +1593,7 @@ fi
 # The default image records both its own digest and the exact paths/digests of
 # mutable build inputs. Refuse an overwritten archive or a source/image skew.
 # Custom initramfs paths remain the caller's own contract.
-if [[ "$initrd" == "$lab/out/openurma-interactive.cpio.gz" ]]; then
+if [[ "$initrd" == "$lab/out/official-udma.cpio.gz" ]]; then
     image_manifest="${initrd%.cpio.gz}.manifest.txt"
     ou_exec test -r "$image_manifest" ||
         die "missing default initramfs manifest: $image_manifest"
@@ -1707,16 +1615,13 @@ if [[ "$initrd" == "$lab/out/openurma-interactive.cpio.gz" ]]; then
     verify_image_hash kernel_sha256 "$kernel"
     image_components=(
         overlay_init ou_cpu_switch ou_lat_server ou_lat_client
-        urma_perftest provider_source openurma_kmod
+        urma_perftest stock_udma_provider ummu_library
         ipv6_module ubcore_module uburma_module
         dist_sync_source cpu_switch_source m5ops_dispatch_source
     )
-    if [[ "$provider" == udma ]]; then
-        image_components+=(stock_udma_provider ummu_shim)
-        image_providers=$(image_manifest_value providers)
-        [[ " $image_providers " == *" udma "* ]] ||
-            die "default initramfs does not contain the official UDMA provider"
-    fi
+    image_providers=$(image_manifest_value providers)
+    [[ " $image_providers " == *" udma "* ]] ||
+        die "default initramfs does not contain the official UDMA provider"
     for image_component in "${image_components[@]}"; do
         image_input=$(image_manifest_value "${image_component}_path")
         [[ -n "$image_input" ]] ||
@@ -1810,18 +1715,13 @@ if ou_exec test -d "$run_root"; then
     ou_exec rm -rf -- "${stale_run_paths[@]}"
     echo "Cleared inactive previous run output under: $run_root"
 fi
-run_directories=("$run_root/switch" "$run_root/ub-switch" "$run_root/oob-switch")
-ring_paths=()
+run_directories=("$run_root/ub-switch" "$run_root/oob-switch")
 tap_paths=()
 host_socket_paths=()
 net_socket_paths=()
 udma_shm_paths=()
 for ((node = 0; node < node_count; ++node)); do
-    run_directories+=("$run_root/node$node")
-    if [[ "$network_backend" == modular-ns3ub ]]; then
-        run_directories+=("$run_root/udma-node$node")
-    fi
-    ring_paths+=("$(node_ring_path "$node")")
+    run_directories+=("$run_root/node$node" "$run_root/udma-node$node")
     tap_paths+=("$(node_tap_path "$node")")
     host_socket_paths+=("$(node_host_socket_path "$node")")
     net_socket_paths+=("$(node_net_socket_path "$node")")
@@ -1830,20 +1730,12 @@ done
 ou_exec mkdir -p "${run_directories[@]}"
 print_resolved_config | ou_exec_i sh -c \
     'umask 022; tee "$1" >/dev/null' _ "$run_root/run-manifest.txt"
-ou_exec rm -f "$ring" "${ring_paths[@]}" "${tap_paths[@]}" \
-    "${host_socket_paths[@]}" "${net_socket_paths[@]}" \
-    "${udma_shm_paths[@]}"
-# Must match the per-port trailing-slot ABI in NICTopologySC.cc.
-if [[ "$network_backend" == modular-ns3ub ]]; then
-    ou_exec test -x "$ub_switch_binary" ||
-        die "missing ns-3 UB-NET adapter: $ub_switch_binary; run './lab build ns3ub'"
-    ou_exec test -x "$udma_device_binary" ||
-        die "missing standalone UDMA device: $udma_device_binary; run './lab build udma-device'"
-    # The legacy topology remains instantiated only as a compatibility child;
-    # give it inert rings while its CPU-visible MMIO aperture is disabled.
-    for node_ring in "${ring_paths[@]}"; do
-        ou_exec truncate -s "$peer_ring_bytes" "$node_ring"
-    done
+ou_exec rm -f "${tap_paths[@]}" "${host_socket_paths[@]}" \
+    "${net_socket_paths[@]}" "${udma_shm_paths[@]}"
+ou_exec test -x "$ub_switch_binary" ||
+    die "missing ns-3 UB-NET adapter: $ub_switch_binary; run './lab build ns3ub'"
+ou_exec test -x "$udma_device_binary" ||
+    die "missing standalone UDMA device: $udma_device_binary; run './lab build udma-device'"
     # UDMA owns both sockets and therefore starts first as the listener.  Its
     # two-interface Establish waits until the host and fabric peers exist, so
     # all processes are detached before readiness is checked.
@@ -1906,131 +1798,17 @@ if [[ "$network_backend" == modular-ns3ub ]]; then
         bash "$lab/tools/run-background.sh" \
         "$run_root/ub-switch/gem5.pid" "$run_root/ub-switch/gem5.log" \
         "$ub_switch_binary" "${ub_switch_args[@]}"
-elif [[ "$ub_transport" == switch-adapter ]]; then
-    for node_ring in "${ring_paths[@]}"; do
-        ou_exec truncate -s "$peer_ring_bytes" "$node_ring"
-    done
-    if [[ "$network_backend" == ns3ub-compat || "$network_backend" == ns3ub-native ]]; then
-        ou_exec test -x "$ub_switch_binary" ||
-            die "missing ns-3-UB adapter binary: $ub_switch_binary; run './lab build ns3ub'"
-    else
-        ou_exec test -r "$ub_switch_source" ||
-            die "missing UB switch source: $ub_switch_source"
-        ou_exec mkdir -p "$(dirname "$ub_switch_binary")"
-        ou_exec g++ -std=c++17 -O2 -pthread \
-            "$ub_switch_source" -o "$ub_switch_binary"
-    fi
-else
-    ou_exec truncate -s "$peer_ring_bytes" "$ring"
-fi
-
-actual_dist_port=""
-if (( sync_enabled )) && [[ "$sync_mode" == global-barrier ]]; then
-    # Compatibility/reference mode: the stock dist-gem5 switch owns a global
-    # conservative barrier while UB DATA still traverses ub-switch-sim.
-    ou_exec_detached \
-        bash "$lab/tools/run-background.sh" \
-        "$run_root/switch/gem5.pid" "$run_root/switch/gem5.log" \
-        "$gem5" --listener-mode=on --outdir="$run_root/switch" "$switch_config" \
-        --is-switch --dist-size="$node_count" --dist-rank=0 \
-        --dist-server-port="$dist_port" --dist-sync-start=0t \
-        --dist-sync-repeat="${sync_quantum_ns}ns" \
-        --ethernet-linkdelay="${peer_latency_ns}ns" \
-        --ethernet-linkspeed="$dist_link_speed"
-
-    for _ in $(seq 1 100); do
-        actual_dist_port="$(ou_exec sed -n \
-            's/.*tcp_iface listening on port \([0-9][0-9]*\).*/\1/p' \
-            "$run_root/switch/gem5.log" 2>/dev/null | tail -n 1)"
-        [[ -n "$actual_dist_port" ]] && break
-        sleep 0.1
-    done
-    [[ -n "$actual_dist_port" ]] || die "dist switch did not begin listening; see $run_root/switch/gem5.log"
-fi
-
-if [[ "$network_backend" == modular-ns3ub ]]; then
-    : # The UB-NET fabric was started with the standalone UDMA listeners.
-elif [[ "$ub_transport" == switch-adapter ]]; then
-    ub_switch_mode=--multi
-    if [[ "$network_backend" == ns3ub-native ]]; then
-        ub_switch_mode=--native-multi
-    fi
-    ub_switch_args=()
-    if (( ! sync_enabled )); then
-        ub_switch_args+=(--unsynchronized)
-    fi
-    ub_switch_args+=("$ub_switch_mode" "$ub_port_count"
-        "${peer_latency_ns}ns" "$peer_switch_delay"
-        "$peer_link_rate_gbps" "$peer_link_overhead_bytes"
-        "${peer_port_map:-}" "$peer_serialization_stages"
-        "$endpoint_eids" "${ring_paths[@]}")
-    ou_exec_detached \
-        bash "$lab/tools/run-background.sh" \
-        "$run_root/ub-switch/gem5.pid" "$run_root/ub-switch/gem5.log" \
-        "$ub_switch_binary" "${ub_switch_args[@]}"
-    for _ in $(seq 1 100); do
-        if ou_exec grep -q "$ub_switch_ready_pattern" \
-            "$run_root/ub-switch/gem5.log" 2>/dev/null; then
-            break
-        fi
-        sleep 0.05
-    done
-    ou_exec grep -q "$ub_switch_ready_pattern" \
-        "$run_root/ub-switch/gem5.log" 2>/dev/null ||
-        die "UB switch did not become ready; see $run_root/ub-switch/gem5.log"
-fi
-
 launch_node() {
     node=$1
     uart=$2
     mac=$3
     tap=$4
     out="$run_root/node$node"
-    node_ring="$ring"
-    peer_node="$node"
-    if [[ "$network_backend" == modular-ns3ub ]]; then
-        # The legacy SystemC NIC remains a compatibility child but has no
-        # peer in the modular topology; UB-HOST owns all guest-visible I/O.
-        node_ring=""
-        peer_node=-1
-    elif [[ "$ub_transport" == switch-adapter ]]; then
-        node_ring=${ring_paths[$node]}
-        # Each endpoint is side zero of its own point-to-point adapter link.
-        peer_node=0
-    fi
     sync_args=()
     adapter_sync_env=0
-    if (( ! sync_enabled )); then
-        sync_args+=(--dist-size=0)
-        # Patched perftest binaries may still issue the legacy dist-toggle
-        # pseudo-op. There is no DistIface in functional adapter mode, so keep
-        # the adapter compatibility no-op enabled without starting its event.
-        adapter_sync_env=1
-    elif [[ "$network_backend" == modular-ns3ub ]]; then
-        # UB-HOST is the gem5 conservative-time boundary in the modular
-        # topology.  The legacy in-process adapter stays disabled.
-        sync_args+=(--dist-size=0)
-        adapter_sync_env=1
-    elif [[ "$sync_mode" == adapter-local ]]; then
-        sync_args+=(--adapter-local-sync --dist-size=0)
-        adapter_sync_env=1
-    else
-        sync_args+=(--dist-rank="$node" --dist-size="$node_count")
-        sync_args+=(--dist-server-name=127.0.0.1)
-        sync_args+=(--dist-server-port="$actual_dist_port")
-        sync_args+=(--dist-sync-start=0t)
-        sync_args+=(--dist-sync-repeat="${sync_quantum_ns}ns")
-        sync_args+=(--dist-sync-on-pseudo-op)
-    fi
-    official_args=()
-    if [[ "$provider" == official ]]; then
-        official_args+=(--official-udma-discovery)
-        official_args+=(--udma-endpoint-eid="$((0x100 + node))")
-    fi
-    external_udma_socket=""
-    if [[ "$network_backend" == modular-ns3ub ]]; then
-        external_udma_socket=${host_socket_paths[$node]}
-    fi
+    sync_args+=(--dist-size=0)
+    adapter_sync_env=1
+    external_udma_socket=${host_socket_paths[$node]}
     if [[ -n "$checkpoint_root" ]]; then
         sync_args+=(--restore-from="$checkpoint_root/node$node-cpt")
     fi
@@ -2051,7 +1829,6 @@ launch_node() {
         -- \
         bash "$lab/tools/run-background.sh" "$out/gem5.pid" "$out/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$out" "$config" \
-        "${official_args[@]}" \
         --kernel="$kernel" --initrd="$initrd" --root-device=/dev/ram \
         --cpu="$cpu_mode" --m5ops-base="$m5ops_base" \
         --cpu-freq="$cpu_freq" \
@@ -2135,31 +1912,6 @@ launch_node() {
         --mem-ctrl-frontend-latency="$mem_ctrl_frontend_latency" \
         --mem-ctrl-backend-latency="$mem_ctrl_backend_latency" \
         --mem-ctrl-command-window="$mem_ctrl_command_window" \
-        --link-delay-ns=0 \
-        --peer-ring="$node_ring" --peer-node="$peer_node" \
-        --peer-transport="$ub_transport" \
-        --ub-port-count="$ub_port_count" \
-        --peer-topology="$peer_topology" \
-        --peer-port-map="$peer_port_map" \
-        --peer-port-selection="$peer_port_selection" \
-        --peer-link-latency="${peer_latency_ns}ns" \
-        --peer-link-rate-gbps="$peer_link_rate_gbps" \
-        --peer-serialization-stages="$peer_serialization_stages" \
-        --peer-switch-delay="$peer_switch_delay" \
-        --peer-link-overhead-bytes="$peer_link_overhead_bytes" \
-        --sq-control-bytes="$sq_control_bytes" \
-        --wqebb-bytes="$wqebb_bytes" \
-        --sq-sge-bytes="$sq_sge_bytes" \
-        --direct-wqe-max-blocks="$direct_wqe_max_blocks" \
-        --direct-wqe-latency="$direct_wqe_latency" \
-        --sq-fetch-latency="$sq_fetch_latency" \
-        --sq-wqebb-latency="$sq_wqebb_latency" \
-        --payload-dma-latency="$payload_dma_latency" \
-        --payload-dma-rate-gbps="$payload_dma_rate_gbps" \
-        --udma-poll-interval="$udma_poll_interval" \
-        --udma-iotlb-entries="$udma_iotlb_entries" \
-        --dma-max-outstanding="$dma_max_outstanding" \
-        --dma-backend="$dma_backend" \
         "${sync_args[@]}" \
         --eth-tap-socket="$tap" \
         --eth-link-speed="$oob_link_speed" --eth-link-delay="${peer_latency_ns}ns" \
@@ -2173,18 +1925,16 @@ for ((node = 0; node < node_count; ++node)); do
         "${tap_paths[$node]}"
 done
 
-if [[ "$network_backend" == modular-ns3ub ]]; then
-    for _ in $(seq 1 200); do
-        if ou_exec grep -q "$ub_switch_ready_pattern" \
-            "$run_root/ub-switch/gem5.log" 2>/dev/null; then
-            break
-        fi
-        sleep 0.05
-    done
-    ou_exec grep -q "$ub_switch_ready_pattern" \
-        "$run_root/ub-switch/gem5.log" 2>/dev/null ||
-        die "modular ns-3 fabric did not connect; inspect UB switch, UDMA, and node logs"
-fi
+for _ in $(seq 1 200); do
+    if ou_exec grep -q "$ub_switch_ready_pattern" \
+        "$run_root/ub-switch/gem5.log" 2>/dev/null; then
+        break
+    fi
+    sleep 0.05
+done
+ou_exec grep -q "$ub_switch_ready_pattern" \
+    "$run_root/ub-switch/gem5.log" 2>/dev/null ||
+    die "modular ns-3 fabric did not connect; inspect UB switch, UDMA, and node logs"
 
 # The TCP control plane is intentionally outside the fine-grained virtual-time
 # barrier. One learning Ethernet relay connects every guest, so -S may name
@@ -2208,16 +1958,9 @@ echo "  model profile: $profile ($num_cpus x $cpu_mode at $cpu_freq)"
 echo "  cache: private $l1i_size I + $l1d_size D + $l2_size L2; shared $l3_size L3"
 echo "  memory: $mem_size modeled, Linux limited to $guest_mem_limit; $mem_channels x $mem_type, $mem_ranks rank/channel"
 echo "  resolved parameters: $run_root/run-manifest.txt"
-if [[ "$network_backend" == modular-ns3ub ]]; then
-    echo "  UB-HOST adapters: ${host_socket_paths[*]}"
-    echo "  standalone UDMA logs: $run_root/udma-nodeN/udma.log"
-    echo "  ns-3 UB-NET fabric: $run_root/ub-switch/gem5.log"
-elif [[ "$ub_transport" == switch-adapter ]]; then
-    echo "  UB adapters: ${ring_paths[*]}"
-    echo "  UB switch process: $run_root/ub-switch/gem5.log"
-else
-    echo "  UB peer ring: $ring"
-fi
+echo "  UB-HOST adapters: ${host_socket_paths[*]}"
+echo "  standalone UDMA logs: $run_root/udma-nodeN/udma.log"
+echo "  ns-3 UB-NET fabric: $run_root/ub-switch/gem5.log"
 echo "  UB link model: ${ub_port_count} physical port(s), ${peer_link_rate_gbps} Gbit/s per port, ${peer_latency_ns} ns propagation, ${peer_serialization_stages} serialization stage(s) per port"
 echo "  UB topology: $peer_topology (source-to-destination port map: ${peer_port_map:-identity})"
 echo "  UB egress selection: $peer_port_selection"
@@ -2226,10 +1969,8 @@ if (( lifecycle_sync_enabled )); then
     echo "  synchronization: free boot, then generic drain/fence and per-link conservative time"
 elif (( ! sync_enabled )); then
     echo "  synchronization: disabled (${sync_request}; CPU mode $cpu_mode)"
-elif [[ "$sync_mode" == adapter-local ]]; then
-    echo "  synchronization: lifetime per-link Adapter DATA/SYNC (switch is a virtual-time participant)"
 else
-    echo "  synchronization: dist-gem5 global barrier at localhost:$actual_dist_port (${sync_quantum_ns} ns quantum)"
+    echo "  synchronization: lifetime per-link Adapter DATA/SYNC (switch is a virtual-time participant)"
 fi
 echo "  UB routing: destination EID -> registered endpoint adapter"
 echo "  OOB control network: one learning Ethernet switch across all nodes"

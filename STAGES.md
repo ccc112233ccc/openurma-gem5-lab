@@ -228,10 +228,10 @@ pinned revisions in `SOURCE_REVISIONS.md`.
   426 on port 1. Every 8088+104-byte WRITE fragment used port 1, and every
   target-generated ACK returned on ingress port 1. Both endpoints completed
   five iterations and returned zero.
-- `legacy-hash` remains only as an explicit comparison mode. This checkpoint
-  implements hardware execution of a control-plane-programmed, single-port TP;
-  it does not yet implement an official bonding-group table or one-TP
-  multi-port hashing.
+- This checkpoint implements hardware execution of a control-plane-programmed,
+  single-port TP; it does not yet implement an official bonding-group table or
+  one-TP multi-port hashing. The earlier hash-routing comparison mode was
+  removed afterward.
 - Reproduction and representative logs are recorded in
   `official-udma/tp-port-routing-evidence.md`. No official OLK driver or UMDK
   provider source file was modified.

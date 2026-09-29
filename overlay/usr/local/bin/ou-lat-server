@@ -22,21 +22,15 @@ samples="${1:-100}"
 size="${2:-128}"
 port="${3:-21115}"
 out=/tmp/ou-lat-server.out
-if [ -n "${OPENURMA_DEVICE:-}" ]; then
-    device=$OPENURMA_DEVICE
-elif [ "${OPENURMA_PROVIDER:-legacy}" = official ]; then
-    device=udma0
-else
-    device=openurma0
-fi
+device="${OPENURMA_DEVICE:-udma0}"
 
 if [ "$#" -gt 3 ]; then
-    echo "usage: ou-lat-server [--profile ctp-rm-send-imm-i128|legacy] [--roi-stats] [samples] [size] [port]" >&2
+    echo "usage: ou-lat-server [--profile ctp-rm-send-imm-i128] [--roi-stats] [samples] [size] [port]" >&2
     exit 2
 fi
 case "$samples:$size:$port" in
     *[!0-9:]*|0:*|*:0:*|*:*:0)
-        echo "usage: ou-lat-server [--profile ctp-rm-send-imm-i128|legacy] [--roi-stats] [samples>0] [message-bytes=1..8088] [port>0]" >&2
+        echo "usage: ou-lat-server [--profile ctp-rm-send-imm-i128] [--roi-stats] [samples>0] [message-bytes=1..8088] [port>0]" >&2
         exit 2
         ;;
 esac
@@ -55,10 +49,6 @@ case "$profile" in
         profile=ctp-rm-send-imm-i128
         set -- urma_perftest send_lat -d "$device" --eid_idx 0 --ctp \
             -s "$size" -P "$port" -J 1 -I 128 -n "$iters" --enable_imm -p 0
-        ;;
-    legacy)
-        set -- urma_perftest send_lat -d "$device" --eid_idx 0 \
-            -s "$size" -P "$port" -n "$iters" -p 0
         ;;
     *)
         echo "ou-lat-server: unknown profile '$profile'" >&2

@@ -9,15 +9,10 @@ kernel_root="${KSRC:-$lab/oe66}"
 
 readonly GEM5_URL=https://github.com/gem5/gem5.git
 readonly GEM5_BASE=b1a44b89c7bae73fae2dc547bc1f871452075b85
-readonly GEM5_TARGET=387db831795fcc87f194a755b5f4be3b89864c61
-readonly OPENURMA_URL=https://github.com/bojieli/OpenURMA.git
-readonly OPENURMA_BASE=0ae5dce300154d761f97095864bda0cf2546b265
-readonly OPENURMA_TARGET=31e47bfbf0e1f8b22fcfb09df922a425f0f2fb74
+readonly GEM5_TARGET=d7a08a8b84b0a393a91e259025c0ab123ad60a6b
 readonly UMDK_URL=https://gitee.com/openeuler/umdk.git
 readonly UMDK_BASE=4eab3e4ad170b06bfe5d5c1014341e81edb9bf58
 readonly UMDK_TARGET=8f272493e4138cd52cfb3ce11064a07c8d1be49f
-readonly OPENCLICKNP_URL=https://github.com/bojieli/OpenClickNP.git
-readonly OPENCLICKNP_TARGET=c1c6acc58032a1894507d88659b3cca668b0e1a5
 readonly UMMU_URL=https://gitee.com/openeuler/ummu.git
 readonly UMMU_TARGET=f1930d006e08bbe96dfa6fa037ff8a386f535425
 readonly KERNEL_URL=https://gitee.com/openeuler/kernel.git
@@ -75,15 +70,9 @@ mkdir -p "$sources" "$lab/deps" "$lab/downloads" "$lab/system"
 
 fetch_with_bundle gem5 "$GEM5_URL" "$lab/gem5" "$GEM5_BASE" "$GEM5_TARGET" \
     "$lab/patches/source/gem5.bundle"
-fetch_with_bundle OpenURMA "$OPENURMA_URL" "$sources/OpenURMA" \
-    "$OPENURMA_BASE" "$OPENURMA_TARGET" "$lab/patches/source/openurma.bundle"
-
-# The parent repository records UMDK as a gitlink. Populate that path from the
-# official UMDK upstream, then fetch the exact simulator instrumentation commits.
-umdk="$sources/OpenURMA/integration/umdk/vendor/umdk"
+umdk="$sources/umdk"
 fetch_with_bundle UMDK "$UMDK_URL" "$umdk" "$UMDK_BASE" "$UMDK_TARGET" \
     "$lab/patches/source/umdk.bundle"
-fetch_plain OpenClickNP "$OPENCLICKNP_URL" "$sources/OpenClickNP" "$OPENCLICKNP_TARGET"
 fetch_plain UMMU "$UMMU_URL" "$lab/deps/ummu" "$UMMU_TARGET"
 fetch_plain OLK-6.6 "$KERNEL_URL" "$kernel_root" "$KERNEL_TARGET"
 fetch_plain ns-3-UB "$NS3UB_URL" "$sources/ns-3-ub" "$NS3UB_TARGET"

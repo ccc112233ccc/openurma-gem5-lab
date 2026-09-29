@@ -15,7 +15,7 @@ Run a reproducible series of two-node send_lat measurements. With no SIZE
 arguments the sweep includes powers of two plus the first receive-DMA,
 inline-WQEBB, inline/non-inline, and non-inline DMA boundary points.
 
-  --profile ctp-rm-send-imm-i128|legacy
+  --profile ctp-rm-send-imm-i128
   --samples N                 measured samples per size (default: 100)
   --sizes "2 16 17 32 ..."    alternate way to supply the size list
   --port PORT                 TCP setup port (default: 21115)
@@ -82,7 +82,6 @@ fi
 (( ${#sizes[@]} > 0 )) || die "the size list is empty"
 case "$profile" in
     ctp-rm-send-imm-i128|ctp-rm-send-imm-inline128) profile=ctp-rm-send-imm-i128 ;;
-    legacy) ;;
     *) die "unknown profile '$profile'" ;;
 esac
 case "$samples:$port" in

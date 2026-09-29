@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the exact OLK-6.6 kernel/URMA modules used by OpenURMA Tier-G.
+# Build the pinned OLK-6.6 kernel and base URMA modules.
 #
 # Run this on ARM64 Linux, either natively or inside the build container. KSRC
 # must live on a case-sensitive filesystem: a normal macOS bind mount corrupts Linux kernel
@@ -9,7 +9,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="${OPENURMA_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 KSRC="${KSRC:-$LAB_DIR/oe66}"
-OPENURMA_ROOT="${OPENURMA_ROOT:-$LAB_DIR/sources/OpenURMA}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$LAB_DIR/artifacts/kernel}"
 JOBS="${JOBS:-$(nproc)}"
 TARGET_ARCH="${OPENURMA_TARGET_ARCH:-arm64}"
@@ -17,7 +16,6 @@ ARCH=arm64
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 EXPECTED_KERNEL_COMMIT="5078a3a23a1e1825ec136485173ec98668cdd640"
 
-KMOD_DIR="$OPENURMA_ROOT/integration/umdk/kmod"
 LINKAGE_H="$KSRC/arch/arm64/include/asm/linkage.h"
 ASSEMBLER_H="$KSRC/arch/arm64/include/asm/assembler.h"
 BTI_PATCH="${BTI_PATCH:-$LAB_DIR/patches/olk66-gem5-bti.patch}"
@@ -31,7 +29,7 @@ usage() {
     cat <<'EOF'
 Usage: ./lab build kernel [--target-arch arm64]
 
-Build OLK, official UB/URMA modules, and the simulation provider. The pinned
+Build OLK and official UB/URMA modules. The pinned
 official kernel declares CONFIG_UB as ARM64-only, so x86_64 is not exposed as
 a full-system target. Use './lab build umdk --target-arch x86_64' for the
 official userspace stack alone.
@@ -66,7 +64,6 @@ case "$TARGET_ARCH" in
 esac
 
 [[ -f "$KSRC/Makefile" ]] || fail "kernel tree not found at $KSRC"
-[[ -f "$KMOD_DIR/Kbuild" ]] || fail "OpenURMA kmod not found at $KMOD_DIR"
 command -v "${CROSS_COMPILE}gcc" >/dev/null || fail "missing ${CROSS_COMPILE}gcc"
 
 have_commit="$(git -C "$KSRC" rev-parse HEAD)"
@@ -182,24 +179,17 @@ make -C "$KSRC" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
 [[ -s "$KSRC/vmlinux.symvers" ]] || fail "missing $KSRC/vmlinux.symvers after vmlinux build"
 install -m 0644 "$KSRC/vmlinux.symvers" "$KSRC/Module.symvers"
 
-# Keep IPv6 modular to match the checked-in OpenURMA guest evidence.  ubcore's
+# Keep IPv6 modular to match the checked-in guest evidence. ubcore's
 # connection manager needs it, so the initramfs must load ipv6.ko first.
 echo "[olk66] building ipv6.ko"
 make -C "$KSRC" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
     -j"$JOBS" M=net/ipv6 ipv6.ko
 
-# Building at drivers/ub aggregates ubcore/uburma exports into
-# drivers/ub/Module.symvers, which the out-of-tree OpenURMA provider needs.
+# Building at drivers/ub produces the base URMA modules used by the official
+# UDMA stack assembled in official-udma/build_modules.sh.
 echo "[olk66] building official ubcore/uburma modules"
 make -C "$KSRC" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
     -j"$JOBS" M=drivers/ub modules
-
-UB_SYMVERS="$KSRC/drivers/ub/Module.symvers"
-[[ -s "$UB_SYMVERS" ]] || fail "missing $UB_SYMVERS"
-
-echo "[olk66] building openurma_ubcore.ko"
-make -C "$KSRC" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
-    M="$KMOD_DIR" KBUILD_EXTRA_SYMBOLS="$UB_SYMVERS" modules
 
 VMLINUX="$KSRC/vmlinux"
 IMAGE="$KSRC/arch/arm64/boot/Image"
@@ -207,14 +197,13 @@ IPV6_KO="$KSRC/net/ipv6/ipv6.ko"
 UBCORE_KO="$KSRC/drivers/ub/urma/ubcore/ubcore.ko"
 UBURMA_KO="$KSRC/drivers/ub/urma/uburma/uburma.ko"
 UBAGG_KO="$KSRC/drivers/ub/urma/ubagg/ubagg.ko"
-OPENURMA_KO="$KMOD_DIR/openurma_ubcore.ko"
 
-for artifact in "$VMLINUX" "$IMAGE" "$IPV6_KO" "$UBCORE_KO" "$UBURMA_KO" "$UBAGG_KO" "$OPENURMA_KO"; do
+for artifact in "$VMLINUX" "$IMAGE" "$IPV6_KO" "$UBCORE_KO" "$UBURMA_KO" "$UBAGG_KO"; do
     [[ -s "$artifact" ]] || fail "missing build artifact: $artifact"
 done
 
 kernel_release="$(make -s -C "$KSRC" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" kernelrelease)"
-for module in "$IPV6_KO" "$UBCORE_KO" "$UBURMA_KO" "$UBAGG_KO" "$OPENURMA_KO"; do
+for module in "$IPV6_KO" "$UBCORE_KO" "$UBURMA_KO" "$UBAGG_KO"; do
     vermagic="$(strings "$module" | sed -n 's/^vermagic=//p' | head -1)"
     case "$vermagic" in
         "$kernel_release "*) ;;
@@ -230,7 +219,6 @@ install -m 0644 "$IPV6_KO" "$ARTIFACT_DIR/modules/ipv6.ko"
 install -m 0644 "$UBCORE_KO" "$ARTIFACT_DIR/modules/ubcore.ko"
 install -m 0644 "$UBURMA_KO" "$ARTIFACT_DIR/modules/uburma.ko"
 install -m 0644 "$UBAGG_KO" "$ARTIFACT_DIR/modules/ubagg.ko"
-install -m 0644 "$OPENURMA_KO" "$ARTIFACT_DIR/modules/openurma_ubcore.ko"
 printf '%s\n' "$kernel_release" > "$ARTIFACT_DIR/kernelrelease.txt"
 (
     cd "$ARTIFACT_DIR"
