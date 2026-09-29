@@ -5,6 +5,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab_dir="$(cd "$script_dir/.." && pwd)"
 # shellcheck source=runtime.sh
 source "$script_dir/runtime.sh"
+# This builder is also the native producer for the QEMU adapter stack on
+# Apple Silicon.  The general lab runtime remains Linux-or-Docker only; limit
+# the exception to this portable host-side component build.
+if [[ "$OPENURMA_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
+    ou_runtime_validate() { :; }
+fi
 container="$OPENURMA_CONTAINER"
 runtime_lab="$(ou_runtime_default_lab "$lab_dir")"
 if [[ "$OPENURMA_EXECUTION_MODE" == docker ]]; then
@@ -13,8 +19,12 @@ else
     default_source_root="$lab_dir/sources/ns-3-ub"
 fi
 source_root="${OPENURMA_NS3UB_ROOT:-$default_source_root}"
-cache_dir="${OPENURMA_NS3UB_CACHE:-$source_root/cmake-cache-linux}"
-output_dir="${OPENURMA_NS3UB_OUTPUT:-$source_root/build-linux}"
+build_suffix=linux
+if [[ "$OPENURMA_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
+    build_suffix=macos
+fi
+cache_dir="${OPENURMA_NS3UB_CACHE:-$source_root/cmake-cache-$build_suffix}"
+output_dir="${OPENURMA_NS3UB_OUTPUT:-$source_root/build-$build_suffix}"
 adapter_source="$runtime_lab/integrations/ns3ub/ub-gem5-adapter.cc"
 adapter_protocol="$runtime_lab/integrations/ns3ub/ub-external-adapter-protocol.h"
 adapter_cmake_patch="$runtime_lab/integrations/ns3ub/register-adapter-header.patch"
@@ -92,19 +102,23 @@ ou_exec env PYTHONPATH="$runtime_lab/tools:$runtime_lab" python3 \
     "$output_dir/scratch/ns3.44-ub-gem5-adapter"
 ou_exec test -x "$output_dir/scratch/ns3.44-ub-net-adapter"
 
-# Build the protocol peer from the same pinned SimBricks tree and exercise both
-# asynchronous and conservative-synchronization contracts end to end.
-switch_build=/tmp/openurma-ub-switch-ns3-build
-ou_exec env OPENURMA_LAB_ROOT="$runtime_lab" \
-    OPENURMA_UB_SWITCH_BUILD="$switch_build" \
-    JOBS="${OPENURMA_BUILD_JOBS:-8}" \
-    bash "$runtime_lab/scripts/build/build_ub_switch_sim.sh"
-for sync_mode in off required; do
-    ou_exec timeout 20 bash \
-        "$runtime_lab/components/ub-switch-sim/tests/process_contract.sh" \
-        "$output_dir/scratch/ns3.44-ub-net-adapter" \
-        "$switch_build/ub-net-contract-peer" \
-        "/tmp/openurma-ns3ub-contract-$sync_mode" "$sync_mode"
-done
+if [[ "$OPENURMA_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
+    echo "Skipping Linux-only UB switch process contracts on macOS; the native adapter binary was linked and checked."
+else
+    # Build the protocol peer from the same pinned SimBricks tree and exercise
+    # asynchronous and conservative-synchronization contracts end to end.
+    switch_build=/tmp/openurma-ub-switch-ns3-build
+    ou_exec env OPENURMA_LAB_ROOT="$runtime_lab" \
+        OPENURMA_UB_SWITCH_BUILD="$switch_build" \
+        JOBS="${OPENURMA_BUILD_JOBS:-8}" \
+        bash "$runtime_lab/scripts/build/build_ub_switch_sim.sh"
+    for sync_mode in off required; do
+        ou_exec timeout 20 bash \
+            "$runtime_lab/components/ub-switch-sim/tests/process_contract.sh" \
+            "$output_dir/scratch/ns3.44-ub-net-adapter" \
+            "$switch_build/ub-net-contract-peer" \
+            "/tmp/openurma-ns3ub-contract-$sync_mode" "$sync_mode"
+    done
+fi
 echo "ns-3-UB gem5 adapter built: $output_dir/scratch/ns3.44-ub-gem5-adapter"
 echo "ns-3-UB UB-NET adapter built: $output_dir/scratch/ns3.44-ub-net-adapter"

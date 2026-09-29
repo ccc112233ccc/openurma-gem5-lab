@@ -40,7 +40,7 @@ uses Docker. Stop the current experiment with `./lab stop`.
 Lifecycle:   setup, start, status, sync, attach NODE, stop
 Experiments: latency, latency-pair, latency-pairs, sweep-latency
 Build:       build all|gem5|qemu|kernel|umdk|initramfs|ns3ub|mooncake|udma-model|udma-device|ub-switch
-Validation:  validate-server, start-single, start-qemu
+Validation:  validate-server, start-single, start-qemu, start-qemu-dual
 ```
 
 Examples:
@@ -68,6 +68,14 @@ Examples:
 ./lab start-qemu
 # In the guest:
 urma_admin show
+
+# Apple Silicon functional two-node QEMU + UDMA + ns-3 bring-up.
+./lab --runtime native build udma-device
+./lab --runtime native build ns3ub
+./lab start-qemu-dual
+./lab status-qemu
+./lab attach-qemu 0
+./lab attach-qemu 1
 ```
 
 The console detach sequence is `~.` at the start of a line.  `./lab attach N`
@@ -120,11 +128,12 @@ The separation is intentional:
 - official Linux/UMDK code remains under the pinned upstream source trees;
   reproducible patches live under `patches/`.
 
-The initial QEMU path is a single-node TCG probe with a contract peer on the
-network side. It boots the unchanged official stack and is validated when
-`/dev/uburma/udma0` exists and `urma_admin show` reports ACTIVE EIDs. The
-multi-node QEMU + ns-3 traffic launcher and an ITS-backed HVF interrupt bridge
-remain follow-up work; see [the QEMU adapter note](integrations/qemu/README.md).
+The QEMU path provides both a single-node contract probe and a two-node TCG
+functional environment using the standalone UDMA devices and native ns-3 UB
+fabric. The dual path deliberately runs without conservative virtual-time
+synchronization, so it is suitable for driver/data-path bring-up rather than
+latency claims. An ITS-backed HVF interrupt bridge remains follow-up work; see
+[the QEMU adapter note](integrations/qemu/README.md).
 
 ## Runtime architecture
 
@@ -138,6 +147,7 @@ selected by `./lab start` options; they are not encoded in wrapper scripts.
 For the complete model knobs, evidence, source revisions, and troubleshooting,
 see [the reference guide](docs/reference-guide.md),
 [modular simulator architecture](docs/modular-simulator-architecture.md),
+[OpenURMA source dependency boundary](docs/openurma-dependency.md),
 [KVM functional mode](docs/kvm-functional-mode.md), and
 [Mooncake bring-up](docs/mooncake-urma-bringup.md).
 

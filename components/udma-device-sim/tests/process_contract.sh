@@ -4,6 +4,13 @@ set -euo pipefail
 device=$1
 peer=$2
 root=$3
+temporary_root=
+# Darwin limits AF_UNIX paths to roughly 104 bytes.  CMake build directories
+# can easily exceed that, so relocate only the ephemeral contract endpoints.
+if (( ${#root} > 60 )); then
+    temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/ou-udma.XXXXXX")
+    root="$temporary_root/c"
+fi
 host_socket="$root-host.sock"
 net_socket="$root-net.sock"
 shm="$root-shm"
@@ -14,6 +21,7 @@ cleanup() {
     [[ -z "${device_pid:-}" ]] || kill "$device_pid" 2>/dev/null || true
     wait "${device_pid:-0}" 2>/dev/null || true
     rm -f "$host_socket" "$net_socket" "$shm"
+    [[ -z "$temporary_root" ]] || rmdir "$temporary_root" 2>/dev/null || true
 }
 trap cleanup EXIT
 

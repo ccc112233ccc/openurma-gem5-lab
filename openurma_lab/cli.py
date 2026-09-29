@@ -29,6 +29,9 @@ COMMANDS = {
     "start": Command("scripts/run/run-dual.sh", "start the multi-node full-system simulation"),
     "start-single": Command("scripts/run/run.sh", "start the legacy single-node simulation"),
     "start-qemu": Command("scripts/run/run-qemu.sh", "start the QEMU UB-HOST probe environment"),
+    "start-qemu-dual": Command("scripts/run/run-qemu-dual.sh", "start two QEMU guests on the modular ns-3 UB fabric"),
+    "status-qemu": Command("scripts/run/status-qemu-dual.sh", "show the QEMU dual-node process and boot state"),
+    "stop-qemu": Command("scripts/run/stop-qemu-dual.sh", "stop the QEMU dual-node environment"),
     "status": Command("scripts/run/status-dual.sh", "show node and switch process state"),
     "stop": Command("scripts/run/stop-dual.sh", "stop the current multi-node simulation"),
     "sync": Command("scripts/run/sync-dual.sh", "finish guest network and time-sync setup"),
@@ -81,6 +84,10 @@ def _usage(stream=None) -> None:
         "  validate-server   validate the instantiated server profile\n"
         "  start-single      start the legacy single-node environment\n\n"
         "  start-qemu        start the interactive QEMU/UDMA probe environment\n\n"
+        "  start-qemu-dual   start two QEMU guests plus UDMA and ns-3 UB fabric\n"
+        "  attach-qemu NODE  connect to a QEMU guest serial console\n"
+        "  status-qemu       show QEMU dual-node status\n"
+        "  stop-qemu         stop the QEMU dual-node environment\n\n"
         "Use './lab COMMAND --help' for backend-specific options. Runtime\n"
         "defaults to native on supported Linux hosts and Docker elsewhere.",
         file=stream,
@@ -217,6 +224,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _script(script, tail, runtime)
     if command == "attach":
         return _attach(tail, runtime)
+    if command == "attach-qemu":
+        return _script("scripts/run/attach-qemu.sh", tail, "native")
     if command == "build":
         if not tail or tail[0] not in BUILD_TARGETS:
             print("lab: build target must be one of: " + ", ".join(BUILD_TARGETS), file=sys.stderr)
@@ -231,7 +240,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         return _build(tail[0], tail[1:], runtime)
     if command in COMMANDS:
-        command_runtime = "native" if command == "start-qemu" else runtime
+        qemu_host_commands = {
+            "start-qemu", "start-qemu-dual", "status-qemu", "stop-qemu"
+        }
+        command_runtime = "native" if command in qemu_host_commands else runtime
         return _script(COMMANDS[command].script, tail, command_runtime)
 
     print(f"lab: unknown command: {command}", file=sys.stderr)

@@ -25,6 +25,27 @@ peer; it is meant to verify discovery/MMIO/DMA/driver probe interactively.
 The expected terminal evidence is `/dev/uburma/udma0` plus four ACTIVE EIDs in
 `urma_admin show`.
 
+The two-node functional path reuses exactly the same UB-HOST device adapter and
+connects each QEMU guest to its own UDMA process.  Both UDMA network sides join
+one native ns-3 UB-NET fabric, while a separate QEMU socket network provides
+the TCP setup/control channel:
+
+```bash
+./lab --runtime native build udma-device
+./lab --runtime native build ns3ub
+./lab start-qemu-dual
+./lab status-qemu
+./lab attach-qemu 0
+./lab attach-qemu 1
+```
+
+This path has been validated with the unchanged official stack: both guests
+report `udma0` with four ACTIVE EIDs, the OOB network passes bidirectional
+traffic, and a two-sided 128-byte CTP/RM `urma_perftest send_lat` completes
+through the standalone UDMA and ns-3 processes.  Synchronization is off, so
+the reported microseconds are host-scheduling observations and are not a
+modeled latency result.
+
 Apple HVF itself is available in the same QEMU binary, but QEMU HVF only
 supports GICv3.  The current simulation glue publishes the official UBUS MSI
 domain over GICv2m, so the official UDMA path intentionally remains on TCG

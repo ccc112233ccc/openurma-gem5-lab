@@ -39,6 +39,17 @@ class LabCliTest(unittest.TestCase):
         self.assertEqual(command[-1], "--print-config")
 
     @mock.patch("openurma_lab.cli.subprocess.run")
+    def test_qemu_dual_always_uses_host_runtime(self, run):
+        run.return_value.returncode = 0
+        self.assertEqual(cli.main(["--runtime=docker", "start-qemu-dual"]), 0)
+        self.assertEqual(
+            run.call_args.kwargs["env"]["OPENURMA_EXECUTION_MODE"], "native"
+        )
+        self.assertTrue(
+            run.call_args.args[0][1].endswith("scripts/run/run-qemu-dual.sh")
+        )
+
+    @mock.patch("openurma_lab.cli.subprocess.run")
     def test_x86_userspace_target_is_routed(self, run):
         run.return_value.returncode = 0
         self.assertEqual(
