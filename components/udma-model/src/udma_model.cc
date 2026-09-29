@@ -191,7 +191,10 @@ UdmaModel::UdmaModel(HostInterface& host, NetworkInterface& network,
     link_up_.assign(config_.port_count, true);
     StoreLe<std::uint32_t>(ummu_registers_, 0x10, 0x00000b08);
     StoreLe<std::uint32_t>(ummu_registers_, 0x14, 0x00042208);
-    StoreLe<std::uint32_t>(ummu_registers_, 0x18, 0x00009056);
+    // CAP2.OAS=48 is required by the stock OLK UMMU driver's 48-bit S1
+    // identity domain. Advertising 40-bit output addresses makes probe fail
+    // with -ERANGE before SVA can be enabled.
+    StoreLe<std::uint32_t>(ummu_registers_, 0x18, 0x0000906e);
     // CAP3.STALL_MODEL=1 selects terminate-on-fault.  This model implements
     // SVA/MAPT translation, but not an EVENTQ-backed IOPF replay engine, so it
     // must not advertise the stall model (STALL_MODEL=0/2) to the stock UMMU

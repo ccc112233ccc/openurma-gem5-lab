@@ -39,8 +39,8 @@ uses Docker. Stop the current experiment with `./lab stop`.
 
 Lifecycle:   setup, start, status, sync, attach NODE, stop
 Experiments: latency, latency-pair, latency-pairs, sweep-latency
-Build:       build all|gem5|kernel|umdk|initramfs|ns3ub|mooncake|udma-model|udma-device|ub-switch
-Validation:  validate-server, start-single
+Build:       build all|gem5|qemu|kernel|umdk|initramfs|ns3ub|mooncake|udma-model|udma-device|ub-switch
+Validation:  validate-server, start-single, start-qemu
 ```
 
 Examples:
@@ -62,6 +62,12 @@ Examples:
 
 # Four nodes behind one EID-routing switch.
 ./lab start --nodes 4 --profile fast --provider official
+
+# Apple Silicon: build QEMU 11.1.1 and enter an official-driver probe guest.
+./lab build qemu
+./lab start-qemu
+# In the guest:
+urma_admin show
 ```
 
 The console detach sequence is `~.` at the start of a line.  `./lab attach N`
@@ -87,6 +93,7 @@ tools/               switch simulator, guest helpers, profiling, and tests
 official-udma/       official-driver build and contract evidence
 integrations/ns3ub/  complete ns-3-UB adapter source and upstream overlay
 integrations/gem5/   thin UB-HOST adapter overlay for gem5 builds
+integrations/qemu/   thin QEMU SysBus/MMIO/DMA/IRQ UB-HOST adapter
 overlay/             files installed into the guest initramfs
 patches/             reviewed changes applied to pinned upstream sources
 docker/              reproducible ARM64 Ubuntu build image
@@ -106,10 +113,18 @@ The separation is intentional:
   interrupts; `UB-NET` carries only wire-visible frames and link events.
 - `components/udma-model/` owns device behavior without gem5, QEMU, or ns-3
   types. The current gem5 model is being migrated behind that boundary.
+- `integrations/qemu/` contains no UDMA semantics: it forwards guest MMIO,
+  DMA, and interrupts to the same standalone device process used by gem5.
 - `configs/` and the C++ code in `tools/` contain the existing integrated model
   and network implementations while that migration is in progress.
 - official Linux/UMDK code remains under the pinned upstream source trees;
   reproducible patches live under `patches/`.
+
+The initial QEMU path is a single-node TCG probe with a contract peer on the
+network side. It boots the unchanged official stack and is validated when
+`/dev/uburma/udma0` exists and `urma_admin show` reports ACTIVE EIDs. The
+multi-node QEMU + ns-3 traffic launcher and an ITS-backed HVF interrupt bridge
+remain follow-up work; see [the QEMU adapter note](integrations/qemu/README.md).
 
 ## Runtime architecture
 

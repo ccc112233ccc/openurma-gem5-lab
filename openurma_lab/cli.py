@@ -28,6 +28,7 @@ class Command:
 COMMANDS = {
     "start": Command("scripts/run/run-dual.sh", "start the multi-node full-system simulation"),
     "start-single": Command("scripts/run/run.sh", "start the legacy single-node simulation"),
+    "start-qemu": Command("scripts/run/run-qemu.sh", "start the QEMU UB-HOST probe environment"),
     "status": Command("scripts/run/status-dual.sh", "show node and switch process state"),
     "stop": Command("scripts/run/stop-dual.sh", "stop the current multi-node simulation"),
     "sync": Command("scripts/run/sync-dual.sh", "finish guest network and time-sync setup"),
@@ -43,6 +44,7 @@ COMMANDS = {
 BUILD_TARGETS = {
     "all": "scripts/build-all.sh",
     "gem5": "scripts/build/build_gem5.sh",
+    "qemu": "scripts/build/build_qemu.sh",
     "kernel": "scripts/build/build_olk66.sh",
     "umdk": "scripts/build/build_umdk.sh",
     "initramfs": "scripts/build/build-interactive-initramfs.sh",
@@ -78,6 +80,7 @@ def _usage(stream=None) -> None:
         "  build TARGET      TARGET: " + ", ".join(BUILD_TARGETS) + "\n"
         "  validate-server   validate the instantiated server profile\n"
         "  start-single      start the legacy single-node environment\n\n"
+        "  start-qemu        start the interactive QEMU/UDMA probe environment\n\n"
         "Use './lab COMMAND --help' for backend-specific options. Runtime\n"
         "defaults to native on supported Linux hosts and Docker elsewhere.",
         file=stream,
@@ -141,9 +144,9 @@ def _build(target: str, args: Sequence[str], runtime: str) -> int:
     # public CLI perform the container boundary instead of requiring callers
     # to know an internal docker-exec incantation.  The few orchestrator
     # scripts below already use scripts/runtime.sh and must remain on the host.
-    host_orchestrated = {"ns3ub", "mooncake", "mooncake-initramfs"}
+    host_orchestrated = {"ns3ub", "qemu", "mooncake", "mooncake-initramfs"}
     if runtime != "docker" or target in host_orchestrated:
-        return _script(relative, args, runtime)
+        return _script(relative, args, "native" if target == "qemu" else runtime)
 
     container = os.environ.get("OPENURMA_CONTAINER", "openurma-gem5-lab")
     container_root = os.environ.get(
@@ -228,7 +231,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         return _build(tail[0], tail[1:], runtime)
     if command in COMMANDS:
-        return _script(COMMANDS[command].script, tail, runtime)
+        command_runtime = "native" if command == "start-qemu" else runtime
+        return _script(COMMANDS[command].script, tail, command_runtime)
 
     print(f"lab: unknown command: {command}", file=sys.stderr)
     _usage(sys.stderr)

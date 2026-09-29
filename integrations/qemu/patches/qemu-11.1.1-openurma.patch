@@ -1,0 +1,77 @@
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -86,6 +86,7 @@
+ #include "target/arm/gtimer.h"
+ #include "hw/mem/pc-dimm.h"
+ #include "hw/mem/nvdimm.h"
++#include "hw/misc/openurma-ub-host.h"
+ #include "hw/acpi/generic_event_device.h"
+ #include "hw/uefi/var-service-api.h"
+ #include "hw/virtio/virtio-md-pci.h"
+@@ -1498,6 +1499,30 @@
+     default:
+         g_assert_not_reached();
+     }
++}
++
++static void openurma_add_fdt_nodes(VirtMachineState *vms)
++{
++    MachineState *ms = MACHINE(vms);
++
++    qemu_fdt_setprop_sized_cells(ms->fdt, "/chosen",
++                                 "linux,ubios-information-table",
++                                 2, UINT64_C(0x2d010000));
++
++    qemu_fdt_add_subnode(ms->fdt, "/ubc@0");
++    qemu_fdt_setprop_string(ms->fdt, "/ubc@0", "compatible", "ub,ubc");
++    qemu_fdt_setprop_cell(ms->fdt, "/ubc@0", "index", 0);
++    qemu_fdt_setprop_cell(ms->fdt, "/ubc@0", "msi-parent",
++                          vms->msi_phandle);
++    qemu_fdt_setprop_cells(ms->fdt, "/ubc@0", "interrupts",
++                           gic_fdt_irq_type_spi(vms), 72,
++                           GIC_FDT_IRQ_FLAGS_EDGE_LO_HI);
++
++    qemu_fdt_add_subnode(ms->fdt, "/ummu@0");
++    qemu_fdt_setprop_string(ms->fdt, "/ummu@0", "compatible", "ub,ummu");
++    qemu_fdt_setprop_cell(ms->fdt, "/ummu@0", "index", 0);
++    qemu_fdt_setprop_cell(ms->fdt, "/ummu@0", "msi-parent",
++                          vms->msi_phandle);
+ }
+ 
+ static void create_uart(const VirtMachineState *vms, int uart,
+@@ -3157,6 +3182,9 @@
+ 
+     create_gic(vms, sysmem);
+     create_msi_controller(vms);
++    if (getenv("OPENURMA_QEMU_UB_HOST_SOCKET")) {
++        openurma_add_fdt_nodes(vms);
++    }
+ 
+     virt_post_cpus_gic_realized(vms, sysmem);
+ 
+@@ -3209,6 +3237,12 @@
+     create_rtc(vms);
+ 
+     create_pcie(vms);
++    const char *openurma_socket = getenv("OPENURMA_QEMU_UB_HOST_SOCKET");
++    if (openurma_socket && *openurma_socket) {
++        /* Linux IRQ 104 is GIC SPI input 72; vectors 1 and 2 follow it. */
++        openurma_ub_host_create(openurma_socket, 0x2d000000, 0x01000000,
++                                vms->gic, 72);
++    }
+     create_cxl_host_reg_region(vms);
+ 
+     if (aarch64 && firmware_loaded && virt_is_acpi_enabled(vms)) {
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -26,6 +26,10 @@
+ 
+ # virt devices
+ system_ss.add(when: 'CONFIG_VIRT_CTRL', if_true: files('virt_ctrl.c'))
++system_ss.add(when: 'CONFIG_ARM_VIRT', if_true: files(
++  'openurma-ub-host.c',
++  'openurma-simbricks-base.c',
++))
+ 
+ # RISC-V devices
+ system_ss.add(when: 'CONFIG_MCHP_PFSOC_DMC', if_true: files('mchp_pfsoc_dmc.c'))

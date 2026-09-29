@@ -30,7 +30,7 @@ migrated merely because an old in-gem5 fallback still implements it.
 | multi-port failover | migrated | UB-NET link-state event and active-TP rebinding test |
 | simulator-neutral UB packet transport and switch | migrated | independent `ub-switch-sim`, EID routing, link-state and bidirectional process contract |
 | ns-3-UB packet timing/backend | migrated process contract; launcher cutover pending | native `UbSwitch`/`UbPort`/`UbLink` over UB-NET v1; bidirectional `sync=off` and `sync=required` contracts |
-| QEMU host adapter | pending | implement the same UB-HOST v1 contract, no model fork |
+| QEMU host adapter | probe-complete | QEMU 11.1.1 SysBus adapter uses UB-HOST v1; official `udma0` discovery is verified on macOS TCG |
 
 Removal rule: an old `NICTopologySC` behavior can be deleted only after the
 corresponding row is migrated and exercised through the standalone process.

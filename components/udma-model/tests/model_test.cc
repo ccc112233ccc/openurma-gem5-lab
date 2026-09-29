@@ -226,6 +226,7 @@ int main()
     assert(official_model.ReadMmio(0x11000 + 56 + 32, 8, value) &&
            value == official_config.mmio_base + 0x12000);
     assert(official_model.ReadMmio(0xf00010, 4, value) && value == 0x00000b08);
+    assert(official_model.ReadMmio(0xf00018, 4, value) && value == 0x0000906e);
     assert(official_model.ReadMmio(0xf0001c, 4, value) && value == 0x00001010);
     assert(official_model.WriteMmio(0xf00030, 4, 0x55aa));
     assert(official_model.ReadMmio(0xf00034, 4, value) && value == 0x55aa);
