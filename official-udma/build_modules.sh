@@ -8,6 +8,7 @@ arch="${ARCH:-arm64}"
 cross_compile="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 jobs="${JOBS:-8}"
 ub_v2m_bridge="$lab_root/official-udma/ub_v2m_bridge"
+artifact_dir="${ARTIFACT_DIR:-$lab_root/artifacts/kernel}"
 
 [[ -d "$kernel_root" ]] || {
     echo "kernel source not found: $kernel_root" >&2
@@ -48,6 +49,11 @@ done
 make -j"$jobs" "${make_args[@]}" Image
 cp vmlinux.symvers Module.symvers
 
+# The fragment above changes built-in UBUS/UMMU state, so every module shipped
+# with the guest must be built against this final kernel rather than the
+# pre-fragment kernel produced by build_olk66.sh.
+make -j"$jobs" "${make_args[@]}" M=net/ipv6 ipv6.ko
+
 build_module_dir() {
     local dir="$1"
     shift
@@ -79,6 +85,7 @@ build_module_dir drivers/ub/urma/hw/udma \
     KBUILD_EXTRA_SYMBOLS="$kernel_root/drivers/iommu/hisilicon/ummu-core/Module.symvers $kernel_root/drivers/ub/ubase/Module.symvers $kernel_root/drivers/ub/urma/ubcore/Module.symvers"
 
 artifacts=(
+    net/ipv6/ipv6.ko
     drivers/ub/ubfi/ubfi.ko
     drivers/ub/ubus/ubus.ko
     drivers/ub/ubus/vendor/hisilicon/hisi_ubus.ko
@@ -102,3 +109,22 @@ for artifact in "${artifacts[@]}"; do
         printf '%s\n' "$kernel_root/$artifact"
     fi
 done
+
+# Publish one coherent runtime bundle only after the final Kconfig closure and
+# all official modules have succeeded.  run-dual.sh consumes this vmlinux, so
+# leaving the earlier pre-fragment image in artifacts/kernel would silently
+# pair the official modules with the wrong kernel.
+mkdir -p "$artifact_dir/modules"
+install -m 0644 vmlinux "$artifact_dir/vmlinux"
+install -m 0644 arch/arm64/boot/Image "$artifact_dir/Image"
+install -m 0644 .config "$artifact_dir/kernel.config"
+for artifact in "${artifacts[@]}"; do
+    install -m 0644 "$artifact" "$artifact_dir/modules/$(basename "$artifact")"
+done
+kernel_release="$(make -s "${make_args[@]}" kernelrelease)"
+printf '%s\n' "$kernel_release" > "$artifact_dir/kernelrelease.txt"
+(
+    cd "$artifact_dir"
+    sha256sum vmlinux Image kernel.config modules/*.ko > SHA256SUMS
+)
+echo "published coherent official kernel/module bundle: $artifact_dir"

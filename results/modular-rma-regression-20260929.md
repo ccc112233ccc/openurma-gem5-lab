@@ -35,3 +35,27 @@ Shutdown profiles:
 The two UDMA profiles sum to 2,424 fragments, 524 decoded WQEs and 524
 completions.  These match the ns-3 delivery count, with no SQ depth/decode
 reject and no network output backpressure.
+
+## Independent tick-accounting rerun
+
+The same ten cases were then rerun end to end with UART-boundary gem5 tick
+capture enabled.  All ten passed again, and every case produced non-null tick
+samples for both guests.  `simulated_elapsed_ns_max` is the larger of the two
+guest tick deltas; it is reported for provenance and is not host wall time.
+
+| Case | Wall seconds | node0 ticks | node1 ticks | Max simulated ns | Result |
+|---|---:|---:|---:|---:|---:|
+| `send_bw_128_wrap` | 25.697 | 309647463912 | 2010471814701 | 2010471814.701 | PASS |
+| `send_bw_4096` | 15.992 | 239500590336 | 705720235005 | 705720235.005 | PASS |
+| `write_lat_128` | 12.985 | 229559104107 | 257567832342 | 257567832.342 | PASS |
+| `read_lat_128` | 12.933 | 357079938291 | 239404984038 | 357079938.291 | PASS |
+| `write_bw_4096_out16` | 16.424 | 236360475261 | 314870370444 | 314870370.444 | PASS |
+| `read_bw_4096_out16` | 15.783 | 231594856983 | 291824972577 | 291824972.577 | PASS |
+| `write_bw_65536_frag` | 21.569 | 238849759485 | 274819132107 | 274819132.107 | PASS |
+| `read_bw_65536_frag` | 21.448 | 249346067004 | 256995437643 | 256995437.643 | PASS |
+| `write_bw_1m_frag` | 54.401 | 256470136803 | 312252506262 | 312252506.262 | PASS |
+| `read_bw_1m_frag` | 53.996 | 326369308662 | 305822153052 | 326369308.662 | PASS |
+
+Rerun suite wall time: **251.265 seconds**.  Raw UART captures and the JSON/CSV
+report were generated under the ignored experiment directory
+`experiments/rma-regression-20260929-tick-e2e/`.

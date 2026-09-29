@@ -10,6 +10,23 @@ import threading
 import time
 
 
+def connect_until_ready(port: int, deadline: float) -> socket.socket:
+    """Connect to a UART that may not have opened its listener yet."""
+
+    last_error: OSError | None = None
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        try:
+            return socket.create_connection(
+                ("127.0.0.1", port), timeout=min(1.0, remaining)
+            )
+        except OSError as exc:
+            last_error = exc
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    detail = f": {last_error}" if last_error is not None else ""
+    raise TimeoutError(f"UART {port} did not start listening before timeout{detail}")
+
+
 def run_one(
     port: int,
     command: str,
@@ -22,7 +39,7 @@ def run_one(
     deadline = time.monotonic() + timeout
     chunks: list[bytes] = []
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=5.0) as sock:
+        with connect_until_ready(port, deadline) as sock:
             sock.settimeout(0.2)
             prompt_pattern = rb"\(openurma-[^)]+\)[^\r\n]*# "
             # A freshly started full-system guest can take minutes of host
