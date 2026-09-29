@@ -43,6 +43,17 @@ bidirectional cases maintain 16 outstanding WQEs.  The 64 KiB and 1 MiB cases
 exercise asynchronous multi-packet READ/WRITE fragmentation in both
 directions.
 
+A second full run after removing the legacy OpenURMA integration path passed
+all ten cases on 2026-09-29 in **233.592 seconds**.  Its per-case host times
+were 27.759, 14.799, 11.954, 11.894, 14.962, 14.482, 19.846, 19.593,
+49.352 and 48.939 seconds in the table order above.  Boundary counters showed
+2,424 ns-3 deliveries carrying 26,510,368 payload bytes, 2,424 UDMA fragments,
+524 decoded WQEs and 524 completions, with zero SQ depth/decode rejects and
+zero network backpressure.  The compact, tracked evidence is in
+[`results/modular-rma-regression-20260929.md`](../results/modular-rma-regression-20260929.md);
+the complete UART transcripts remain under the git-ignored
+`experiments/rma-regression-20260929-cleanup/` working-tree directory.
+
 Large transfers originally exposed two hardware-model bugs.  UDMA tried to
 push every fragment synchronously and could deadlock on a full transport ring;
 it now retains a pending transfer and drains fragments asynchronously.  The
@@ -65,6 +76,12 @@ Normal shutdown emits three boundary profiles:
   decoded WQEs, fragments, completions and rejects.
 - `[NS3_UB_NET_STATS]`: forwarded/delivered packets and bytes, virtual time,
   synchronization steps and backpressure.
+
+New regression reports also record each node's gem5 tick delta at the UART
+command boundaries.  A gem5 tick is one picosecond in this configuration.
+For unsynchronized functional runs these are per-node progress measurements;
+they must not be interpreted as a common virtual-time latency.  A synchronized
+run may compare them directly once the conservative fence is active.
 
 ## Conservative synchronization status
 

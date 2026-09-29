@@ -18,6 +18,13 @@ On macOS or another Docker host:
 ./lab attach 0
 ```
 
+For a first build, keep at least 20 GiB of host disk space free and use the
+documented `--jobs 2` baseline on a default-memory Docker Desktop VM.  gem5's
+generated ARM decoder can exceed that VM's memory with `--jobs 4`; higher
+parallelism is safe only after increasing Docker's memory limit.  Source trees,
+the ARM gem5 build, Docker image layers, kernel tree and checkpoints are all
+large, so a clean-clone build beside an existing lab needs additional space.
+
 In a prepared ARM64 or x86_64 Ubuntu 22.04 environment, select native execution
 once on each command (or export `OPENURMA_EXECUTION_MODE=native`):
 
@@ -156,7 +163,9 @@ see [the reference guide](docs/reference-guide.md),
 The CLI and host helpers use only the Python standard library:
 
 ```bash
-PYTHONPATH=tools:. python3 -m unittest tools.test_lab_cli tools.test_ethernet_relay
+PYTHONPATH=tools:. python3 -m unittest \
+  tools.test_lab_cli tools.test_ethernet_relay \
+  tools.test_modular_rma_regression
 bash -n scripts/run/*.sh scripts/build/*.sh scripts/*.sh
 ./lab --runtime native build udma-model
 ./lab --runtime native build udma-device
@@ -242,8 +251,11 @@ delivery event at its modeled virtual timestamp:
 `rma-regression` writes `results.csv`, `report.json`, the resolved model
 manifest and one complete UART transcript per case.  It covers SEND bandwidth,
 READ/WRITE latency and bandwidth, 4 KiB/64 KiB/1 MiB fragmentation, SQ ring
-wrap and 16 outstanding operations.  Every row includes wall-clock time.  The
-verified matrix and its measured host times are summarized in
+wrap and 16 outstanding operations.  Every row includes wall-clock time and
+the per-node gem5 tick delta observed across that case.  In `--no-sync` mode
+the two node deltas are deliberately reported separately; their maximum is a
+progress indicator, not a globally synchronized latency.  The verified matrix
+and its measured host times are summarized in
 [`docs/modular-rma-regression.md`](docs/modular-rma-regression.md).
 
 Create a new coordinated shell snapshot only when both guests and the external

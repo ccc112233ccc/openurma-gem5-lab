@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -30,6 +31,23 @@ SYNC_SMOKE_CASES = [
     ("read_lat_128_sync", "read_lat", 128, 8, 1, 1, False),
     ("send_bw_128_sync", "send_bw", 128, 16, 16, 16, False),
 ]
+
+GEM5_TICK_RE = re.compile(r"(?m)^(\d+):")
+
+
+def last_gem5_tick(path: Path) -> int | None:
+    """Return the newest timestamped gem5 log event, in one-picosecond ticks."""
+    try:
+        matches = GEM5_TICK_RE.findall(path.read_text(errors="replace"))
+    except FileNotFoundError:
+        return None
+    return int(matches[-1]) if matches else None
+
+
+def tick_delta(before: int | None, after: int | None) -> int | None:
+    if before is None or after is None or after < before:
+        return None
+    return after - before
 
 
 def command(verb: str, size: int, iterations: int, post_list: int,
@@ -80,6 +98,10 @@ def main() -> int:
         client_command = command(verb, size, iterations, post_list, cq_mod,
                                  port, "10.0.0.1", bidirectional, dist_sync)
         raw = args.output / f"{index:02d}-{label}.uart.txt"
+        ticks_before = [
+            last_gem5_tick(args.run_root / f"node{node}" / "gem5.log")
+            for node in range(2)
+        ]
         started = time.perf_counter()
         result = subprocess.run(
             ["python3", str(args.lab / "tools/dual_serial_command.py"),
@@ -90,12 +112,26 @@ def main() -> int:
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         elapsed = time.perf_counter() - started
+        ticks_after = [
+            last_gem5_tick(args.run_root / f"node{node}" / "gem5.log")
+            for node in range(2)
+        ]
+        tick_deltas = [
+            tick_delta(before, after)
+            for before, after in zip(ticks_before, ticks_after)
+        ]
+        valid_tick_deltas = [value for value in tick_deltas if value is not None]
         raw.write_text(result.stdout)
         record = {
             "case": label, "verb": verb, "size_bytes": size,
             "iterations": iterations, "post_list": post_list,
             "cq_mod": cq_mod, "bidirectional": bidirectional,
             "wall_seconds": elapsed, "returncode": result.returncode,
+            "node0_sim_ticks": tick_deltas[0],
+            "node1_sim_ticks": tick_deltas[1],
+            "simulated_elapsed_ns_max": (
+                max(valid_tick_deltas) / 1000 if valid_tick_deltas else None
+            ),
             "server_command": server_command,
             "client_command": client_command,
             "raw_output": raw.name,
@@ -106,6 +142,8 @@ def main() -> int:
     report = {
         "suite": args.suite,
         "virtual_time_synchronized": dist_sync,
+        "simulated_time_source": "max gem5 UART-boundary tick delta",
+        "gem5_tick_period_ps": 1,
         "suite_wall_seconds": suite_wall,
         "cases": records,
     }
@@ -116,7 +154,8 @@ def main() -> int:
         writer = csv.DictWriter(stream, fieldnames=[
             "case", "verb", "size_bytes", "iterations", "post_list",
             "cq_mod", "bidirectional", "wall_seconds", "returncode",
-            "raw_output",
+            "node0_sim_ticks", "node1_sim_ticks",
+            "simulated_elapsed_ns_max", "raw_output",
         ], extrasaction="ignore")
         writer.writeheader()
         writer.writerows(records)

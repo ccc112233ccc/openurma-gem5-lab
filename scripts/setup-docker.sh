@@ -64,14 +64,15 @@ if docker container inspect "$container" >/dev/null 2>&1; then
     fi
 fi
 if ! docker container inspect "$container" >/dev/null 2>&1; then
-    docker_kvm_args=()
-    (( enable_kvm == 0 )) || docker_kvm_args+=(--device /dev/kvm:/dev/kvm)
-    docker run -d --name "$container" --platform linux/arm64 \
-        "${docker_kvm_args[@]}" \
-        --label openurma.gem5.lab=managed \
-        --mount "type=bind,src=$lab_root,dst=/workspace/openurma-gem5-lab" \
-        --mount "type=volume,src=$kernel_volume,dst=/opt/openurma-gem5-lab" \
-        "$image" >/dev/null
+    docker_run_args=(run -d --name "$container" --platform linux/arm64)
+    (( enable_kvm == 0 )) || docker_run_args+=(--device /dev/kvm:/dev/kvm)
+    docker_run_args+=(
+        --label openurma.gem5.lab=managed
+        --mount "type=bind,src=$lab_root,dst=/workspace/openurma-gem5-lab"
+        --mount "type=volume,src=$kernel_volume,dst=/opt/openurma-gem5-lab"
+        "$image"
+    )
+    docker "${docker_run_args[@]}" >/dev/null
 else
     running=$(docker inspect -f '{{.State.Running}}' "$container")
     [[ "$running" == true ]] || docker start "$container" >/dev/null
