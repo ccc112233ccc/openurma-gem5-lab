@@ -15,8 +15,8 @@ unmodified openEuler UB stack in the full-system guest.
   required UB MSI domain over gem5's GICv2m parent. It does not modify an
   official driver source file.
 
-The executable path has no dependency on the historical `bojieli/OpenURMA`
-repository and no fallback provider or kernel module.
+The executable path has no dependency on the retired prototype repository and
+no fallback provider or kernel module.
 
 ## Validated gates
 

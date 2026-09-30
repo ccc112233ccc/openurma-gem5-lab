@@ -91,11 +91,11 @@ def footer(d: ImageDraw.ImageDraw, source: str, digest: str) -> None:
 
 def render_command_result(uart: str) -> Image.Image:
     required = [
-        "OPENURMA_DIST_SYNC=1 urma_perftest read_lat",
+        "UBSIM_DIST_SYNC=1 urma_perftest read_lat",
         "URMA_READ Latency Test",
         "128     2           2.78       2.98",
-        "__OPENURMA_RC_3470_393488758418017__=0",
-        "__OPENURMA_RC_3470_393558655143923__=0",
+        "__UBSIM_RC_3470_393488758418017__=0",
+        "__UBSIM_RC_3470_393558655143923__=0",
     ]
     assert all(s in uart for s in required), "expected UART evidence is missing"
 
@@ -105,9 +105,9 @@ def render_command_result(uart: str) -> Image.Image:
         "EXIT 0 × 2",
     )
     box = (90, 202, W - 90, 930)
-    terminal(d, box, "openurma-node1 / PL011 console")
+    terminal(d, box, "ubsim-node1 / PL011 console")
     lines = [
-        ("(openurma-node1) ~ # OPENURMA_DIST_SYNC=1 urma_perftest read_lat \\", CYAN),
+        ("(ubsim-node1) ~ # UBSIM_DIST_SYNC=1 urma_perftest read_lat \\", CYAN),
         ("  -d bonding_dev_0 --eid_idx 0 --ctp --use_bonding --aggr_mode balance \\", CYAN),
         ("  -s 128 -P 21117 -J 1 -I 0 -l 1 -n 8 -p 0 -S 10.0.0.1", CYAN),
         ("", TEXT),
@@ -115,11 +115,11 @@ def render_command_result(uart: str) -> Image.Image:
         (" Device name: bonding_dev_0     Transport mode: UB     JETTY mode: DUPLEX", TEXT),
         (" bytes  iterations  t_min  t_max  t_median  t_avg  stdev   99%   99.9%", MUTED),
         (" 128    2           2.78   2.98   2.86      2.88   0.10    2.98  2.98  us", GREEN),
-        (" __OPENURMA_RC_3470_393488758418017__=0", YELLOW),
+        (" __UBSIM_RC_3470_393488758418017__=0", YELLOW),
         ("", TEXT),
         ("# 同一实验再次执行（端口 21118）", MAGENTA),
         (" 128    2           2.78   2.98   2.86      2.88   0.10    2.98  2.98  us", GREEN),
-        (" __OPENURMA_RC_3470_393558655143923__=0", YELLOW),
+        (" __UBSIM_RC_3470_393558655143923__=0", YELLOW),
     ]
     code_lines(d, 124, 282, lines, 43)
     footer(d, "run-dual/node1/system.terminal:503-649", sha256(UART)[:24])

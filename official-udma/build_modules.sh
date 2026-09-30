@@ -89,7 +89,7 @@ artifacts=(
     drivers/ub/ubfi/ubfi.ko
     drivers/ub/ubus/ubus.ko
     drivers/ub/ubus/vendor/hisilicon/hisi_ubus.ko
-    "$ub_v2m_bridge/openurma_ub_v2m.ko"
+    "$ub_v2m_bridge/ubsim_ub_v2m.ko"
     drivers/iommu/hisilicon/ummu-core/ummu-core.ko
     drivers/iommu/hisilicon/ummu.ko
     drivers/ub/ubase/ubase.ko

@@ -15,7 +15,7 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--timeout", type=float, default=60.0)
     args = parser.parse_args()
-    marker = f"__OPENURMA_RC_{uuid.uuid4().hex}__"
+    marker = f"__UBSIM_RC_{uuid.uuid4().hex}__"
     deadline = time.monotonic() + args.timeout
     payload = f"\n{args.command}; printf '\\n{marker}%s\\n' $?\n".encode()
     received = bytearray()

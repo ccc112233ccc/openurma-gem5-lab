@@ -241,7 +241,7 @@ pinned revisions in `SOURCE_REVISIONS.md`.
 - `./lab` is the only supported host-side entry point. It selects native or
   Docker execution, maps node IDs to UART ports, and dispatches lifecycle,
   build, validation, and benchmark subcommands.
-- Stable Python control-plane code lives in `openurma_lab/`. Heavyweight,
+- Stable Python control-plane code lives in `ubsim_lab/`. Heavyweight,
   already-validated Bash implementations are private backends under
   `scripts/build/`, `scripts/run/`, and `scripts/validation/`.
 - Fifteen fixed-node, native-mode, Docker-mode, and compatibility wrappers

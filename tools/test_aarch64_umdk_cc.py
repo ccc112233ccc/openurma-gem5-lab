@@ -18,8 +18,8 @@ class Aarch64UmdkCompilerTest(unittest.TestCase):
             compiler.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
             compiler.chmod(0o755)
             env = os.environ.copy()
-            env["OPENURMA_ARM64_SYSROOT"] = str(root / "sysroot")
-            env["OPENURMA_AARCH64_CC"] = str(compiler)
+            env["UBSIM_ARM64_SYSROOT"] = str(root / "sysroot")
+            env["UBSIM_AARCH64_CC"] = str(compiler)
             result = subprocess.run(
                 [
                     str(ROOT / "tools/aarch64-umdk-cc.py"),

@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-namespace openurma::proto::net {
+namespace ubsim::proto::net {
 
 inline constexpr std::uint32_t kUdmaWireMagic = 0x31574455U; // "UDW1"
 inline constexpr std::uint16_t kUdmaWireFragmented = 1U << 0;
@@ -36,4 +36,4 @@ struct [[gnu::packed]] UdmaWireHeader {
 };
 static_assert(sizeof(UdmaWireHeader) == 60);
 
-} // namespace openurma::proto::net
+} // namespace ubsim::proto::net

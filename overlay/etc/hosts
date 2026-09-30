@@ -1,10 +1,10 @@
-127.0.0.1 localhost openurma-gem5
-::1 localhost openurma-gem5
-10.0.0.1 openurma-node0
-10.0.0.2 openurma-node1
-10.0.0.3 openurma-node2
-10.0.0.4 openurma-node3
-10.0.0.5 openurma-node4
-10.0.0.6 openurma-node5
-10.0.0.7 openurma-node6
-10.0.0.8 openurma-node7
+127.0.0.1 localhost ubsim-gem5
+::1 localhost ubsim-gem5
+10.0.0.1 ubsim-node0
+10.0.0.2 ubsim-node1
+10.0.0.3 ubsim-node2
+10.0.0.4 ubsim-node3
+10.0.0.5 ubsim-node4
+10.0.0.6 ubsim-node5
+10.0.0.7 ubsim-node6
+10.0.0.8 ubsim-node7

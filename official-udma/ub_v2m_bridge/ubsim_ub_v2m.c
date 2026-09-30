@@ -71,7 +71,7 @@ static void ub_v2m_unmask_msi_irq(struct irq_data *data)
 }
 
 static struct irq_chip ub_v2m_irq_chip = {
-	.name = "openurma-ub-v2m",
+	.name = "ubsim-ub-v2m",
 	.irq_mask = ub_v2m_mask_msi_irq,
 	.irq_unmask = ub_v2m_unmask_msi_irq,
 	.irq_eoi = irq_chip_eoi_parent,
@@ -86,7 +86,7 @@ static struct msi_domain_info ub_v2m_domain_info = {
 	.chip = &ub_v2m_irq_chip,
 };
 
-static int __init openurma_ub_v2m_init(void)
+static int __init ubsim_ub_v2m_init(void)
 {
 	struct irq_domain *parent;
 	struct device_node *node;
@@ -100,7 +100,7 @@ static int __init openurma_ub_v2m_init(void)
 	parent = irq_find_matching_fwnode(fwnode, DOMAIN_BUS_NEXUS);
 	if (!parent) {
 		of_node_put(node);
-		pr_err("openurma_ub_v2m: GICv2m parent domain not found\n");
+		pr_err("ubsim_ub_v2m: GICv2m parent domain not found\n");
 		return -EPROBE_DEFER;
 	}
 
@@ -125,11 +125,11 @@ static int __init openurma_ub_v2m_init(void)
 	}
 
 	/* The IRQ domain retains the firmware-node reference until removal. */
-	pr_info("openurma_ub_v2m: registered UBUS USI domain over GICv2m\n");
+	pr_info("ubsim_ub_v2m: registered UBUS USI domain over GICv2m\n");
 	return 0;
 }
 
-static void __exit openurma_ub_v2m_exit(void)
+static void __exit ubsim_ub_v2m_exit(void)
 {
 	struct device_node *node;
 
@@ -141,8 +141,8 @@ static void __exit openurma_ub_v2m_exit(void)
 	of_node_put(node);
 }
 
-module_init(openurma_ub_v2m_init);
-module_exit(openurma_ub_v2m_exit);
+module_init(ubsim_ub_v2m_init);
+module_exit(ubsim_ub_v2m_exit);
 
-MODULE_DESCRIPTION("OpenURMA simulation UBUS domain bridge for GICv2m");
+MODULE_DESCRIPTION("UBSim simulation UBUS domain bridge for GICv2m");
 MODULE_LICENSE("GPL");

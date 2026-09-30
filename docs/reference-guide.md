@@ -31,8 +31,9 @@ the host simulator adapter.
 | Network model | pinned ns-3-UB plus `integrations/ns3ub/ub-net-adapter.cc` |
 | Hardware model | `components/udma-model/` and `components/udma-device-sim/` |
 
-There is no dependency on the historical `bojieli/OpenURMA` checkout,
-SystemC scaffold, compatibility provider, or peer-ring switch.
+There is no dependency on the retired compatibility checkout, its SystemC
+scaffold, compatibility provider, or peer-ring switch. The current model is
+the standalone UDMA process plus ns-3-UB fabric described above.
 
 ## Setup
 
@@ -63,6 +64,20 @@ host simulators and adapters, builds the official guest software, and creates
 
 Detach from a UART with `~.` at the start of a line. Stop all processes for the
 run with `./lab stop`.
+
+For the dual-QEMU functional path, SSH is usually more convenient than UART:
+
+```sh
+./lab start-qemu-dual
+ssh -p 2220 root@127.0.0.1   # node0
+ssh -p 2221 root@127.0.0.1   # node1
+```
+
+Press Enter at the password prompt. These management forwards listen only on
+localhost. QEMU configures both its peer OOB `eth0` and management `eth1`
+automatically. In the synchronized gem5 path, `ubsim-net-up` configures the
+OOB Ethernet used by `urma_perftest` for its control handshake; it never
+carries UB payload traffic.
 
 The supported backend/provider selections are intentionally singular:
 

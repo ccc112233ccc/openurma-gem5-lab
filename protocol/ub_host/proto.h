@@ -9,7 +9,7 @@
 // Host-simulator <-> UB-device-simulator protocol. The final 16 bytes of every
 // 64-byte header deliberately match SimBricks base protocol: timestamp at byte
 // 48 and own_type at byte 63. Payload, when present, follows the header.
-namespace openurma::proto::host {
+namespace ubsim::proto::host {
 
 inline constexpr std::uint64_t kProtocolId = 0x5542484f53540001ULL; // UBHOST v1
 inline constexpr std::uint32_t kVersion = 1;
@@ -168,4 +168,4 @@ static_assert(sizeof(D2HMessage) == 64);
 static_assert(offsetof(MmioRequest, timestamp) == 48);
 static_assert(offsetof(DmaRequest, timestamp) == 48);
 
-} // namespace openurma::proto::host
+} // namespace ubsim::proto::host

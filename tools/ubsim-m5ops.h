@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-#ifndef OPENURMA_GEM5_M5OPS_H
-#define OPENURMA_GEM5_M5OPS_H
+#ifndef UBSIM_GEM5_M5OPS_H
+#define UBSIM_GEM5_M5OPS_H
 
 #include <errno.h>
 #include <stdint.h>
@@ -19,9 +19,9 @@
  * time so one initramfs works with both CPU models.
  */
 static inline int
-ou_m5ops_address_mode(void)
+ubsim_m5ops_address_mode(void)
 {
-    const char *mode = getenv("OPENURMA_M5OPS_MODE");
+    const char *mode = getenv("UBSIM_M5OPS_MODE");
 
     if (mode == NULL || mode[0] == '\0' || strcmp(mode, "inst") == 0) {
         return 0;
@@ -30,13 +30,13 @@ ou_m5ops_address_mode(void)
         return 1;
     }
     (void)fprintf(stderr,
-        "Unsupported OPENURMA_M5OPS_MODE='%s' (expected inst or addr).\n",
+        "Unsupported UBSIM_M5OPS_MODE='%s' (expected inst or addr).\n",
         mode);
     return -1;
 }
 
 static inline int
-ou_m5ops_prepare_address(void)
+ubsim_m5ops_prepare_address(void)
 {
     static int mapped;
     const char *value;
@@ -47,10 +47,10 @@ ou_m5ops_prepare_address(void)
         return 0;
     }
 
-    value = getenv("OPENURMA_M5OPS_BASE");
+    value = getenv("UBSIM_M5OPS_BASE");
     if (value == NULL || value[0] == '\0') {
         (void)fprintf(stderr,
-            "OPENURMA_M5OPS_BASE is required in address mode.\n");
+            "UBSIM_M5OPS_BASE is required in address mode.\n");
         return -1;
     }
     errno = 0;
@@ -58,7 +58,7 @@ ou_m5ops_prepare_address(void)
     if (errno != 0 || end == value || *end != '\0' || parsed == 0 ||
         (parsed & 0xffffULL) != 0 || parsed > UINT64_MAX - 0xffffULL) {
         (void)fprintf(stderr,
-            "Invalid OPENURMA_M5OPS_BASE='%s' (must be a non-zero, "
+            "Invalid UBSIM_M5OPS_BASE='%s' (must be a non-zero, "
             "64-KiB-aligned physical address).\n", value);
         return -1;
     }
@@ -76,15 +76,15 @@ ou_m5ops_prepare_address(void)
 }
 
 static inline int
-ou_m5ops_dist_toggle_sync(void)
+ubsim_m5ops_dist_toggle_sync(void)
 {
-    int address_mode = ou_m5ops_address_mode();
+    int address_mode = ubsim_m5ops_address_mode();
 
     if (address_mode < 0) {
         return -1;
     }
     if (address_mode != 0) {
-        if (ou_m5ops_prepare_address() != 0) {
+        if (ubsim_m5ops_prepare_address() != 0) {
             return -1;
         }
         m5_dist_toggle_sync_addr();
@@ -95,15 +95,15 @@ ou_m5ops_dist_toggle_sync(void)
 }
 
 static inline int
-ou_m5ops_switch_cpu(void)
+ubsim_m5ops_switch_cpu(void)
 {
-    int address_mode = ou_m5ops_address_mode();
+    int address_mode = ubsim_m5ops_address_mode();
 
     if (address_mode < 0) {
         return -1;
     }
     if (address_mode != 0) {
-        if (ou_m5ops_prepare_address() != 0) {
+        if (ubsim_m5ops_prepare_address() != 0) {
             return -1;
         }
         m5_switch_cpu_addr();
@@ -114,15 +114,15 @@ ou_m5ops_switch_cpu(void)
 }
 
 static inline int
-ou_m5ops_checkpoint(void)
+ubsim_m5ops_checkpoint(void)
 {
-    int address_mode = ou_m5ops_address_mode();
+    int address_mode = ubsim_m5ops_address_mode();
 
     if (address_mode < 0) {
         return -1;
     }
     if (address_mode != 0) {
-        if (ou_m5ops_prepare_address() != 0) {
+        if (ubsim_m5ops_prepare_address() != 0) {
             return -1;
         }
         m5_checkpoint_addr(0, 0);
@@ -133,15 +133,15 @@ ou_m5ops_checkpoint(void)
 }
 
 static inline int
-ou_m5ops_reset_stats(void)
+ubsim_m5ops_reset_stats(void)
 {
-    int address_mode = ou_m5ops_address_mode();
+    int address_mode = ubsim_m5ops_address_mode();
 
     if (address_mode < 0) {
         return -1;
     }
     if (address_mode != 0) {
-        if (ou_m5ops_prepare_address() != 0) {
+        if (ubsim_m5ops_prepare_address() != 0) {
             return -1;
         }
         m5_reset_stats_addr(0, 0);
@@ -152,15 +152,15 @@ ou_m5ops_reset_stats(void)
 }
 
 static inline int
-ou_m5ops_dump_stats(void)
+ubsim_m5ops_dump_stats(void)
 {
-    int address_mode = ou_m5ops_address_mode();
+    int address_mode = ubsim_m5ops_address_mode();
 
     if (address_mode < 0) {
         return -1;
     }
     if (address_mode != 0) {
-        if (ou_m5ops_prepare_address() != 0) {
+        if (ubsim_m5ops_prepare_address() != 0) {
             return -1;
         }
         m5_dump_stats_addr(0, 0);
@@ -170,4 +170,4 @@ ou_m5ops_dump_stats(void)
     return 0;
 }
 
-#endif /* OPENURMA_GEM5_M5OPS_H */
+#endif /* UBSIM_GEM5_M5OPS_H */

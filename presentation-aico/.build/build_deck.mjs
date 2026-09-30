@@ -5,8 +5,8 @@ import { Presentation, PresentationFile } from "@oai/artifact-tool";
 import sharp from "sharp";
 
 const ROOT = "/Users/caobo/workspace";
-const LAB = path.join(ROOT, "openurma-gem5-lab");
-const OPENURMA = path.join(ROOT, "OpenURMA");
+const LAB = path.join(ROOT, "ubsim-gem5-lab");
+const UBSIM = path.join(ROOT, "UBSim");
 const AICO = path.join(ROOT, "AICO-PPT");
 const PRESENTATION_DIR = path.join(LAB, "presentation-aico");
 const BUILD_DIR = path.join(PRESENTATION_DIR, ".build");
@@ -16,7 +16,7 @@ const RUNTIME_NODE = "/Users/caobo/.cache/codex-runtimes/codex-primary-runtime/d
 const RUNTIME_NODE_MODULES = "/Users/caobo/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules";
 const RUNTIME_PYTHON = "/Users/caobo/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3";
 const VERSION = process.env.DECK_VERSION || "v1";
-const FINAL_PPTX = path.join(OUTPUT_DIR, `OpenURMA_gem5_AICO_style_${VERSION}.pptx`);
+const FINAL_PPTX = path.join(OUTPUT_DIR, `UBSim_gem5_AICO_style_${VERSION}.pptx`);
 
 const IMG_COVER = path.join(AICO, "assets/huawei-refs/covers/背景-深灰纹理.jpeg");
 const IMG_COVER_GEOM = path.join(AICO, "assets/huawei-refs/components/装饰-白色几何线框1.png");
@@ -157,7 +157,7 @@ function header(slide, section, title, page) {
 }
 
 function footer(slide, page) {
-  textBox(slide, "OpenURMA × gem5", { left: 60, top: 687, width: 240, height: 16 }, {
+  textBox(slide, "UBSim × gem5", { left: 60, top: 687, width: 240, height: 16 }, {
     typeface: MONO, fontSize: 10, color: C.grayBlue, wrap: "none",
   });
   textBox(slide, String(page).padStart(2, "0"), { left: 1160, top: 687, width: 60, height: 16 }, {
@@ -230,7 +230,7 @@ function cornerBrackets(slide, position, color = C.red) {
   shape(s, "rect", { left: 0, top: 0, width: 1280, height: 720 }, "#10141B", "#10141B", 0).opacity = 0.22;
   addImage(s, coverGeomBytes, "image/png", { left: 700, top: 24, width: 540, height: 495 }, "geometric network artwork", "contain");
   shape(s, "rect", { left: 72, top: 76, width: 42, height: 5 }, C.red, C.red, 0);
-  textBox(s, "OPENURMA × GEM5 / TECHNICAL SHARING", { left: 128, top: 67, width: 500, height: 24 }, {
+  textBox(s, "UBSIM × GEM5 / TECHNICAL SHARING", { left: 128, top: 67, width: 500, height: 24 }, {
     typeface: MONO, fontSize: 14, bold: true, color: "#E6B9BD", wrap: "none",
   });
   textBox(s, "让官方 UB 全栈", { left: 72, top: 160, width: 650, height: 78 }, {
@@ -321,7 +321,7 @@ function cornerBrackets(slide, position, color = C.red) {
   metric(s, "5 + 3", "官方库/provider + 官方工具", { left: 345, top: 552, width: 300, height: 92 }, { valueSize: 33 });
   metric(s, "0", "为仿真修改的官方驱动源码", { left: 680, top: 552, width: 300, height: 92 }, { valueSize: 35, valueColor: C.red, fill: C.redPale, lineFill: C.red });
   metric(s, "udma0", "当前官方数据设备", { left: 1015, top: 552, width: 205, height: 92 }, { valueSize: 28 });
-  addNotes(s, "统计不包含 Linux 通用 ipv6.ko，也不包含我们自己的 openurma_ub_v2m.ko。10 个官方模块均以未修改源码加载；支持范围按已经通过的发现、控制和数据面路径计算，不等同每个模块的全部可选功能。\n\n来源：" + path.join(LAB, "overlay/init") + ":103-113；" + path.join(LAB, "official-udma/README.md") + ":20-45。")
+  addNotes(s, "统计不包含 Linux 通用 ipv6.ko，也不包含我们自己的 ubsim_ub_v2m.ko。10 个官方模块均以未修改源码加载；支持范围按已经通过的发现、控制和数据面路径计算，不等同每个模块的全部可选功能。\n\n来源：" + path.join(LAB, "overlay/init") + ":103-113；" + path.join(LAB, "official-udma/README.md") + ":20-45。")
 }
 
 // 4. Responsibility boundary
@@ -370,8 +370,8 @@ function cornerBrackets(slide, position, color = C.red) {
   });
   core.bringToFront();
   labelText(s, "INHERITED PIPELINE", { left: 485, top: 174, width: 250, height: 20 }, C.grayBlue);
-  textBox(s, "OpenURMA 原有 38 个 SystemC/TLM 模块作为 NIC 流水基础", { left: 430, top: 210, width: 420, height: 42 }, { fontSize: 17, color: C.body, alignment: "center", autoFit: "shrinkText" });
-  addNotes(s, "按顶层源码对象统计，当前主路径是 NICTopologySC，单节点测试还使用 WireLoopback。按功能边界统计，复合模型覆盖六组硬件职责。原项目的 38 个 SystemC/TLM 模块属于继承基础，不应全部归为本轮从零编写。\n\n来源：" + path.join(OPENURMA, "eval/twonode/gem5_scaffold/src/NICTopologySC.hh") + ":1-20。")
+  textBox(s, "UBSim 原有 38 个 SystemC/TLM 模块作为 NIC 流水基础", { left: 430, top: 210, width: 420, height: 42 }, { fontSize: 17, color: C.body, alignment: "center", autoFit: "shrinkText" });
+  addNotes(s, "按顶层源码对象统计，当前主路径是 NICTopologySC，单节点测试还使用 WireLoopback。按功能边界统计，复合模型覆盖六组硬件职责。原项目的 38 个 SystemC/TLM 模块属于继承基础，不应全部归为本轮从零编写。\n\n来源：" + path.join(UBSIM, "eval/twonode/gem5_scaffold/src/NICTopologySC.hh") + ":1-20。")
 }
 
 // 6. Data path

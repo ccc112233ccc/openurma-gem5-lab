@@ -33,7 +33,7 @@
 #include <vector>
 
 using namespace ns3;
-namespace ubnet = openurma::proto::net;
+namespace ubnet = ubsim::proto::net;
 
 namespace {
 
@@ -126,7 +126,7 @@ class FrameTag final : public Tag {
   public:
     static TypeId GetTypeId()
     {
-        static TypeId id = TypeId("ns3::OpenUrmaUbNetFrameTag")
+        static TypeId id = TypeId("ns3::UbSimUbNetFrameTag")
             .SetParent<Tag>().SetGroupName("UnifiedBus").AddConstructor<FrameTag>();
         return id;
     }

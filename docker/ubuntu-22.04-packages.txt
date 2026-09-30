@@ -12,6 +12,7 @@ cpio
 curl
 device-tree-compiler
 debootstrap
+dropbear-bin
 flex
 g++-aarch64-linux-gnu
 gcc-aarch64-linux-gnu
@@ -35,7 +36,6 @@ libnuma-dev
 libpng-dev
 libprotobuf-dev
 libssl-dev
-libsystemc-dev
 liburing-dev
 libyaml-cpp-dev
 meson

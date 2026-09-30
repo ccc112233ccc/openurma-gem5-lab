@@ -1,4 +1,4 @@
-# OpenURMA gem5 full-system lab
+# UBSim gem5 full-system lab
 
 This repository boots independent ARM64 gem5 full-system nodes, loads the
 official openEuler OLK and UMDK software stack in each guest, and connects their
@@ -26,7 +26,7 @@ the ARM gem5 build, Docker image layers, kernel tree and checkpoints are all
 large, so a clean-clone build beside an existing lab needs additional space.
 
 In a prepared ARM64 or x86_64 Ubuntu 22.04 environment, select native execution
-once on each command (or export `OPENURMA_EXECUTION_MODE=native`):
+once on each command (or export `UBSIM_EXECUTION_MODE=native`):
 
 ```bash
 ./lab --runtime native setup --jobs 8
@@ -84,6 +84,10 @@ urma_admin show
 ./lab qemu-rma-regression
 ./lab attach-qemu 0
 ./lab attach-qemu 1
+
+# Or connect through the dedicated localhost-only management NIC.
+ssh -p 2220 root@127.0.0.1   # node0; press Enter for the empty password
+ssh -p 2221 root@127.0.0.1   # node1; press Enter for the empty password
 ```
 
 The console detach sequence is `~.` at the start of a line.  `./lab attach N`
@@ -93,7 +97,7 @@ reclaims only a stale `m5term` client for that node; it does not stop gem5.
 
 ```text
 lab                  Python CLI; the only supported host entry point
-openurma_lab/        CLI routing, runtime selection, and node addressing
+ubsim_lab/        CLI routing, runtime selection, and node addressing
 configs/             lab-owned ARM64 full-system machine configuration
 protocol/            simulator-neutral UB-HOST and UB-NET wire protocols
 components/
@@ -122,7 +126,7 @@ sources/, gem5/      fetched/patched upstream source trees (generated)
 
 The separation is intentional:
 
-- `openurma_lab/` is the control plane and stable interface.
+- `ubsim_lab/` is the control plane and stable interface.
 - `scripts/run/` contains simulator orchestration that still benefits from
   Bash process control, but users do not call it directly.
 - `protocol/` is the stable process boundary. `UB-HOST` carries MMIO, DMA and
@@ -140,7 +144,10 @@ The QEMU path provides both a single-node contract probe and a two-node TCG
 functional environment using the standalone UDMA devices and native ns-3 UB
 fabric. The dual path deliberately runs without conservative virtual-time
 synchronization, so it is suitable for driver/data-path bring-up rather than
-latency claims. An ITS-backed HVF interrupt bridge remains follow-up work; see
+latency claims. Each guest has a separate QEMU user-network management NIC;
+localhost ports 2220 and 2221 forward to guest SSH port 22. The empty root
+password is confined to this local functional lab and the forwarding sockets
+bind only to `127.0.0.1`. An ITS-backed HVF interrupt bridge remains follow-up work; see
 [the QEMU adapter note](integrations/qemu/README.md).
 
 ## Runtime architecture
@@ -155,7 +162,7 @@ are selected by `./lab start` options; they are not encoded in wrapper scripts.
 For the complete model knobs, evidence, source revisions, and troubleshooting,
 see [the reference guide](docs/reference-guide.md),
 [modular simulator architecture](docs/modular-simulator-architecture.md),
-[OpenURMA source dependency boundary](docs/openurma-dependency.md),
+[source dependency boundary](docs/ubsim-source-boundary.md),
 [KVM functional mode](docs/kvm-functional-mode.md), and
 [Mooncake bring-up](docs/mooncake-urma-bringup.md).
 
@@ -279,5 +286,5 @@ UDMA states.  Process shutdown prints `[UB_HOST_PROFILE]`, `[UDMA_PROFILE]` and
 
 `BUILD_STOCK_UDMA=enable ./lab build umdk` now builds and links the complete
 official `deps/ummu` library by default.  The old bootstrap shim remains an
-explicit diagnostic fallback via `OPENURMA_UMMU_MODE=shim`; it is not the
+explicit diagnostic fallback via `UBSIM_UMMU_MODE=shim`; it is not the
 default official-provider path.

@@ -3,22 +3,24 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab="$(cd "$script_dir/../.." && pwd)"
-run_dir="${OPENURMA_QEMU_DUAL_OUT:-$lab/run-qemu-dual}"
-qemu="${OPENURMA_QEMU:-$lab/sources/qemu-11.1.1/build/qemu-system-aarch64}"
-kernel="${OPENURMA_QEMU_KERNEL:-$lab/out/qemu-Image}"
-initrd="${OPENURMA_INITRD:-$lab/out/official-udma.cpio.gz}"
+run_dir="${UBSIM_QEMU_DUAL_OUT:-$lab/run-qemu-dual}"
+qemu="${UBSIM_QEMU:-$lab/sources/qemu-11.1.1/build/qemu-system-aarch64}"
+kernel="${UBSIM_QEMU_KERNEL:-$lab/out/qemu-Image}"
+initrd="${UBSIM_INITRD:-$lab/out/official-udma.cpio.gz}"
 runtime_tag="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
-udma="${OPENURMA_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-$runtime_tag/udma-device-sim}"
-ns3="${OPENURMA_NS3UB_ADAPTER:-$lab/sources/ns-3-ub/build-macos/scratch/ns3.44-ub-net-adapter}"
+udma="${UBSIM_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-$runtime_tag/udma-device-sim}"
+ns3="${UBSIM_NS3UB_ADAPTER:-$lab/sources/ns-3-ub/build-macos/scratch/ns3.44-ub-net-adapter}"
 if [[ ! -x "$udma" && -x "$lab/artifacts/udma-device-sim-build/udma-device-sim" ]]; then
     udma="$lab/artifacts/udma-device-sim-build/udma-device-sim"
 fi
-uart0="${OPENURMA_QEMU_UART0:-3560}"
-uart1="${OPENURMA_QEMU_UART1:-3570}"
-oob_port="${OPENURMA_QEMU_OOB_PORT:-4560}"
-rate_gbps="${OPENURMA_PEER_LINK_RATE_GBPS:-400}"
-link_delay_ns="${OPENURMA_PEER_LATENCY_NS:-100}"
-switch_delay_ns="${OPENURMA_QEMU_SWITCH_DELAY_NS:-50}"
+uart0="${UBSIM_QEMU_UART0:-3560}"
+uart1="${UBSIM_QEMU_UART1:-3570}"
+oob_port="${UBSIM_QEMU_OOB_PORT:-4560}"
+ssh0="${UBSIM_QEMU_SSH0_PORT:-2220}"
+ssh1="${UBSIM_QEMU_SSH1_PORT:-2221}"
+rate_gbps="${UBSIM_PEER_LINK_RATE_GBPS:-400}"
+link_delay_ns="${UBSIM_PEER_LATENCY_NS:-100}"
+switch_delay_ns="${UBSIM_QEMU_SWITCH_DELAY_NS:-50}"
 
 die() { echo "run-qemu-dual.sh: $*" >&2; exit 2; }
 
@@ -33,6 +35,8 @@ bring-up path, not a timing-result path.
 
 Attach with './lab attach-qemu 0' and './lab attach-qemu 1'.  Stop with
 './lab stop-qemu'.  UARTs default to localhost:$uart0 and localhost:$uart1.
+SSH forwards default to localhost:$ssh0 and localhost:$ssh1; log in as root
+and press Enter at the empty-password prompt.
 EOF
     exit 0
 fi
@@ -41,11 +45,11 @@ fi
 for path in "$qemu" "$kernel" "$initrd" "$udma" "$ns3" "$lab/tools/run-background.sh"; do
     [[ -x "$path" || -r "$path" ]] || die "missing required artifact: $path"
 done
-for value in "$uart0" "$uart1" "$oob_port" "$rate_gbps" "$link_delay_ns" "$switch_delay_ns"; do
+for value in "$uart0" "$uart1" "$oob_port" "$ssh0" "$ssh1" "$rate_gbps" "$link_delay_ns" "$switch_delay_ns"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "ports, rates and delays must be decimal integers"
 done
 (( uart0 > 1023 && uart1 > 1023 && oob_port > 1023 )) || die "ports must exceed 1023"
-(( uart0 != uart1 && rate_gbps > 0 && link_delay_ns > 0 )) || die "invalid UART, rate or delay"
+(( uart0 != uart1 && ssh0 != ssh1 && rate_gbps > 0 && link_delay_ns > 0 )) || die "invalid UART, SSH port, rate or delay"
 
 pid_live() {
     local file=$1 pid
@@ -66,12 +70,12 @@ mkdir -p "$run_dir"/{node0,node1,udma-node0,udma-node1,ub-fabric}
 : >"$run_dir/udma-node0/udma.log"
 : >"$run_dir/udma-node1/udma.log"
 : >"$run_dir/ub-fabric/ns3.log"
-host0="/tmp/openurma-qemu-dual.node0.host.sock"
-host1="/tmp/openurma-qemu-dual.node1.host.sock"
-net0="/tmp/openurma-qemu-dual.node0.net.sock"
-net1="/tmp/openurma-qemu-dual.node1.net.sock"
-shm0="/tmp/openurma-qemu-dual.node0.shm"
-shm1="/tmp/openurma-qemu-dual.node1.shm"
+host0="/tmp/ubsim-qemu-dual.node0.host.sock"
+host1="/tmp/ubsim-qemu-dual.node1.host.sock"
+net0="/tmp/ubsim-qemu-dual.node0.net.sock"
+net1="/tmp/ubsim-qemu-dual.node1.net.sock"
+shm0="/tmp/ubsim-qemu-dual.node0.shm"
+shm1="/tmp/ubsim-qemu-dual.node1.shm"
 rm -f "$host0" "$host1" "$net0" "$net1" "$shm0" "$shm1"
 
 start_complete=0
@@ -122,20 +126,23 @@ start_bg "$run_dir/ub-fabric/ns3.pid" "$run_dir/ub-fabric/ns3.log" \
     --endpoint "$net0,256" --endpoint "$net1,257"
 
 launch_qemu() {
-    local node=$1 host=$2 uart=$3 netdev=$4 mac=$5 out="$run_dir/node$1"
+    local node=$1 host=$2 uart=$3 netdev=$4 mac=$5 ssh_port=$6 out="$run_dir/node$1"
     start_bg "$out/qemu.pid" "$out/qemu.log" env \
-        OPENURMA_QEMU_UB_HOST_SOCKET="$host" "$qemu" \
+        UBSIM_QEMU_UB_HOST_SOCKET="$host" "$qemu" \
         -machine virt,accel=tcg,gic-version=2,highmem=off -cpu cortex-a72 \
         -smp 1 -m 1024 -kernel "$kernel" -initrd "$initrd" \
-        -append "console=ttyAMA0 rdinit=/init nokaslr loglevel=5 openurma_node=$node openurma_provider=official" \
+        -append "console=ttyAMA0 rdinit=/init nokaslr loglevel=5 ubsim_node=$node ubsim_provider=official ubsim_auto_net=1 ubsim_ssh=1" \
         -display none -monitor none -no-reboot \
         -chardev "socket,id=uart0,host=127.0.0.1,port=$uart,server=on,wait=off,logfile=$out/system.terminal,logappend=on" \
-        -serial chardev:uart0 -device "e1000,netdev=oob,mac=$mac" -netdev "$netdev"
+        -serial chardev:uart0 \
+        -device "e1000,netdev=oob,mac=$mac" -netdev "$netdev" \
+        -device "e1000,netdev=ssh,mac=02:00:00:00:10:0$((node + 1))" \
+        -netdev "user,id=ssh,hostfwd=tcp:127.0.0.1:$ssh_port-:22"
 }
 
-launch_qemu 0 "$host0" "$uart0" "socket,id=oob,listen=127.0.0.1:$oob_port" "02:00:00:00:00:01"
+launch_qemu 0 "$host0" "$uart0" "socket,id=oob,listen=127.0.0.1:$oob_port" "02:00:00:00:00:01" "$ssh0"
 sleep 0.5
-launch_qemu 1 "$host1" "$uart1" "socket,id=oob,connect=127.0.0.1:$oob_port" "02:00:00:00:00:02"
+launch_qemu 1 "$host1" "$uart1" "socket,id=oob,connect=127.0.0.1:$oob_port" "02:00:00:00:00:02" "$ssh1"
 
 cat >"$run_dir/run-manifest.txt" <<EOF
 runtime=qemu-tcg
@@ -145,6 +152,8 @@ synchronization=disabled
 uart0=$uart0
 uart1=$uart1
 oob_port=$oob_port
+ssh0_port=$ssh0
+ssh1_port=$ssh1
 peer_link_rate_gbps=$rate_gbps
 peer_latency_ns=$link_delay_ns
 switch_delay_ns=$switch_delay_ns
@@ -154,6 +163,8 @@ start_complete=1
 echo "Started the two-node QEMU functional environment."
 echo "  node0 UART: localhost:$uart0; EID ...:0100; OOB 10.0.0.1"
 echo "  node1 UART: localhost:$uart1; EID ...:0101; OOB 10.0.0.2"
+echo "  SSH: ssh -p $ssh0 root@127.0.0.1   (node0; empty password)"
+echo "       ssh -p $ssh1 root@127.0.0.1   (node1; empty password)"
 echo "  attach: ./lab attach-qemu 0   (and node 1 in another terminal)"
 echo "  status: ./lab status-qemu"
 echo "  logs:   $run_dir"

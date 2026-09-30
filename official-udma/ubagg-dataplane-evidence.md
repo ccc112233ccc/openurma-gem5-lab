@@ -3,7 +3,7 @@
 This stage runs the stock OLK 6.6 UB/UMMU/UBASE/UDMA modules, stock UMDK
 `liburma`, stock UDMA and UB aggregation providers, and `urma_perftest`.
 The provider and kernel-driver sources are unchanged.  The benchmark has an
-optional `OPENURMA_DIST_SYNC=1` coordination path: it brackets the measured
+optional `UBSIM_DIST_SYNC=1` coordination path: it brackets the measured
 loop with gem5's conservative synchronization, keeps the one-sided server in
 the collective, and executes the required single worker inline so Linux
 thread creation stays outside the 100-ns interval.  Its ordinary behavior is
@@ -17,7 +17,7 @@ Start the fast functional pair with two independent 400-Gbit/s ports and an
 explicit L1 switch:
 
 ```bash
-OPENURMA_TRACE_PACKETS=1 \
+UBSIM_TRACE_PACKETS=1 \
   ./lab start \
     --profile fast --provider official --ub-port-count 2 \
     --peer-topology l1-switch --peer-port-map 0,1 \
@@ -28,15 +28,15 @@ OPENURMA_TRACE_PACKETS=1 \
 Install the topology through the official `uvs_set_topo_info()` entry point:
 
 ```text
-node0: ou-ubagg-topology 0 0x100 0x101 0x200 0x201
-node1: ou-ubagg-topology 1 0x100 0x101 0x200 0x201
+node0: ubsim-ubagg-topology 0 0x100 0x101 0x200 0x201
+node1: ubsim-ubagg-topology 1 0x100 0x101 0x200 0x201
 ```
 
 Run one collective latency smoke test.  Node 0 omits `-S`; node 1 appends
 `-S 10.0.0.1`:
 
 ```bash
-OPENURMA_DIST_SYNC=1 urma_perftest send_lat \
+UBSIM_DIST_SYNC=1 urma_perftest send_lat \
   -d bonding_dev_0 --eid_idx 0 --ctp --use_bonding \
   --aggr_mode balance -s 128 -P 21115 -J 1 -I 0 \
   -l 1 -n 8 --enable_imm -p 0
@@ -88,7 +88,7 @@ The same topology also completes the stock provider's one-sided WRITE path.
 Run node 0 without `-S` and node 1 with `-S 10.0.0.1`:
 
 ```bash
-OPENURMA_DIST_SYNC=1 urma_perftest write_lat \
+UBSIM_DIST_SYNC=1 urma_perftest write_lat \
   -d bonding_dev_0 --eid_idx 0 --ctp --use_bonding \
   --aggr_mode balance -s 128 -P 21116 -J 1 -I 0 \
   -l 1 -n 8 -p 0
@@ -109,7 +109,7 @@ sent a WRITE request (`op=0x82`), performed the remote DMA write, returned an
 ACK (`op=0x83`) on the same port and generated the matching send CQE (JFC 9
 or JFC 8 respectively).
 
-`OPENURMA_DIST_SYNC=1` is optional simulator test instrumentation in
+`UBSIM_DIST_SYNC=1` is optional simulator test instrumentation in
 `urma_perftest`; it brackets the measured loop with gem5's conservative
 virtual-time synchronization and uses the existing control socket for a
 rendezvous.  It does not replace the official driver/provider queue, memory
@@ -122,7 +122,7 @@ One-sided READ uses the same official topology and resources.  Node 0 runs
 the command without `-S`; node 1 appends `-S 10.0.0.1`:
 
 ```bash
-OPENURMA_DIST_SYNC=1 urma_perftest read_lat \
+UBSIM_DIST_SYNC=1 urma_perftest read_lat \
   -d bonding_dev_0 --eid_idx 0 --ctp --use_bonding \
   --aggr_mode balance -s 128 -P 21117 -J 1 -I 0 \
   -l 1 -n 8 -p 0

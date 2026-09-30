@@ -13,7 +13,7 @@ extern "C" {
 
 #include "protocol/ub_net/proto.h"
 
-namespace openurma::proto::net {
+namespace ubsim::proto::net {
 
 struct Interface {
     SimbricksBaseIf base;
@@ -28,4 +28,4 @@ inline void DefaultParams(SimbricksBaseIfParams* params)
     params->in_entries_size = params->out_entries_size = 16384 + 64;
 }
 
-} // namespace openurma::proto::net
+} // namespace ubsim::proto::net

@@ -8,11 +8,11 @@ set -euo pipefail
 
 PINNED_UMDK_SHA="8f272493e4138cd52cfb3ce11064a07c8d1be49f"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-LAB_DIR="${OPENURMA_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+LAB_DIR="${UBSIM_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 UMDK_SRC="${UMDK_SRC:-$LAB_DIR/sources/umdk}"
-TARGET_ARCH="${OPENURMA_TARGET_ARCH:-arm64}"
-BUILD_MODE="${OPENURMA_BUILD_MODE:-auto}"
-ARM64_SYSROOT="${OPENURMA_ARM64_SYSROOT:-}"
+TARGET_ARCH="${UBSIM_TARGET_ARCH:-arm64}"
+BUILD_MODE="${UBSIM_BUILD_MODE:-auto}"
+ARM64_SYSROOT="${UBSIM_ARM64_SYSROOT:-}"
 JOBS="${JOBS:-2}"
 BUILD_STOCK_UDMA="${BUILD_STOCK_UDMA:-disable}"
 ALLOW_DIRTY_UMDK="${ALLOW_DIRTY_UMDK:-disable}"
@@ -117,7 +117,7 @@ else
     [[ "$host_arch" == x86_64 ]] || die "ARM64 cross-build is supported from x86_64 Linux"
     [[ -n "$ARM64_SYSROOT" && -d "$ARM64_SYSROOT/usr/include" ]] || \
         die "ARM64 cross-build requires --arm64-sysroot PATH"
-    export OPENURMA_ARM64_SYSROOT="$ARM64_SYSROOT"
+    export UBSIM_ARM64_SYSROOT="$ARM64_SYSROOT"
 fi
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 [[ "$BUILD_STOCK_UDMA" == "enable" || "$BUILD_STOCK_UDMA" == "disable" ]] || \
@@ -128,7 +128,7 @@ fi
 [[ -d "$UMDK_SRC/.git" || -f "$UMDK_SRC/.git" ]] || die "UMDK source not found at $UMDK_SRC"
 [[ -f "$GEM5_ROOT/include/gem5/m5ops.h" ]] || die "gem5 headers not found at $GEM5_ROOT"
 [[ -f "$GEM5_ROOT/util/m5/src/m5_mmap.h" ]] || die "gem5 m5 mmap header is missing"
-[[ -f "$M5OPS_DISPATCH_DIR/ou-m5ops.h" ]] || die "lab m5ops dispatcher is missing"
+[[ -f "$M5OPS_DISPATCH_DIR/ubsim-m5ops.h" ]] || die "lab m5ops dispatcher is missing"
 command -v scons >/dev/null || die "scons is required to build libm5"
 command -v "${CROSS_COMPILE}gcc" >/dev/null || \
     die "target compiler not found: ${CROSS_COMPILE}gcc"
@@ -209,10 +209,10 @@ cmake -S "$UMDK_SRC/src" -B "$BUILD_DIR" \
     -DBUILD_ALL=disable \
     -DBUILD_URMA=enable \
     -DBUILD_UDMA="$BUILD_STOCK_UDMA" \
-    -DOPENURMA_GEM5_M5_LIBRARY="$GEM5_M5_LIB" \
-    -DOPENURMA_GEM5_M5_INCLUDE_DIR="$GEM5_ROOT/include" \
-    -DOPENURMA_GEM5_M5_MMAP_INCLUDE_DIR="$GEM5_ROOT/util/m5/src" \
-    -DOPENURMA_GEM5_M5_DISPATCH_INCLUDE_DIR="$M5OPS_DISPATCH_DIR" \
+    -DUBSIM_GEM5_M5_LIBRARY="$GEM5_M5_LIB" \
+    -DUBSIM_GEM5_M5_INCLUDE_DIR="$GEM5_ROOT/include" \
+    -DUBSIM_GEM5_M5_MMAP_INCLUDE_DIR="$GEM5_ROOT/util/m5/src" \
+    -DUBSIM_GEM5_M5_DISPATCH_INCLUDE_DIR="$M5OPS_DISPATCH_DIR" \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build "$BUILD_DIR" --parallel "$JOBS"
 

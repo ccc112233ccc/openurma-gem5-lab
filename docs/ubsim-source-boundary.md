@@ -1,9 +1,8 @@
-# Source boundary after the OpenURMA removal
+# UBSim source boundary
 
-The executable lab no longer fetches, builds, or links the
-`bojieli/OpenURMA` repository. The project name and `OPENURMA_*` environment
-prefix are retained as stable user-facing names; they do not indicate a source
-dependency.
+UBSim is the name of this lab and its stable `UBSIM_*` configuration namespace.
+The executable path does not fetch, build, or link the retired compatibility
+repository that was used during the first prototype.
 
 ## Current sources of truth
 
@@ -26,8 +25,7 @@ ns-3 process.
 
 `scripts/fetch-sources.sh` reconstructs the tree from public upstreams and the
 reviewable gem5/UMDK bundles under `patches/source/`. There is deliberately no
-OpenURMA bundle, checkout, SystemC scaffold, compatibility provider, or
+legacy bundle, SystemC hardware scaffold, compatibility provider, or
 in-process peer-ring backend.
 
-Historical result documents may still contain the word OpenURMA because they
-record earlier milestones. They are evidence only and are not build inputs.
+Historical result documents are evidence only and are not build inputs.

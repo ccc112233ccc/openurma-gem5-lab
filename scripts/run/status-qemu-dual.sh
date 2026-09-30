@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab="$(cd "$script_dir/../.." && pwd)"
-run_dir="${OPENURMA_QEMU_DUAL_OUT:-$lab/run-qemu-dual}"
+run_dir="${UBSIM_QEMU_DUAL_OUT:-$lab/run-qemu-dual}"
 
 pid_live() {
     local file=$1 pid
@@ -37,5 +37,6 @@ for node in 0 1; do
         echo "node$node      booting (see $terminal)"
     fi
 done
-echo "UARTs: localhost:${OPENURMA_QEMU_UART0:-3560}, localhost:${OPENURMA_QEMU_UART1:-3570}"
+echo "UARTs: localhost:${UBSIM_QEMU_UART0:-3560}, localhost:${UBSIM_QEMU_UART1:-3570}"
+echo "SSH:   localhost:${UBSIM_QEMU_SSH0_PORT:-2220} (node0), localhost:${UBSIM_QEMU_SSH1_PORT:-2221} (node1)"
 echo "Logs:  $run_dir"

@@ -8,7 +8,7 @@ temporary_root=
 # Darwin limits AF_UNIX paths to roughly 104 bytes.  CMake build directories
 # can easily exceed that, so relocate only the ephemeral contract endpoints.
 if (( ${#root} > 60 )); then
-    temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/ou-udma.XXXXXX")
+    temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/ubsim-udma.XXXXXX")
     root="$temporary_root/c"
 fi
 host_socket="$root-host.sock"

@@ -62,7 +62,7 @@ def command(verb: str, size: int, iterations: int, post_list: int,
         "-p", "0",
     ]
     if dist_sync:
-        parts.insert(0, "OPENURMA_DIST_SYNC=1")
+        parts.insert(0, "UBSIM_DIST_SYNC=1")
     if bidirectional:
         parts.append("-B")
     if server is not None:

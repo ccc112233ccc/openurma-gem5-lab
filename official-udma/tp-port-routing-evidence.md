@@ -8,7 +8,7 @@ UMDK core, `urma_perftest`, or `liburma-udma.so` source file was modified.
 ## Configuration
 
 ```sh
-OPENURMA_TRACE_PACKETS=1 \
+UBSIM_TRACE_PACKETS=1 \
 ./lab start \
   --profile fast --provider official --ub-port-count 2 \
   --peer-topology l1-switch --peer-port-map 0,1 \
@@ -53,10 +53,10 @@ A second stock test used the official bidirectional WRITE path:
 
 ```sh
 # node 0, start first
-OPENURMA_DIST_SYNC=1 urma_perftest write_bw -d udma0 --eid_idx 0 \
+UBSIM_DIST_SYNC=1 urma_perftest write_bw -d udma0 --eid_idx 0 \
   --ctp -B -s 8192 -P 21252 -J 1 -I 64 -n 5 -l 1 -Q 1 -p 0
 # node 1
-OPENURMA_DIST_SYNC=1 urma_perftest write_bw -d udma0 -S 10.0.0.1 \
+UBSIM_DIST_SYNC=1 urma_perftest write_bw -d udma0 -S 10.0.0.1 \
   --eid_idx 0 --ctp -B -s 8192 -P 21252 -J 1 -I 64 \
   -n 5 -l 1 -Q 1 -p 0
 ```

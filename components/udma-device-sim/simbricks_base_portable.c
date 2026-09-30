@@ -14,7 +14,7 @@
 #define SOCK_NONBLOCK 0x4000
 #endif
 
-static int openurma_accept4(int socket_fd, struct sockaddr *address,
+static int ubsim_accept4(int socket_fd, struct sockaddr *address,
                             socklen_t *address_len, int flags)
 {
     int fd = accept(socket_fd, address, address_len);
@@ -29,7 +29,7 @@ static int openurma_accept4(int socket_fd, struct sockaddr *address,
     }
     return fd;
 }
-#define accept4 openurma_accept4
+#define accept4 ubsim_accept4
 #endif
 
 #include <simbricks/base/if.c>

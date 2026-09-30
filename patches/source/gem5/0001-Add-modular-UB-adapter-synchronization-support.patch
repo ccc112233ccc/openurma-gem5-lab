@@ -210,12 +210,12 @@ index 084be5a41..1b8845a62 100644
 +    // perftest marker, so treat it as a compatibility no-op. It must neither
 +    // exit to Python nor change adapter state. Stock dist-gem5 behavior is
 +    // preserved when the explicit adapter environment flag is absent.
-+    const char *lifecycle_sync = std::getenv("OPENURMA_LIFECYCLE_SYNC");
++    const char *lifecycle_sync = std::getenv("UBSIM_LIFECYCLE_SYNC");
 +    if (lifecycle_sync && *lifecycle_sync && *lifecycle_sync != '0') {
-+        exitSimLoop("openurma lifecycle sync fence");
++        exitSimLoop("ubsim lifecycle sync fence");
 +        return;
 +    }
-+    const char *adapter_sync = std::getenv("OPENURMA_ADAPTER_LOCAL_SYNC");
++    const char *adapter_sync = std::getenv("UBSIM_ADAPTER_LOCAL_SYNC");
 +    if (adapter_sync && *adapter_sync && *adapter_sync != '0') {
 +        return;
 +    }
@@ -292,7 +292,7 @@ index 49ad6c6f0..0f376398a 100644
  
      // For descheduling delayed/timed notifications/timeouts.
 +    //
-+    // OpenURMA patch (2026-05): the upstream implementation looks up the
++    // UBSim patch (2026-05): the upstream implementation looks up the
 +    // owning time slot by matching event->when() against
 +    // (*tsit)->targeted_when. That cached when() value can drift from the
 +    // slot the event is actually parked on whenever a notify(t) races a
@@ -308,7 +308,7 @@ index 49ad6c6f0..0f376398a 100644
 +    // gem5 FS for cascades like the OpenRoCE doorbell→qptx→bthb→
 +    // dcqcn→retrans→txmux→ethenc chain that synchronously notify()
 +    // through seven _tick events in a single b_transport call. See
-+    // OpenURMA eval/twonode/gem5_scaffold/patches/gem5_sc_deschedule.patch
++    // UBSim eval/twonode/gem5_scaffold/patches/gem5_sc_deschedule.patch
 +    // for the rationale and a smaller reproducer.
      void
      deschedule(ScEvent *event)

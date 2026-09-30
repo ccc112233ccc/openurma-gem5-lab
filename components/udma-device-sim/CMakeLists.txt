@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(openurma_udma_device_sim VERSION 0.1.0 LANGUAGES C CXX)
+project(ubsim_udma_device_sim VERSION 0.1.0 LANGUAGES C CXX)
 
 set(SIMBRICKS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../sources/simbricks"
     CACHE PATH "Pinned SimBricks source root")
@@ -19,7 +19,7 @@ add_executable(udma-device-sim src/main.cc)
 target_include_directories(udma-device-sim PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 target_include_directories(udma-device-sim SYSTEM PRIVATE "${SIMBRICKS_ROOT}/lib")
-target_link_libraries(udma-device-sim PRIVATE openurma_udma_model simbricks_base)
+target_link_libraries(udma-device-sim PRIVATE ubsim_udma_model simbricks_base)
 target_compile_features(udma-device-sim PRIVATE cxx_std_17)
 target_compile_options(udma-device-sim PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
@@ -31,7 +31,7 @@ if(BUILD_TESTING)
     target_include_directories(udma-transport-peer SYSTEM PRIVATE
         "${SIMBRICKS_ROOT}/lib")
     target_link_libraries(udma-transport-peer PRIVATE
-        openurma_udma_model simbricks_base)
+        ubsim_udma_model simbricks_base)
     target_compile_features(udma-transport-peer PRIVATE cxx_std_17)
     target_compile_options(udma-transport-peer PRIVATE
         -Wall -Wextra -Wpedantic -Werror)

@@ -4,7 +4,7 @@
 #include <array>
 #include <cstdint>
 
-namespace openurma::device::abi {
+namespace ubsim::device::abi {
 
 inline constexpr std::uint32_t kHardwarePageBytes = 4096;
 inline constexpr std::uint32_t kWqebbBytes = 64;
@@ -97,4 +97,4 @@ MakeCqe(bool receive, bool jetty, bool owner, std::uint8_t opcode,
     return cqe;
 }
 
-} // namespace openurma::device::abi
+} // namespace ubsim::device::abi

@@ -23,7 +23,7 @@ from m5.util.fdthelper import (
 )
 
 _lab_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_gem5_root = os.environ.get("OPENURMA_GEM5_ROOT", os.path.join(_lab_root, "gem5"))
+_gem5_root = os.environ.get("UBSIM_GEM5_ROOT", os.path.join(_lab_root, "gem5"))
 addToPath(os.path.join(_gem5_root, "configs"))
 addToPath(os.path.join(_gem5_root, "configs", "example", "arm"))
 
@@ -460,10 +460,10 @@ def create(args):
                     args.cpu not in ("atomic_hot", "atomic_fast")
                 )
 
-    host_socket = os.environ.get("OPENURMA_UDMA_HOST_SOCKET", "")
+    host_socket = os.environ.get("UBSIM_UDMA_HOST_SOCKET", "")
     if not host_socket:
         raise RuntimeError(
-            "OPENURMA_UDMA_HOST_SOCKET is required; UDMA runs as an external process"
+            "UBSIM_UDMA_HOST_SOCKET is required; UDMA runs as an external process"
         )
     interrupt_pins = []
     for spi in (EXTERNAL_UDMA_MISC_SPI, EXTERNAL_UDMA_AEQ_SPI,
@@ -474,14 +474,14 @@ def create(args):
     system.external_udma = UbHostAdapter(
         pio_addr=IOMEM_BASE,
         pio_size=OFFICIAL_UDMA_IOMEM_SIZE,
-        pio_latency=os.environ.get("OPENURMA_UDMA_HOST_PIO_LATENCY", "100ns"),
+        pio_latency=os.environ.get("UBSIM_UDMA_HOST_PIO_LATENCY", "100ns"),
         socket_path=host_socket,
-        poll_interval=os.environ.get("OPENURMA_UDMA_HOST_POLL_INTERVAL", "1us"),
-        sync=os.environ.get("OPENURMA_UDMA_HOST_SYNC", "0") == "1",
+        poll_interval=os.environ.get("UBSIM_UDMA_HOST_POLL_INTERVAL", "1us"),
+        sync=os.environ.get("UBSIM_UDMA_HOST_SYNC", "0") == "1",
         lifecycle_sync=os.environ.get(
-            "OPENURMA_UDMA_HOST_LIFECYCLE_SYNC", "0") == "1",
-        link_latency=os.environ.get("OPENURMA_UDMA_HOST_LINK_LATENCY", "50ns"),
-        sync_interval=os.environ.get("OPENURMA_UDMA_HOST_SYNC_INTERVAL", "50ns"),
+            "UBSIM_UDMA_HOST_LIFECYCLE_SYNC", "0") == "1",
+        link_latency=os.environ.get("UBSIM_UDMA_HOST_LINK_LATENCY", "50ns"),
+        sync_interval=os.environ.get("UBSIM_UDMA_HOST_SYNC_INTERVAL", "50ns"),
         interrupt_misc=interrupt_pins[0],
         interrupt_aeq=interrupt_pins[1],
         interrupt_ceq=interrupt_pins[2],
@@ -527,7 +527,7 @@ def create(args):
         # sweep — expect multi-hour wall-clock.
         cmdline_extras.append("urma_fast")
     if server_switch:
-        cmdline_extras.append("openurma_cpu_switch=server_o3")
+        cmdline_extras.append("ubsim_cpu_switch=server_o3")
     if kvm_boot:
         # The KVM modes are intentionally validated as one-vCPU systems.  A
         # multi-vCPU ARM KVM run needs per-vCPU host event queues, whose PDES
@@ -535,8 +535,8 @@ def create(args):
         # synchronization and has not been proven safe with the SystemC NIC.
         cmdline_extras.extend([
             "maxcpus=1",
-            "openurma_m5ops_mode=addr",
-            f"openurma_m5ops_base=0x{args.m5ops_base:x}",
+            "ubsim_m5ops_mode=addr",
+            f"ubsim_m5ops_base=0x{args.m5ops_base:x}",
             f"earlycon=pl011,mmio32,0x{PL011_UART0_BASE:x}",
             "keep_bootcon",
             "ignore_loglevel",
@@ -544,7 +544,7 @@ def create(args):
             "nokaslr",
         ])
     if args.benchmark_cpu >= 0:
-        cmdline_extras.append(f"openurma_bench_cpu={args.benchmark_cpu}")
+        cmdline_extras.append(f"ubsim_bench_cpu={args.benchmark_cpu}")
     if getattr(args, "extras", False):
         cmdline_extras.append("urma_extras")
     if getattr(args, "extra_cmdline", None):
@@ -932,7 +932,7 @@ def main():
                 cause == "simulate() limit reached":
             continue
         print(f"[arm64-fs] exited @ tick {m5.curTick()} because {cause}")
-        if cause == "openurma lifecycle sync fence":
+        if cause == "ubsim lifecycle sync fence":
             if not hasattr(root.system, "external_udma"):
                 raise RuntimeError(
                     "lifecycle synchronization requires the external UDMA adapter"
@@ -953,7 +953,7 @@ def main():
             cdir = os.path.join(m5.options.outdir, "cpt")
             m5.checkpoint(cdir)
             print(f"[single_node_fs_clean] checkpoint written to {cdir}")
-            if os.environ.get("OPENURMA_EXIT_AFTER_CHECKPOINT", "0") == "1":
+            if os.environ.get("UBSIM_EXIT_AFTER_CHECKPOINT", "0") == "1":
                 print("[single_node_fs_clean] stopping at coordinated checkpoint")
                 break
             continue

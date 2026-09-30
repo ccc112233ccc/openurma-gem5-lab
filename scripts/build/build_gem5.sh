@@ -6,7 +6,7 @@ die() { echo "build_gem5.sh: $*" >&2; exit 2; }
 note() { echo "[build-gem5] $*"; }
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-lab_dir="${OPENURMA_LAB_ROOT:-$(cd "$script_dir/../.." && pwd)}"
+lab_dir="${UBSIM_LAB_ROOT:-$(cd "$script_dir/../.." && pwd)}"
 gem5_root="${GEM5_ROOT:-$lab_dir/gem5}"
 jobs="${JOBS:-1}"
 readonly GEM5_COMMIT=d7a08a8b84b0a393a91e259025c0ab123ad60a6b
@@ -42,7 +42,7 @@ make -C "$gem5_root/util/term" -j"$jobs"
 note "building ARM gem5.opt with the UB-HOST adapter only (JOBS=$jobs)"
 (
     cd "$gem5_root"
-    export OPENURMA_LAB_ROOT="$lab_dir"
+    export UBSIM_LAB_ROOT="$lab_dir"
     scons --linker=gold --limit-ld-memory-usage build/ARM/gem5.opt \
         EXTRAS="$extras_root" -j"$jobs"
 )

@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if [ "${OPENURMA_CPU_SWITCH:-}" != server_o3 ]; then
-    echo "ou-cpu-switch: this guest was not launched with the server_o3 model" >&2
+if [ "${UBSIM_CPU_SWITCH:-}" != server_o3 ]; then
+    echo "ubsim-cpu-switch: this guest was not launched with the server_o3 model" >&2
     exit 2
 fi
 

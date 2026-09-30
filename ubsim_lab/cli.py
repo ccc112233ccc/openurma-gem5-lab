@@ -110,7 +110,7 @@ def _runtime(value: str) -> str:
 
 
 def _split_global_options(argv: Sequence[str]) -> tuple[str, list[str]]:
-    runtime = os.environ.get("OPENURMA_EXECUTION_MODE", "auto")
+    runtime = os.environ.get("UBSIM_EXECUTION_MODE", "auto")
     args = list(argv)
     while args and args[0].startswith("--"):
         option = args.pop(0)
@@ -140,9 +140,9 @@ def _script(relative: str, args: Sequence[str], runtime: str) -> int:
         print(f"lab: internal command is missing: {path}", file=sys.stderr)
         return 2
     env = os.environ.copy()
-    env["OPENURMA_EXECUTION_MODE"] = runtime
-    env["OPENURMA_LAB_ROOT"] = (
-        env.get("OPENURMA_CONTAINER_LAB_ROOT", "/workspace/openurma-gem5-lab")
+    env["UBSIM_EXECUTION_MODE"] = runtime
+    env["UBSIM_LAB_ROOT"] = (
+        env.get("UBSIM_CONTAINER_LAB_ROOT", "/workspace/ubsim-gem5-lab")
         if runtime == "docker" else str(ROOT)
     )
     return subprocess.run(["bash", str(path), *args], env=env).returncode
@@ -158,14 +158,14 @@ def _build(target: str, args: Sequence[str], runtime: str) -> int:
     if runtime != "docker" or target in host_orchestrated:
         return _script(relative, args, "native" if target == "qemu" else runtime)
 
-    container = os.environ.get("OPENURMA_CONTAINER", "openurma-gem5-lab")
+    container = os.environ.get("UBSIM_CONTAINER", "ubsim-gem5-lab")
     container_root = os.environ.get(
-        "OPENURMA_CONTAINER_LAB_ROOT", "/workspace/openurma-gem5-lab"
+        "UBSIM_CONTAINER_LAB_ROOT", "/workspace/ubsim-gem5-lab"
     )
     command = [
         "docker", "exec",
-        "-e", "OPENURMA_EXECUTION_MODE=native",
-        "-e", f"OPENURMA_LAB_ROOT={container_root}",
+        "-e", "UBSIM_EXECUTION_MODE=native",
+        "-e", f"UBSIM_LAB_ROOT={container_root}",
         container,
         "bash", f"{container_root}/{relative}", *args,
     ]
@@ -186,17 +186,17 @@ def _attach(args: Sequence[str], runtime: str) -> int:
         print("usage: ./lab [--runtime ...] attach NODE", file=sys.stderr)
         return 2
     node = int(args[0])
-    uart0 = int(os.environ.get("OPENURMA_DUAL_UART0", "3460"))
-    uart1 = int(os.environ.get("OPENURMA_DUAL_UART1", "3470"))
+    uart0 = int(os.environ.get("UBSIM_DUAL_UART0", "3460"))
+    uart1 = int(os.environ.get("UBSIM_DUAL_UART1", "3470"))
     stride = uart1 - uart0
     if node < 0 or stride <= 0:
         print("lab: NODE must be non-negative and node1 UART must exceed node0 UART", file=sys.stderr)
         return 2
     env = os.environ.copy()
-    env.setdefault("OPENURMA_M5TERM_PORT", str(uart0 + node * stride))
-    env["OPENURMA_EXECUTION_MODE"] = runtime
-    env["OPENURMA_LAB_ROOT"] = (
-        env.get("OPENURMA_CONTAINER_LAB_ROOT", "/workspace/openurma-gem5-lab")
+    env.setdefault("UBSIM_M5TERM_PORT", str(uart0 + node * stride))
+    env["UBSIM_EXECUTION_MODE"] = runtime
+    env["UBSIM_LAB_ROOT"] = (
+        env.get("UBSIM_CONTAINER_LAB_ROOT", "/workspace/ubsim-gem5-lab")
         if runtime == "docker" else str(ROOT)
     )
     return subprocess.run(["bash", str(ROOT / "scripts/run/attach.sh")], env=env).returncode

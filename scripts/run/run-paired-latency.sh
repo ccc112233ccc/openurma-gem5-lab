@@ -25,19 +25,19 @@ Run one synchronized send_lat session per adjacent node pair (0<->1, 2<->3,
 EOF
 }
 
-container="$OPENURMA_CONTAINER"
+container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
-run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
-uart0="${OPENURMA_DUAL_UART0:-3460}"
-uart1="${OPENURMA_DUAL_UART1:-3470}"
-profile="${OPENURMA_LAT_PROFILE:-ctp-rm-send-imm-i128}"
-samples="${OPENURMA_LAT_SAMPLES:-100}"
-size="${OPENURMA_LAT_SIZE:-128}"
-base_port="${OPENURMA_LAT_PORT:-21115}"
-roi_stats="${OPENURMA_ROI_STATS:-0}"
-raw_output="${OPENURMA_LAT_RAW_OUTPUT:-}"
-timeout="${OPENURMA_LAT_TIMEOUT:-600}"
+lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
+run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"
+uart0="${UBSIM_DUAL_UART0:-3460}"
+uart1="${UBSIM_DUAL_UART1:-3470}"
+profile="${UBSIM_LAT_PROFILE:-ctp-rm-send-imm-i128}"
+samples="${UBSIM_LAT_SAMPLES:-100}"
+size="${UBSIM_LAT_SIZE:-128}"
+base_port="${UBSIM_LAT_PORT:-21115}"
+roi_stats="${UBSIM_ROI_STATS:-0}"
+raw_output="${UBSIM_LAT_RAW_OUTPUT:-}"
+timeout="${UBSIM_LAT_TIMEOUT:-600}"
 positional=()
 
 need_value() { (( $# >= 2 )) && [[ -n "$2" ]] || die "$1 requires a value"; }
@@ -75,10 +75,10 @@ esac
 (( size <= 8088 )) || die "message size must be <= 8088 bytes"
 case "$roi_stats" in 0|1) ;; *) die "roi-stats must be 0 or 1" ;; esac
 
-ou_runtime_start
-ou_exec test -e "$run_root/sync.ready" ||
+ubsim_runtime_start
+ubsim_exec test -e "$run_root/sync.ready" ||
     die "measurement setup is not ready; run './lab sync' first"
-node_count=$(ou_exec awk -F= '$1 == "node_count" {print $2; exit}' \
+node_count=$(ubsim_exec awk -F= '$1 == "node_count" {print $2; exit}' \
     "$run_root/run-manifest.txt")
 [[ "$node_count" =~ ^[0-9]+$ ]] && (( node_count >= 2 && node_count % 2 == 0 )) ||
     die "manifest node_count must be an even integer >= 2"
@@ -97,17 +97,17 @@ for ((node = 0; node < node_count; ++node)); do
     (( node % 2 == 0 )) && role=server
     uart_ports+=("$((uart0 + node * uart_stride))")
     if [[ "$role" == server ]]; then
-        commands+=("ou-lat-server --profile $profile $guest_roi_arg $samples $size $port")
+        commands+=("ubsim-lat-server --profile $profile $guest_roi_arg $samples $size $port")
     else
         server_ip="10.0.0.$node"
-        commands+=("ou-lat-client --profile $profile $guest_roi_arg $samples $size $port $server_ip")
+        commands+=("ubsim-lat-client --profile $profile $guest_roi_arg $samples $size $port $server_ip")
     fi
 done
 
-transcript=$(mktemp "${TMPDIR:-/tmp}/openurma-paired-latency.XXXXXX")
+transcript=$(mktemp "${TMPDIR:-/tmp}/ubsim-paired-latency.XXXXXX")
 trap 'rm -f "$transcript"' EXIT
 set +e
-ou_exec python3 "$lab/tools/dual_serial_command.py" \
+ubsim_exec python3 "$lab/tools/dual_serial_command.py" \
     --ports "${uart_ports[@]}" --commands "${commands[@]}" \
     --timeout "$timeout" --prompt-kick-after 1 --full-output >"$transcript" 2>&1
 command_rc=$?

@@ -2,10 +2,10 @@
 
 ## Scope
 
-- Fresh clone: `https://github.com/ccc112233ccc/openurma-gem5-lab.git`
+- Fresh clone of the project repository into an empty worktree
 - Remote commit tested: `2baecfc1d62eefce6c4a8fc52075044a637d0eea`
-- Isolated container: `openurma-gem5-lab-repro`
-- Isolated case-sensitive kernel volume: `openurma-gem5-lab-repro-kernel`
+- Isolated container: `ubsim-gem5-lab-repro`
+- Isolated case-sensitive kernel volume: `ubsim-gem5-lab-repro-kernel`
 - Command: `./lab --runtime docker setup --jobs 2`
 - Host: macOS on Apple M2; ARM64 Ubuntu 22.04 build container
 

@@ -3,14 +3,14 @@ set -euo pipefail
 
 lab_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 default_kernel_root="$lab_root/oe66"
-if [[ -f /opt/openurma-gem5-lab/oe66/vmlinux ]]; then
-    default_kernel_root=/opt/openurma-gem5-lab/oe66
+if [[ -f /opt/ubsim-gem5-lab/oe66/vmlinux ]]; then
+    default_kernel_root=/opt/ubsim-gem5-lab/oe66
 fi
 kernel_root="${KSRC:-$default_kernel_root}"
 arm_build="${ARM_BUILD:-$lab_root/artifacts/umdk-build}"
 busybox="${BUSYBOX_ARM64:-/bin/busybox}"
 output="${OUT:-$lab_root/out/official-udma.cpio.gz}"
-bridge="$lab_root/official-udma/ub_v2m_bridge/openurma_ub_v2m.ko"
+bridge="$lab_root/official-udma/ub_v2m_bridge/ubsim_ub_v2m.ko"
 
 modules=(
     "$kernel_root/drivers/ub/ubfi/ubfi.ko"

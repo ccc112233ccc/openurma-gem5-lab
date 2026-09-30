@@ -2,12 +2,12 @@
 cat <<'EOF'
 Official UDMA simulation commands
 
-  ou-status             kernel/module/device status + urma_admin show
+  ubsim-status             kernel/module/device status + urma_admin show
   urma_admin show       enumerate the simulated UB device via netlink
   urma_admin show -d udma0
   urma_perftest --help  inspect the stock UMDK performance-test syntax
-  ou-lat-server 101 128 node0: CTP/RM/SEND_IMM, inline 128, one-Jetty server
-  ou-lat-client 101 128 node1: matching synchronized send_lat client
+  ubsim-lat-server 101 128 node0: CTP/RM/SEND_IMM, inline 128, one-Jetty server
+  ubsim-lat-client 101 128 node1: matching synchronized send_lat client
   ping 10.0.0.1         test the dual-node Ethernet control channel
   dmesg | tail -n 80    inspect provider and ubcore messages
   lsmod                 list the real guest kernel modules

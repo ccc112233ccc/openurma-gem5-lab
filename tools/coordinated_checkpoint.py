@@ -31,12 +31,12 @@ def checkpoint_one(port: int, timeout: float, gate: threading.Barrier,
                 data += chunk
                 if b"terminal already attached" in data:
                     raise RuntimeError("terminal already attached; detach with ~. first")
-                if re.search(rb"\(openurma-[^)]+\)[^\r\n]*# ", data):
+                if re.search(rb"\(ubsim-[^)]+\)[^\r\n]*# ", data):
                     break
             else:
                 raise TimeoutError("shell prompt timeout")
             gate.wait(timeout=max(1.0, deadline - time.monotonic()))
-            stream.sendall(b"\x15/usr/bin/ou-checkpoint\n")
+            stream.sendall(b"\x15/usr/bin/ubsim-checkpoint\n")
             while time.monotonic() < deadline:
                 try:
                     if not stream.recv(65536):

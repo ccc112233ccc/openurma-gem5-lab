@@ -3,13 +3,13 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab="$(cd "$script_dir/../.." && pwd)"
-qemu="${OPENURMA_QEMU:-$lab/sources/qemu-11.1.1/build/qemu-system-aarch64}"
-kernel="${OPENURMA_QEMU_KERNEL:-$lab/out/qemu-Image}"
-initrd="${OPENURMA_INITRD:-$lab/out/official-udma.cpio.gz}"
-run_dir="${OPENURMA_QEMU_OUT:-$lab/run-qemu}"
+qemu="${UBSIM_QEMU:-$lab/sources/qemu-11.1.1/build/qemu-system-aarch64}"
+kernel="${UBSIM_QEMU_KERNEL:-$lab/out/qemu-Image}"
+initrd="${UBSIM_INITRD:-$lab/out/official-udma.cpio.gz}"
+run_dir="${UBSIM_QEMU_OUT:-$lab/run-qemu}"
 runtime_tag="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
-udma="${OPENURMA_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-$runtime_tag/udma-device-sim}"
-peer="${OPENURMA_UDMA_PEER_BINARY:-$lab/artifacts/udma-device-sim-build-$runtime_tag/udma-transport-peer}"
+udma="${UBSIM_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-$runtime_tag/udma-device-sim}"
+peer="${UBSIM_UDMA_PEER_BINARY:-$lab/artifacts/udma-device-sim-build-$runtime_tag/udma-transport-peer}"
 if [[ ! -x "$udma" && -x "$lab/artifacts/udma-device-sim-build/udma-device-sim" ]]; then
     udma="$lab/artifacts/udma-device-sim-build/udma-device-sim"
     peer="$lab/artifacts/udma-device-sim-build/udma-transport-peer"
@@ -25,8 +25,8 @@ this command validates official discovery, MMIO, DMA and driver probe; use the
 multi-node gem5 launcher for traffic experiments until the QEMU/ns-3 launcher
 is added.
 
-Environment: OPENURMA_QEMU, OPENURMA_QEMU_KERNEL, OPENURMA_INITRD,
-             OPENURMA_QEMU_OUT, OPENURMA_UDMA_DEVICE_BINARY.
+Environment: UBSIM_QEMU, UBSIM_QEMU_KERNEL, UBSIM_INITRD,
+             UBSIM_QEMU_OUT, UBSIM_UDMA_DEVICE_BINARY.
 EOF
     exit 0
 fi
@@ -36,9 +36,9 @@ for path in "$qemu" "$kernel" "$initrd" "$udma" "$peer"; do
     [[ -e "$path" ]] || { echo "missing required artifact: $path" >&2; exit 1; }
 done
 mkdir -p "$run_dir"
-host_socket="/tmp/openurma-qemu.$$.host.sock"
-net_socket="/tmp/openurma-qemu.$$.net.sock"
-shm_path="/tmp/openurma-qemu.$$.shm"
+host_socket="/tmp/ubsim-qemu.$$.host.sock"
+net_socket="/tmp/ubsim-qemu.$$.net.sock"
+shm_path="/tmp/ubsim-qemu.$$.shm"
 udma_pid=""
 peer_pid=""
 cleanup() {
@@ -64,8 +64,8 @@ done
 peer_pid=$!
 
 echo "Starting QEMU TCG; Ctrl-a x exits.  Logs: $run_dir"
-OPENURMA_QEMU_UB_HOST_SOCKET="$host_socket" "$qemu" \
+UBSIM_QEMU_UB_HOST_SOCKET="$host_socket" "$qemu" \
     -machine virt,accel=tcg,gic-version=2,highmem=off -cpu cortex-a72 \
     -smp 1 -m 1024 -kernel "$kernel" -initrd "$initrd" \
-    -append 'console=ttyAMA0 rdinit=/init nokaslr loglevel=5 openurma_node=0 openurma_provider=official' \
+    -append 'console=ttyAMA0 rdinit=/init nokaslr loglevel=5 ubsim_node=0 ubsim_provider=official' \
     -nographic -no-reboot

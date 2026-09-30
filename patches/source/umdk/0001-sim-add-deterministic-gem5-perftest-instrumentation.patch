@@ -46,31 +46,31 @@ index 60369ad..ae60707 100644
          urma pthread m
  )
  
-+# OpenURMA's gem5-only build adds a runtime-selectable m5 pseudo-op transport.
++# UBSim's gem5-only build adds a runtime-selectable m5 pseudo-op transport.
 +# Keeping the paths as cache variables leaves the upstream/physical build
 +# unchanged when they are not supplied.
-+set(OPENURMA_GEM5_M5_LIBRARY "" CACHE FILEPATH
-+    "Optional gem5 libm5.a used by the OpenURMA simulation instrumentation")
-+set(OPENURMA_GEM5_M5_INCLUDE_DIR "" CACHE PATH
++set(UBSIM_GEM5_M5_LIBRARY "" CACHE FILEPATH
++    "Optional gem5 libm5.a used by the UBSim simulation instrumentation")
++set(UBSIM_GEM5_M5_INCLUDE_DIR "" CACHE PATH
 +    "Optional directory containing gem5/m5ops.h")
-+set(OPENURMA_GEM5_M5_MMAP_INCLUDE_DIR "" CACHE PATH
++set(UBSIM_GEM5_M5_MMAP_INCLUDE_DIR "" CACHE PATH
 +    "Optional directory containing m5_mmap.h")
-+set(OPENURMA_GEM5_M5_DISPATCH_INCLUDE_DIR "" CACHE PATH
-+    "Optional directory containing ou-m5ops.h")
++set(UBSIM_GEM5_M5_DISPATCH_INCLUDE_DIR "" CACHE PATH
++    "Optional directory containing ubsim-m5ops.h")
 +
-+if(OPENURMA_GEM5_M5_LIBRARY)
-+    if(NOT OPENURMA_GEM5_M5_INCLUDE_DIR OR
-+       NOT OPENURMA_GEM5_M5_MMAP_INCLUDE_DIR OR
-+       NOT OPENURMA_GEM5_M5_DISPATCH_INCLUDE_DIR)
++if(UBSIM_GEM5_M5_LIBRARY)
++    if(NOT UBSIM_GEM5_M5_INCLUDE_DIR OR
++       NOT UBSIM_GEM5_M5_MMAP_INCLUDE_DIR OR
++       NOT UBSIM_GEM5_M5_DISPATCH_INCLUDE_DIR)
 +        message(FATAL_ERROR
-+            "All OpenURMA gem5 m5 include directories are required with libm5")
++            "All UBSim gem5 m5 include directories are required with libm5")
 +    endif()
-+    target_compile_definitions(urma_perftest PRIVATE OPENURMA_GEM5_M5OPS=1)
++    target_compile_definitions(urma_perftest PRIVATE UBSIM_GEM5_M5OPS=1)
 +    target_include_directories(urma_perftest PRIVATE
-+        "${OPENURMA_GEM5_M5_INCLUDE_DIR}"
-+        "${OPENURMA_GEM5_M5_MMAP_INCLUDE_DIR}"
-+        "${OPENURMA_GEM5_M5_DISPATCH_INCLUDE_DIR}")
-+    target_link_libraries(urma_perftest PRIVATE "${OPENURMA_GEM5_M5_LIBRARY}")
++        "${UBSIM_GEM5_M5_INCLUDE_DIR}"
++        "${UBSIM_GEM5_M5_MMAP_INCLUDE_DIR}"
++        "${UBSIM_GEM5_M5_DISPATCH_INCLUDE_DIR}")
++    target_link_libraries(urma_perftest PRIVATE "${UBSIM_GEM5_M5_LIBRARY}")
 +endif()
 +
  install(TARGETS urma_perftest
@@ -110,8 +110,8 @@ index 7338e88..e437509 100644
  #include "perftest_parameters.h"
  #include "perftest_resources.h"
  
-+#if defined(OPENURMA_GEM5_M5OPS)
-+#include "ou-m5ops.h"
++#if defined(UBSIM_GEM5_M5OPS)
++#include "ubsim-m5ops.h"
 +#endif
 +
  #define PERFTEST_HALF (2)
@@ -121,7 +121,7 @@ index 7338e88..e437509 100644
  #define PERFTEST_ITERS_99_99_9 (0.99999)
  #define PERFTEST_SGE_NUM_PRE_WR (2)
  #define PERFTEST_POLL_BATCH (16)
-+#define OPENURMA_DIST_WARMUP_DELTAS (5)
++#define UBSIM_DIST_WARMUP_DELTAS (5)
 +
 +/*
 + * A distributed gem5 run must not let either event queue cross the peer
@@ -136,32 +136,32 @@ index 7338e88..e437509 100644
 + */
 +static bool dist_sync_requested(void)
 +{
-+    const char *value = getenv("OPENURMA_DIST_SYNC");
++    const char *value = getenv("UBSIM_DIST_SYNC");
 +    return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
 +}
 +
 +static bool roi_stats_requested(void)
 +{
-+    const char *value = getenv("OPENURMA_ROI_STATS");
++    const char *value = getenv("UBSIM_ROI_STATS");
 +    return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
 +}
 +
 +static bool cpu_switch_requested(void)
 +{
-+    const char *value = getenv("OPENURMA_CPU_SWITCH");
++    const char *value = getenv("UBSIM_CPU_SWITCH");
 +    return value != NULL && strcmp(value, "server_o3") == 0;
 +}
 +
 +static uint64_t latency_warmup_deltas(void)
 +{
-+    return dist_sync_requested() ? OPENURMA_DIST_WARMUP_DELTAS : 0;
++    return dist_sync_requested() ? UBSIM_DIST_WARMUP_DELTAS : 0;
 +}
 +
 +static int toggle_dist_sync(const char *phase)
 +{
 +#if defined(__aarch64__)
-+#if defined(OPENURMA_GEM5_M5OPS)
-+    if (ou_m5ops_dist_toggle_sync() != 0) {
++#if defined(UBSIM_GEM5_M5OPS)
++    if (ubsim_m5ops_dist_toggle_sync() != 0) {
 +        (void)fprintf(stderr,
 +            "Failed to %s distributed virtual-time synchronization.\n", phase);
 +        return -1;
@@ -173,7 +173,7 @@ index 7338e88..e437509 100644
 +    (void)phase;
 +    return 0;
 +#else
-+    int ret = system("/usr/bin/ou-dist-sync");
++    int ret = system("/usr/bin/ubsim-dist-sync");
 +    if (ret != 0) {
 +        (void)fprintf(stderr, "Failed to %s distributed virtual-time synchronization, status:%d.\n",
 +            phase, ret);
@@ -220,8 +220,8 @@ index 7338e88..e437509 100644
 +static int gem5_roi_stats(bool reset)
 +{
 +#if defined(__aarch64__)
-+#if defined(OPENURMA_GEM5_M5OPS)
-+    return reset ? ou_m5ops_reset_stats() : ou_m5ops_dump_stats();
++#if defined(UBSIM_GEM5_M5OPS)
++    return reset ? ubsim_m5ops_reset_stats() : ubsim_m5ops_dump_stats();
 +#else
 +    if (reset) {
 +        __asm__ __volatile__(
@@ -240,7 +240,7 @@ index 7338e88..e437509 100644
 +#endif
 +#else
 +    (void)reset;
-+    (void)fprintf(stderr, "OPENURMA_ROI_STATS requires the AArch64 gem5 guest build.\n");
++    (void)fprintf(stderr, "UBSIM_ROI_STATS requires the AArch64 gem5 guest build.\n");
 +    return -1;
 +#endif
 +}
@@ -253,8 +253,8 @@ index 7338e88..e437509 100644
 +static int gem5_switch_roi_cpu(const char *phase)
 +{
 +#if defined(__aarch64__)
-+#if defined(OPENURMA_GEM5_M5OPS)
-+    if (ou_m5ops_switch_cpu() != 0) {
++#if defined(UBSIM_GEM5_M5OPS)
++    if (ubsim_m5ops_switch_cpu() != 0) {
 +        (void)fprintf(stderr, "Failed to switch gem5 CPU while trying to %s.\n", phase);
 +        return -1;
 +    }
@@ -266,14 +266,14 @@ index 7338e88..e437509 100644
 +    return 0;
 +#else
 +    (void)fprintf(stderr,
-+        "OPENURMA_CPU_SWITCH=server_o3 requires the AArch64 gem5 guest build (%s).\n", phase);
++        "UBSIM_CPU_SWITCH=server_o3 requires the AArch64 gem5 guest build (%s).\n", phase);
 +    return -1;
 +#endif
 +}
 +
 +#define PERFTEST_NSEC_PER_USEC (1000.0)
 +
-+#if defined(OPENURMA_GEM5_M5OPS)
++#if defined(UBSIM_GEM5_M5OPS)
 +typedef enum perftest_clock_mode {
 +    PERFTEST_CLOCK_NATIVE = 0,
 +    PERFTEST_CLOCK_GEM5_ADDR,
@@ -295,18 +295,18 @@ index 7338e88..e437509 100644
 +        return 0;
 +    }
 +
-+#if defined(OPENURMA_GEM5_M5OPS)
-+    int address_mode = ou_m5ops_address_mode();
++#if defined(UBSIM_GEM5_M5OPS)
++    int address_mode = ubsim_m5ops_address_mode();
 +    if (address_mode < 0) {
 +        return -1;
 +    }
 +    if (address_mode != 0) {
-+        if (ou_m5ops_prepare_address() != 0) {
++        if (ubsim_m5ops_prepare_address() != 0) {
 +            return -1;
 +        }
 +        g_perftest_clock_mode = PERFTEST_CLOCK_GEM5_ADDR;
 +        (void)fprintf(stderr,
-+            "OpenURMA gem5 timing source: m5_rpns_addr (integer ns, 1000 ticks/us).\n");
++            "UBSim gem5 timing source: m5_rpns_addr (integer ns, 1000 ticks/us).\n");
 +    }
 +#endif
 +
@@ -316,7 +316,7 @@ index 7338e88..e437509 100644
 +
 +static inline uint64_t perftest_get_time(void)
 +{
-+#if defined(OPENURMA_GEM5_M5OPS)
++#if defined(UBSIM_GEM5_M5OPS)
 +    if (g_perftest_clock_mode == PERFTEST_CLOCK_GEM5_ADDR) {
 +        return m5_rpns_addr();
 +    }
@@ -326,7 +326,7 @@ index 7338e88..e437509 100644
 +
 +double perftest_time_units_per_usec(bool cpu_freq_warn)
 +{
-+#if defined(OPENURMA_GEM5_M5OPS)
++#if defined(UBSIM_GEM5_M5OPS)
 +    if (g_perftest_clock_mode == PERFTEST_CLOCK_GEM5_ADDR) {
 +        return PERFTEST_NSEC_PER_USEC;
 +    }

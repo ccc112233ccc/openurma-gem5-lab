@@ -3,12 +3,12 @@
 set -euo pipefail
 
 : "${MOONCAKE_DIR:?MOONCAKE_DIR is required}"
-: "${OPENURMA_LAB_ROOT:?OPENURMA_LAB_ROOT is required}"
+: "${UBSIM_LAB_ROOT:?UBSIM_LAB_ROOT is required}"
 : "${MOONCAKE_URMA_ARTIFACT_DIR:?MOONCAKE_URMA_ARTIFACT_DIR is required}"
 
 build_dir_name="${MOONCAKE_URMA_BUILD_DIR:-build-urma}"
 jobs="${JOBS:-2}"
-lab_dir="$OPENURMA_LAB_ROOT"
+lab_dir="$UBSIM_LAB_ROOT"
 artifact_dir="$MOONCAKE_URMA_ARTIFACT_DIR"
 build_dir="$MOONCAKE_DIR/$build_dir_name"
 urma_include="$lab_dir/sources/umdk/src/urma/lib/urma/core/include"

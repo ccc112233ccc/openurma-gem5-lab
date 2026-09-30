@@ -5,7 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab_dir="$(cd "$script_dir/.." && pwd)"
 # shellcheck source=runtime.sh
 source "$script_dir/runtime.sh"
-container="$OPENURMA_CONTAINER"
+container="$UBSIM_CONTAINER"
 artifact_rel=artifacts/mooncake-urma
 binary="$lab_dir/$artifact_rel/bin/transfer_engine_bench"
 library_dir="$lab_dir/$artifact_rel/lib"
@@ -15,9 +15,9 @@ library_dir="$lab_dir/$artifact_rel/lib"
     exit 2
 }
 
-ou_runtime_start
-runtime_lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$lab_dir")}"
-if [[ "$OPENURMA_EXECUTION_MODE" == docker ]]; then
+ubsim_runtime_start
+runtime_lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$lab_dir")}"
+if [[ "$UBSIM_EXECUTION_MODE" == docker ]]; then
     docker exec \
         -e EXTRA_BINS="$runtime_lab/$artifact_rel/bin/transfer_engine_bench" \
         -e EXTRA_LIBRARY_DIRS="$runtime_lab/$artifact_rel/lib" \
@@ -25,7 +25,7 @@ if [[ "$OPENURMA_EXECUTION_MODE" == docker ]]; then
 else
     EXTRA_BINS="$runtime_lab/$artifact_rel/bin/transfer_engine_bench" \
     EXTRA_LIBRARY_DIRS="$runtime_lab/$artifact_rel/lib" \
-    OPENURMA_LAB_ROOT="$runtime_lab" \
+    UBSIM_LAB_ROOT="$runtime_lab" \
         "$runtime_lab/official-udma/build_initramfs.sh"
 fi
 

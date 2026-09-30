@@ -44,7 +44,7 @@ index 3a40e56..e4d4a86 100644
 +     * In a distributed gem5 run the otherwise-idle server must nevertheless
 +     * remain inside DistIface's collective synchronization until it has
 +     * served the final READ response.  This coordination is enabled only by
-+     * OPENURMA_DIST_SYNC and leaves the ordinary perftest protocol unchanged.
++     * UBSIM_DIST_SYNC and leaves the ordinary perftest protocol unchanged.
 +     */
 +    if (rma_lat_dist_sync_begin(cfg, 0, &dist_sync_active) != 0) {
 +        rma_lat_dist_sync_end(&dist_sync_active);

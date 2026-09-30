@@ -2,8 +2,8 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-lab="${OPENURMA_LAB_ROOT:-$(cd "$script_dir/../.." && pwd)}"
-build_dir="${OPENURMA_UB_SWITCH_BUILD:-$lab/artifacts/ub-switch-sim-build}"
+lab="${UBSIM_LAB_ROOT:-$(cd "$script_dir/../.." && pwd)}"
+build_dir="${UBSIM_UB_SWITCH_BUILD:-$lab/artifacts/ub-switch-sim-build}"
 jobs="${JOBS:-2}"
 
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo "JOBS must be positive" >&2; exit 2; }

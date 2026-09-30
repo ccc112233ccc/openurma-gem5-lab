@@ -114,7 +114,7 @@ def main() -> int:
     parser.add_argument("--size", type=int, required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--container", default="openurma-gem5-lab")
+    parser.add_argument("--container", default="ubsim-gem5-lab")
     parser.add_argument("--run-root", type=Path, default=Path("run-dual"))
     args = parser.parse_args()
 
@@ -122,7 +122,7 @@ def main() -> int:
     raw_path = args.output_dir / f"{args.label}.uart.txt"
     json_path = args.output_dir / f"{args.label}.json"
     container_run_root = os.environ.get(
-        "OPENURMA_DUAL_OUT", "/workspace/openurma-gem5-lab/run-dual"
+        "UBSIM_DUAL_OUT", "/workspace/ubsim-gem5-lab/run-dual"
     )
     ticks_per_second = int(docker_text(
         args.container, "python3", "-c",

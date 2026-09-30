@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "openurma/udma_model.h"
+#include "ubsim/udma_model.h"
 #include "protocol/ub_host/if.h"
 #include "protocol/ub_net/if.h"
 #include "protocol/ub_net/udma_wire.h"
@@ -19,9 +19,9 @@
 #include <utility>
 #include <vector>
 
-namespace device = openurma::device;
-namespace host_proto = openurma::proto::host;
-namespace net_proto = openurma::proto::net;
+namespace device = ubsim::device;
+namespace host_proto = ubsim::proto::host;
+namespace net_proto = ubsim::proto::net;
 
 namespace {
 

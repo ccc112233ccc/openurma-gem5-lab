@@ -4,7 +4,7 @@
  #include "target/arm/gtimer.h"
  #include "hw/mem/pc-dimm.h"
  #include "hw/mem/nvdimm.h"
-+#include "hw/misc/openurma-ub-host.h"
++#include "hw/misc/ubsim-ub-host.h"
  #include "hw/acpi/generic_event_device.h"
  #include "hw/uefi/var-service-api.h"
  #include "hw/virtio/virtio-md-pci.h"
@@ -14,7 +14,7 @@
      }
 +}
 +
-+static void openurma_add_fdt_nodes(VirtMachineState *vms)
++static void ubsim_add_fdt_nodes(VirtMachineState *vms)
 +{
 +    MachineState *ms = MACHINE(vms);
 +
@@ -43,8 +43,8 @@
  
      create_gic(vms, sysmem);
      create_msi_controller(vms);
-+    if (getenv("OPENURMA_QEMU_UB_HOST_SOCKET")) {
-+        openurma_add_fdt_nodes(vms);
++    if (getenv("UBSIM_QEMU_UB_HOST_SOCKET")) {
++        ubsim_add_fdt_nodes(vms);
 +    }
  
      virt_post_cpus_gic_realized(vms, sysmem);
@@ -53,10 +53,10 @@
      create_rtc(vms);
  
      create_pcie(vms);
-+    const char *openurma_socket = getenv("OPENURMA_QEMU_UB_HOST_SOCKET");
-+    if (openurma_socket && *openurma_socket) {
++    const char *ubsim_socket = getenv("UBSIM_QEMU_UB_HOST_SOCKET");
++    if (ubsim_socket && *ubsim_socket) {
 +        /* Linux IRQ 104 is GIC SPI input 72; vectors 1 and 2 follow it. */
-+        openurma_ub_host_create(openurma_socket, 0x2d000000, 0x01000000,
++        ubsim_ub_host_create(ubsim_socket, 0x2d000000, 0x01000000,
 +                                vms->gic, 72);
 +    }
      create_cxl_host_reg_region(vms);
@@ -69,8 +69,8 @@
  # virt devices
  system_ss.add(when: 'CONFIG_VIRT_CTRL', if_true: files('virt_ctrl.c'))
 +system_ss.add(when: 'CONFIG_ARM_VIRT', if_true: files(
-+  'openurma-ub-host.c',
-+  'openurma-simbricks-base.c',
++  'ubsim-ub-host.c',
++  'ubsim-simbricks-base.c',
 +))
  
  # RISC-V devices

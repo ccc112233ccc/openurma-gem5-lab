@@ -51,8 +51,8 @@ ports, the L1-switch topology, and `tp-context` egress selection.  After
 `lab sync`, install the same topology on both guests:
 
 ```text
-node0: ou-ubagg-topology 0 0x100 0x101 0x200 0x201
-node1: ou-ubagg-topology 1 0x100 0x101 0x200 0x201
+node0: ubsim-ubagg-topology 0 0x100 0x101 0x200 0x201
+node1: ubsim-ubagg-topology 1 0x100 0x101 0x200 0x201
 ```
 
 Observed with the stock `urma_admin show`:

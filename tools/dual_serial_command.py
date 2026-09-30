@@ -41,7 +41,7 @@ def run_one(
     try:
         with connect_until_ready(port, deadline) as sock:
             sock.settimeout(0.2)
-            prompt_pattern = rb"\(openurma-[^)]+\)[^\r\n]*# "
+            prompt_pattern = rb"\(ubsim-[^)]+\)[^\r\n]*# "
             # A freshly started full-system guest can take minutes of host
             # time to reach its shell while conservative dist synchronization
             # is active.  Never inject into the boot stream: bytes sent before
@@ -89,13 +89,13 @@ def run_one(
                 time.sleep(start_delay)
             pre_send_len = len(b"".join(chunks))
             status_marker = (
-                f"__OPENURMA_RC_{port}_{time.monotonic_ns()}__".encode()
+                f"__UBSIM_RC_{port}_{time.monotonic_ns()}__".encode()
             )
             wrapped = (
                 command.encode()
-                + b"; __ou_rc=$?; printf '\\n"
+                + b"; __ubsim_rc=$?; printf '\\n"
                 + status_marker
-                + b"=%d\\n' \"$__ou_rc\"\n"
+                + b"=%d\\n' \"$__ubsim_rc\"\n"
             )
             sock.sendall(b"\x15" + wrapped)
             while time.monotonic() < deadline:

@@ -19,35 +19,35 @@ and one Jetty.
   --samples N                 measured samples (default: 100)
   --size BYTES                message bytes (default: 128)
   --port PORT                 TCP setup port (default: 21115)
-  --roi-stats                 set OPENURMA_ROI_STATS=1 in both guests
+  --roi-stats                 set UBSIM_ROI_STATS=1 in both guests
   --format human|tsv          transcript plus TSV summary, or TSV only
   --raw-output FILE           retain the complete dual-UART transcript
   --timeout SECONDS           host command timeout (default: 300)
   --stagger SECONDS           rendezvous regression delay (default: 0; fastest)
   -h, --help
 
-Environment equivalents: OPENURMA_LAT_PROFILE, OPENURMA_LAT_SAMPLES,
-OPENURMA_LAT_SIZE, OPENURMA_LAT_PORT, OPENURMA_ROI_STATS,
-OPENURMA_LAT_FORMAT, OPENURMA_LAT_RAW_OUTPUT, OPENURMA_LAT_TIMEOUT, and
-OPENURMA_LAT_STAGGER.
+Environment equivalents: UBSIM_LAT_PROFILE, UBSIM_LAT_SAMPLES,
+UBSIM_LAT_SIZE, UBSIM_LAT_PORT, UBSIM_ROI_STATS,
+UBSIM_LAT_FORMAT, UBSIM_LAT_RAW_OUTPUT, UBSIM_LAT_TIMEOUT, and
+UBSIM_LAT_STAGGER.
 EOF
 }
 
-container="$OPENURMA_CONTAINER"
+container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
-run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
-uart0="${OPENURMA_DUAL_UART0:-3460}"
-uart1="${OPENURMA_DUAL_UART1:-3470}"
-profile="${OPENURMA_LAT_PROFILE:-ctp-rm-send-imm-i128}"
-samples="${OPENURMA_LAT_SAMPLES:-100}"
-size="${OPENURMA_LAT_SIZE:-128}"
-port="${OPENURMA_LAT_PORT:-21115}"
-roi_stats="${OPENURMA_ROI_STATS:-0}"
-output_format="${OPENURMA_LAT_FORMAT:-human}"
-raw_output="${OPENURMA_LAT_RAW_OUTPUT:-}"
-timeout="${OPENURMA_LAT_TIMEOUT:-300}"
-stagger="${OPENURMA_LAT_STAGGER:-0}"
+lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
+run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"
+uart0="${UBSIM_DUAL_UART0:-3460}"
+uart1="${UBSIM_DUAL_UART1:-3470}"
+profile="${UBSIM_LAT_PROFILE:-ctp-rm-send-imm-i128}"
+samples="${UBSIM_LAT_SAMPLES:-100}"
+size="${UBSIM_LAT_SIZE:-128}"
+port="${UBSIM_LAT_PORT:-21115}"
+roi_stats="${UBSIM_ROI_STATS:-0}"
+output_format="${UBSIM_LAT_FORMAT:-human}"
+raw_output="${UBSIM_LAT_RAW_OUTPUT:-}"
+timeout="${UBSIM_LAT_TIMEOUT:-300}"
+stagger="${UBSIM_LAT_STAGGER:-0}"
 positional=()
 
 need_value() {
@@ -97,27 +97,27 @@ case "$samples:$size:$port:$uart0:$uart1" in
 esac
 (( size <= 8088 )) || die "message size must be <= 8088 bytes for the current peer-ring slot"
 (( port <= 65535 )) || die "port must be <= 65535"
-case "$roi_stats" in 0|1) ;; *) die "OPENURMA_ROI_STATS must be 0 or 1" ;; esac
+case "$roi_stats" in 0|1) ;; *) die "UBSIM_ROI_STATS must be 0 or 1" ;; esac
 case "$output_format" in human|tsv) ;; *) die "format must be human or tsv" ;; esac
 [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "timeout must be a positive number"
 [[ "$stagger" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "stagger must be a non-negative number"
 
-ou_runtime_start
-ou_exec test -e "$run_root/sync.ready" || {
+ubsim_runtime_start
+ubsim_exec test -e "$run_root/sync.ready" || {
     echo "dual-node measurement setup is not ready; run './lab sync' first" >&2
     exit 1
 }
 
 guest_roi_arg=""
 (( roi_stats == 0 )) || guest_roi_arg="--roi-stats"
-server_command="ou-lat-server --profile $profile $guest_roi_arg $samples $size $port"
-client_command="ou-lat-client --profile $profile $guest_roi_arg $samples $size $port"
-transcript=$(mktemp "${TMPDIR:-/tmp}/openurma-latency.XXXXXX")
+server_command="ubsim-lat-server --profile $profile $guest_roi_arg $samples $size $port"
+client_command="ubsim-lat-client --profile $profile $guest_roi_arg $samples $size $port"
+transcript=$(mktemp "${TMPDIR:-/tmp}/ubsim-latency.XXXXXX")
 trap 'rm -f "$transcript"' EXIT
 
 set +e
 wall_started_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
-ou_exec python3 "$lab/tools/dual_serial_command.py" \
+ubsim_exec python3 "$lab/tools/dual_serial_command.py" \
     --ports "$uart0" "$uart1" \
     --commands "$server_command" "$client_command" \
     --stagger "$stagger" --timeout "$timeout" --prompt-kick-after 1 --full-output \

@@ -6,7 +6,7 @@ lab_dir="$(cd "$script_dir/.." && pwd)"
 # shellcheck source=runtime.sh
 source "$script_dir/runtime.sh"
 mooncake_dir="${MOONCAKE_DIR:-$(cd "$lab_dir/../Mooncake" 2>/dev/null && pwd || true)}"
-docker_image="${MOONCAKE_URMA_BUILD_IMAGE:-openurma-mooncake-builder:ubuntu22.04-arm64}"
+docker_image="${MOONCAKE_URMA_BUILD_IMAGE:-ubsim-mooncake-builder:ubuntu22.04-arm64}"
 build_dir_name="${MOONCAKE_URMA_BUILD_DIR:-build-urma}"
 artifact_dir="${MOONCAKE_URMA_ARTIFACT_DIR:-$lab_dir/artifacts/mooncake-urma}"
 jobs="${JOBS:-2}"
@@ -28,11 +28,11 @@ actual_mooncake_commit="$(git -C "$mooncake_dir" rev-parse HEAD)"
     die "Mooncake revision is $actual_mooncake_commit; expected $expected_mooncake_commit (set MOONCAKE_REVISION to override deliberately)"
 
 note "building Mooncake ${actual_mooncake_commit:0:12} with USE_UB=ON"
-if [[ "$OPENURMA_EXECUTION_MODE" == native ]]; then
+if [[ "$UBSIM_EXECUTION_MODE" == native ]]; then
     [[ "$(uname -s)" == Linux && "$(uname -m)" == aarch64 ]] ||
         die "native Mooncake build requires ARM64 Linux"
     MOONCAKE_DIR="$mooncake_dir" \
-    OPENURMA_LAB_ROOT="$lab_dir" \
+    UBSIM_LAB_ROOT="$lab_dir" \
     MOONCAKE_URMA_BUILD_DIR="$build_dir_name" \
     MOONCAKE_URMA_ARTIFACT_DIR="$artifact_dir" \
     JOBS="$jobs" \
@@ -48,16 +48,16 @@ else
     mkdir -p "$artifact_dir"
     docker run --rm --platform linux/arm64 \
         -e MOONCAKE_DIR=/workspace/Mooncake \
-        -e OPENURMA_LAB_ROOT=/workspace/openurma-gem5-lab \
+        -e UBSIM_LAB_ROOT=/workspace/ubsim-gem5-lab \
         -e MOONCAKE_URMA_BUILD_DIR="$build_dir_name" \
         -e MOONCAKE_URMA_ARTIFACT_DIR=/workspace/mooncake-urma-artifact \
         -e JOBS="$jobs" \
         -v "$mooncake_dir:/workspace/Mooncake" \
-        -v "$lab_dir:/workspace/openurma-gem5-lab" \
+        -v "$lab_dir:/workspace/ubsim-gem5-lab" \
         -v "$artifact_dir:/workspace/mooncake-urma-artifact" \
         -w /workspace/Mooncake \
         "$docker_image" \
-        bash /workspace/openurma-gem5-lab/scripts/build-mooncake-urma-inner.sh
+        bash /workspace/ubsim-gem5-lab/scripts/build-mooncake-urma-inner.sh
 fi
 
 note "wrote $artifact_dir/bin/transfer_engine_bench"

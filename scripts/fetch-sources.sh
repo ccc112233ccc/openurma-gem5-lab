@@ -3,7 +3,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-lab="${OPENURMA_LAB_ROOT:-$(cd "$script_dir/.." && pwd)}"
+lab="${UBSIM_LAB_ROOT:-$(cd "$script_dir/.." && pwd)}"
 sources="$lab/sources"
 kernel_root="${KSRC:-$lab/oe66}"
 

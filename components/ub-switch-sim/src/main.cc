@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-namespace net = openurma::proto::net;
+namespace net = ubsim::proto::net;
 
 namespace {
 

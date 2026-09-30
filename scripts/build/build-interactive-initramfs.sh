@@ -8,7 +8,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAB_DIR="${LAB_DIR:-${OPENURMA_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}}"
+LAB_DIR="${LAB_DIR:-${UBSIM_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}}"
+OVERLAY_DIR="${OVERLAY_DIR:-$LAB_DIR/overlay}"
+TOOLS_DIR="${TOOLS_DIR:-$LAB_DIR/tools}"
 UMDK_SRC="${UMDK_SRC:-$LAB_DIR/sources/umdk}"
 GEM5_ROOT="${GEM5_ROOT:-$LAB_DIR/gem5}"
 KSRC="${KSRC:-}"
@@ -18,14 +20,31 @@ OUT="${OUT:-$LAB_DIR/out/official-udma.cpio.gz}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 EXTRA_BINS="${EXTRA_BINS:-}"
 EXTRA_LIBRARY_DIRS="${EXTRA_LIBRARY_DIRS:-}"
-ARM64_SYSROOT="${OPENURMA_ARM64_SYSROOT:-}"
+ARM64_SYSROOT="${UBSIM_ARM64_SYSROOT:-}"
 EXTRA_MODULES="${EXTRA_MODULES:-}"
 STOCK_UDMA_PROVIDER="${STOCK_UDMA_PROVIDER:-}"
 UMMU_LIBRARY="${UMMU_LIBRARY:-}"
 UBAGG_PROVIDER="${UBAGG_PROVIDER:-}"
 UBAGG_CLI="${UBAGG_CLI:-}"
 LIBTPSA="${LIBTPSA:-}"
+DROPBEAR="${DROPBEAR:-}"
+DROPBEARKEY="${DROPBEARKEY:-}"
 KERNEL_BUNDLE_DIR="${KERNEL_BUNDLE_DIR:-$LAB_DIR/artifacts/kernel}"
+
+if [[ -z "$DROPBEAR" ]]; then
+    if [[ -n "$ARM64_SYSROOT" && -f "$ARM64_SYSROOT/usr/sbin/dropbear" ]]; then
+        DROPBEAR="$ARM64_SYSROOT/usr/sbin/dropbear"
+    else
+        DROPBEAR=/usr/sbin/dropbear
+    fi
+fi
+if [[ -z "$DROPBEARKEY" ]]; then
+    if [[ -n "$ARM64_SYSROOT" && -f "$ARM64_SYSROOT/usr/bin/dropbearkey" ]]; then
+        DROPBEARKEY="$ARM64_SYSROOT/usr/bin/dropbearkey"
+    else
+        DROPBEARKEY=/usr/bin/dropbearkey
+    fi
+fi
 
 usage() {
     cat <<'EOF'
@@ -50,6 +69,9 @@ Optional environment:
   UBAGG_PROVIDER official liburma_ubagg.so (auto-detected in ARM_BUILD)
   UBAGG_CLI      official ubagg_cli executable (auto-detected in ARM_BUILD)
   LIBTPSA        official UVS control-plane library (auto-detected in ARM_BUILD)
+  DROPBEAR       ARM64 Dropbear SSH server (defaults to the ARM64 sysroot,
+                 then /usr/sbin/dropbear)
+  DROPBEARKEY    matching ARM64 host-key utility (same selection rule)
   KERNEL_BUNDLE_DIR
                  persistent workspace bundle for the exact vmlinux/in-tree
                  modules packaged in the image (default: artifacts/kernel)
@@ -78,6 +100,8 @@ done
 [[ -f "$GEM5_ROOT/include/gem5/m5ops.h" ]] || die "not a gem5 checkout: $GEM5_ROOT"
 [[ -f "$KSRC/Makefile" && -f "$KSRC/vmlinux" ]] || die "KSRC is not a built kernel tree: $KSRC"
 [[ -f "$BUSYBOX_ARM64" ]] || die "BusyBox not found: $BUSYBOX_ARM64"
+[[ -f "$DROPBEAR" ]] || die "Dropbear SSH server not found: $DROPBEAR"
+[[ -f "$DROPBEARKEY" ]] || die "Dropbear key utility not found: $DROPBEARKEY"
 
 CC="${CROSS_COMPILE}gcc"
 READELF="${CROSS_COMPILE}readelf"
@@ -97,6 +121,8 @@ is_static_elf() {
 
 is_arm64_elf "$BUSYBOX_ARM64" || die 'BUSYBOX_ARM64 is not an AArch64 ELF binary'
 is_static_elf "$BUSYBOX_ARM64" || die 'BUSYBOX_ARM64 must be statically linked'
+is_arm64_elf "$DROPBEAR" || die 'DROPBEAR is not an AArch64 ELF binary'
+is_arm64_elf "$DROPBEARKEY" || die 'DROPBEARKEY is not an AArch64 ELF binary'
 
 REQUIRED_APPLETS='sh ash mount umount mkdir ln ls cat echo dmesg insmod rmmod lsmod ip hostname uname ps grep sed awk sleep sync poweroff reboot halt setsid cttyhack chmod touch taskset'
 if busybox_applets="$($BUSYBOX_ARM64 --list 2>/dev/null)"; then
@@ -254,7 +280,7 @@ UBURMA_KO="$KERNEL_BUNDLE_DIR/modules/uburma.ko"
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/official-udma.XXXXXX")"
 cleanup() { rm -rf "$STAGE"; }
 trap cleanup EXIT
-mkdir -p "$STAGE"/{bin,sbin,etc,proc,sys,dev/pts,run,tmp,root,usr/bin,usr/sbin,usr/local/bin,lib/modules,lib/urma}
+mkdir -p "$STAGE"/{bin,sbin,etc/dropbear,proc,sys,dev/pts,run,tmp,root,usr/bin,usr/sbin,usr/local/bin,lib/modules,lib/urma}
 chmod 1777 "$STAGE/tmp"
 
 cp -L "$BUSYBOX_ARM64" "$STAGE/bin/busybox"
@@ -274,7 +300,10 @@ cp -L "$LIBURMA" "$STAGE/lib/liburma.so.0"
 cp -L "$LIBCOMMON" "$STAGE/lib/liburma_common.so.0"
 cp -L "$URMA_ADMIN" "$STAGE/usr/bin/urma_admin"
 cp -L "$URMA_PERFTEST" "$STAGE/usr/bin/urma_perftest"
+cp -L "$DROPBEAR" "$STAGE/usr/sbin/dropbear"
+cp -L "$DROPBEARKEY" "$STAGE/usr/bin/dropbearkey"
 chmod 0755 "$STAGE/usr/bin/urma_admin" "$STAGE/usr/bin/urma_perftest"
+chmod 0755 "$STAGE/usr/sbin/dropbear" "$STAGE/usr/bin/dropbearkey"
 if [[ -n "$UBAGG_PROVIDER" ]]; then
     cp -L "$UBAGG_PROVIDER" "$STAGE/lib/urma/liburma_ubagg.so"
     cp -L "$UBAGG_CLI" "$STAGE/usr/bin/ubagg_cli"
@@ -291,40 +320,40 @@ note "building ARM64 dist-sync pseudo-op helper"
 scons -C "$GEM5_ROOT/util/m5" \
     "arm64.CROSS_COMPILE=$CROSS_COMPILE" build/arm64/out/libm5.a >/dev/null
 M5_LIB="$GEM5_ROOT/util/m5/build/arm64/out/libm5.a"
-M5OPS_DISPATCH_HEADER="$LAB_DIR/tools/ou-m5ops.h"
+M5OPS_DISPATCH_HEADER="$TOOLS_DIR/ubsim-m5ops.h"
 [[ -f "$M5OPS_DISPATCH_HEADER" ]] || die "missing m5ops dispatcher: $M5OPS_DISPATCH_HEADER"
 "$CC" -O2 -static -Wall -I"$GEM5_ROOT/include" \
-    -I"$GEM5_ROOT/util/m5/src" -I"$LAB_DIR/tools" \
-    -o "$STAGE/usr/bin/ou-dist-sync" "$LAB_DIR/tools/ou-dist-sync.c" "$M5_LIB"
-is_arm64_elf "$STAGE/usr/bin/ou-dist-sync" || die "ou-dist-sync is not AArch64"
-is_static_elf "$STAGE/usr/bin/ou-dist-sync" || die "ou-dist-sync is not static"
+    -I"$GEM5_ROOT/util/m5/src" -I"$TOOLS_DIR" \
+    -o "$STAGE/usr/bin/ubsim-dist-sync" "$TOOLS_DIR/ubsim-dist-sync.c" "$M5_LIB"
+is_arm64_elf "$STAGE/usr/bin/ubsim-dist-sync" || die "ubsim-dist-sync is not AArch64"
+is_static_elf "$STAGE/usr/bin/ubsim-dist-sync" || die "ubsim-dist-sync is not static"
 
 "$CC" -O2 -static -Wall -I"$GEM5_ROOT/include" \
-    -I"$GEM5_ROOT/util/m5/src" -I"$LAB_DIR/tools" \
-    -o "$STAGE/usr/bin/ou-checkpoint" "$LAB_DIR/tools/ou-checkpoint.c" "$M5_LIB"
-is_arm64_elf "$STAGE/usr/bin/ou-checkpoint" || die "ou-checkpoint is not AArch64"
-is_static_elf "$STAGE/usr/bin/ou-checkpoint" || die "ou-checkpoint is not static"
+    -I"$GEM5_ROOT/util/m5/src" -I"$TOOLS_DIR" \
+    -o "$STAGE/usr/bin/ubsim-checkpoint" "$TOOLS_DIR/ubsim-checkpoint.c" "$M5_LIB"
+is_arm64_elf "$STAGE/usr/bin/ubsim-checkpoint" || die "ubsim-checkpoint is not AArch64"
+is_static_elf "$STAGE/usr/bin/ubsim-checkpoint" || die "ubsim-checkpoint is not static"
 
 # A distinct switchcpu pseudo-op lets the host configuration replace the
 # boot-fast AtomicSimpleCPUs with the configured ArmO3 CPUs at an explicit
 # guest-visible boundary.  It is not a timer and does not guess when boot is
 # complete.
 "$CC" -O2 -static -Wall -I"$GEM5_ROOT/include" \
-    -I"$GEM5_ROOT/util/m5/src" -I"$LAB_DIR/tools" \
-    -o "$STAGE/usr/bin/ou-cpu-switch-op" \
-    "$LAB_DIR/tools/ou-cpu-switch.c" "$M5_LIB"
-is_arm64_elf "$STAGE/usr/bin/ou-cpu-switch-op" || \
-    die "ou-cpu-switch-op is not AArch64"
-is_static_elf "$STAGE/usr/bin/ou-cpu-switch-op" || \
-    die "ou-cpu-switch-op is not static"
+    -I"$GEM5_ROOT/util/m5/src" -I"$TOOLS_DIR" \
+    -o "$STAGE/usr/bin/ubsim-cpu-switch-op" \
+    "$TOOLS_DIR/ubsim-cpu-switch.c" "$M5_LIB"
+is_arm64_elf "$STAGE/usr/bin/ubsim-cpu-switch-op" || \
+    die "ubsim-cpu-switch-op is not AArch64"
+is_static_elf "$STAGE/usr/bin/ubsim-cpu-switch-op" || \
+    die "ubsim-cpu-switch-op is not static"
 
 if [[ -n "$LIBTPSA" ]]; then
     "$CC" -O2 -Wall -Wl,-rpath,/lib \
         -I"$UMDK_SRC/src/urma/lib/uvs/core/include" \
         -L"$(dirname "$LIBTPSA")" \
-        -o "$STAGE/usr/bin/ou-ubagg-topology" \
-        "$LAB_DIR/tools/ou-ubagg-topology-mxe.c" -Wl,--no-as-needed -ltpsa
-    chmod 0755 "$STAGE/usr/bin/ou-ubagg-topology"
+        -o "$STAGE/usr/bin/ubsim-ubagg-topology" \
+        "$TOOLS_DIR/ubsim-ubagg-topology-mxe.c" -Wl,--no-as-needed -ltpsa
+    chmod 0755 "$STAGE/usr/bin/ubsim-ubagg-topology"
 fi
 
 cp -L "$STOCK_UDMA_PROVIDER" "$STAGE/lib/urma/liburma-udma.so"
@@ -334,7 +363,7 @@ available_providers=udma
 if [[ -f "$STAGE/lib/urma/liburma_ubagg.so" ]]; then
     available_providers="$available_providers ubagg"
 fi
-printf '%s\n' "$available_providers" > "$STAGE/etc/openurma-available-providers"
+printf '%s\n' "$available_providers" > "$STAGE/etc/ubsim-available-providers"
 
 extra_staged=()
 for extra in $EXTRA_BINS; do
@@ -403,11 +432,13 @@ queue=(
     "$STAGE/lib/liburma_common.so.0"
     "$STAGE/lib/urma/liburma-udma.so"
     "$STAGE/lib/libummu.so.1"
+    "$STAGE/usr/sbin/dropbear"
+    "$STAGE/usr/bin/dropbearkey"
     "${extra_staged[@]}"
     "${optional_runtime[@]}"
 )
 if [[ -f "$STAGE/usr/bin/ubagg_cli" ]]; then
-    queue+=("$STAGE/usr/bin/ubagg_cli" "$STAGE/usr/bin/ou-ubagg-topology" \
+    queue+=("$STAGE/usr/bin/ubagg_cli" "$STAGE/usr/bin/ubsim-ubagg-topology" \
         "$STAGE/lib/urma/liburma_ubagg.so" "$STAGE/lib/libtpsa.so.0")
 fi
 seen=' '
@@ -440,20 +471,23 @@ if [[ ! -f "$loader_dst" ]]; then
     cp -L "$loader_src" "$loader_dst"
 fi
 
-cp "$LAB_DIR/overlay/init" "$STAGE/init"
-cp "$LAB_DIR/overlay/etc/profile" "$STAGE/etc/profile"
-cp "$LAB_DIR/overlay/etc/passwd" "$STAGE/etc/passwd"
-cp "$LAB_DIR/overlay/etc/group" "$STAGE/etc/group"
-cp "$LAB_DIR/overlay/etc/hosts" "$STAGE/etc/hosts"
-cp "$LAB_DIR/overlay/etc/nsswitch.conf" "$STAGE/etc/nsswitch.conf"
-cp "$LAB_DIR/overlay/usr/local/bin/ou-help" "$STAGE/usr/local/bin/ou-help"
-cp "$LAB_DIR/overlay/usr/local/bin/ou-status" "$STAGE/usr/local/bin/ou-status"
-cp "$LAB_DIR/overlay/usr/local/bin/ou-enable-sync" "$STAGE/usr/local/bin/ou-enable-sync"
-cp "$LAB_DIR/overlay/usr/local/bin/ou-net-up" "$STAGE/usr/local/bin/ou-net-up"
-cp "$LAB_DIR/overlay/usr/local/bin/ou-cpu-switch" "$STAGE/usr/local/bin/ou-cpu-switch"
-cp "$LAB_DIR/overlay/usr/local/bin/ou-lat-server" "$STAGE/usr/local/bin/ou-lat-server"
-cp "$LAB_DIR/overlay/usr/local/bin/ou-lat-client" "$STAGE/usr/local/bin/ou-lat-client"
-chmod 0755 "$STAGE/init" "$STAGE/usr/local/bin/"ou-*
+cp "$OVERLAY_DIR/init" "$STAGE/init"
+cp "$OVERLAY_DIR/etc/profile" "$STAGE/etc/profile"
+cp "$OVERLAY_DIR/etc/passwd" "$STAGE/etc/passwd"
+cp "$OVERLAY_DIR/etc/group" "$STAGE/etc/group"
+cp "$OVERLAY_DIR/etc/hosts" "$STAGE/etc/hosts"
+cp "$OVERLAY_DIR/etc/nsswitch.conf" "$STAGE/etc/nsswitch.conf"
+cp "$OVERLAY_DIR/etc/dropbear/dropbear_ed25519_host_key" \
+    "$STAGE/etc/dropbear/dropbear_ed25519_host_key"
+chmod 0600 "$STAGE/etc/dropbear/dropbear_ed25519_host_key"
+cp "$OVERLAY_DIR/usr/local/bin/ubsim-help" "$STAGE/usr/local/bin/ubsim-help"
+cp "$OVERLAY_DIR/usr/local/bin/ubsim-status" "$STAGE/usr/local/bin/ubsim-status"
+cp "$OVERLAY_DIR/usr/local/bin/ubsim-enable-sync" "$STAGE/usr/local/bin/ubsim-enable-sync"
+cp "$OVERLAY_DIR/usr/local/bin/ubsim-net-up" "$STAGE/usr/local/bin/ubsim-net-up"
+cp "$OVERLAY_DIR/usr/local/bin/ubsim-cpu-switch" "$STAGE/usr/local/bin/ubsim-cpu-switch"
+cp "$OVERLAY_DIR/usr/local/bin/ubsim-lat-server" "$STAGE/usr/local/bin/ubsim-lat-server"
+cp "$OVERLAY_DIR/usr/local/bin/ubsim-lat-client" "$STAGE/usr/local/bin/ubsim-lat-client"
+chmod 0755 "$STAGE/init" "$STAGE"/usr/local/bin/ubsim-*
 
 mkdir -p "$(dirname "$OUT")"
 tmp_out="$OUT.tmp.$$"
@@ -479,11 +513,11 @@ sha256_file() {
     for ko in $EXTRA_MODULES; do printf ' %s' "$(basename "$ko")"; done
     printf '\n'
     printf 'providers=%s\n' "$available_providers"
-    printf 'commands=urma_admin urma_perftest'
+    printf 'commands=urma_admin urma_perftest dropbear dropbearkey'
     if [[ -n "$UBAGG_PROVIDER" ]]; then
-        printf ' ubagg_cli ou-ubagg-topology'
+        printf ' ubagg_cli ubsim-ubagg-topology'
     fi
-    printf ' ou-dist-sync ou-checkpoint ou-cpu-switch ou-enable-sync ou-net-up ou-help ou-status ou-lat-server ou-lat-client'
+    printf ' ubsim-dist-sync ubsim-checkpoint ubsim-cpu-switch ubsim-enable-sync ubsim-net-up ubsim-help ubsim-status ubsim-lat-server ubsim-lat-client'
     for extra in $EXTRA_BINS; do printf ' %s' "$(basename "$extra")"; done
     printf '\n'
     extra_index=0
@@ -495,14 +529,14 @@ sha256_file() {
     # These hashes bind the image to the mutable inputs most likely to change
     # during latency-model work. run-dual.sh compares them before boot, which
     # catches both an old image and a transiently truncated Docker bind mount.
-    printf 'overlay_init_path=%s\n' "$LAB_DIR/overlay/init"
-    printf 'overlay_init_sha256=%s\n' "$(sha256_file "$LAB_DIR/overlay/init")"
-    printf 'ou_cpu_switch_path=%s\n' "$LAB_DIR/overlay/usr/local/bin/ou-cpu-switch"
-    printf 'ou_cpu_switch_sha256=%s\n' "$(sha256_file "$LAB_DIR/overlay/usr/local/bin/ou-cpu-switch")"
-    printf 'ou_lat_server_path=%s\n' "$LAB_DIR/overlay/usr/local/bin/ou-lat-server"
-    printf 'ou_lat_server_sha256=%s\n' "$(sha256_file "$LAB_DIR/overlay/usr/local/bin/ou-lat-server")"
-    printf 'ou_lat_client_path=%s\n' "$LAB_DIR/overlay/usr/local/bin/ou-lat-client"
-    printf 'ou_lat_client_sha256=%s\n' "$(sha256_file "$LAB_DIR/overlay/usr/local/bin/ou-lat-client")"
+    printf 'overlay_init_path=%s\n' "$OVERLAY_DIR/init"
+    printf 'overlay_init_sha256=%s\n' "$(sha256_file "$OVERLAY_DIR/init")"
+    printf 'ubsim_cpu_switch_path=%s\n' "$OVERLAY_DIR/usr/local/bin/ubsim-cpu-switch"
+    printf 'ubsim_cpu_switch_sha256=%s\n' "$(sha256_file "$OVERLAY_DIR/usr/local/bin/ubsim-cpu-switch")"
+    printf 'ubsim_lat_server_path=%s\n' "$OVERLAY_DIR/usr/local/bin/ubsim-lat-server"
+    printf 'ubsim_lat_server_sha256=%s\n' "$(sha256_file "$OVERLAY_DIR/usr/local/bin/ubsim-lat-server")"
+    printf 'ubsim_lat_client_path=%s\n' "$OVERLAY_DIR/usr/local/bin/ubsim-lat-client"
+    printf 'ubsim_lat_client_sha256=%s\n' "$(sha256_file "$OVERLAY_DIR/usr/local/bin/ubsim-lat-client")"
     printf 'urma_perftest_path=%s\n' "$URMA_PERFTEST"
     printf 'urma_perftest_sha256=%s\n' "$(sha256_file "$URMA_PERFTEST")"
     if [[ -n "$UBAGG_PROVIDER" ]]; then
@@ -512,8 +546,8 @@ sha256_file() {
         printf 'ubagg_cli_sha256=%s\n' "$(sha256_file "$UBAGG_CLI")"
         printf 'libtpsa_path=%s\n' "$LIBTPSA"
         printf 'libtpsa_sha256=%s\n' "$(sha256_file "$LIBTPSA")"
-        printf 'ubagg_topology_source_path=%s\n' "$LAB_DIR/tools/ou-ubagg-topology-mxe.c"
-        printf 'ubagg_topology_source_sha256=%s\n' "$(sha256_file "$LAB_DIR/tools/ou-ubagg-topology-mxe.c")"
+        printf 'ubagg_topology_source_path=%s\n' "$TOOLS_DIR/ubsim-ubagg-topology-mxe.c"
+        printf 'ubagg_topology_source_sha256=%s\n' "$(sha256_file "$TOOLS_DIR/ubsim-ubagg-topology-mxe.c")"
     fi
     printf 'ipv6_module_path=%s\n' "$IPV6_KO"
     printf 'ipv6_module_sha256=%s\n' "$(sha256_file "$IPV6_KO")"
@@ -521,12 +555,12 @@ sha256_file() {
     printf 'ubcore_module_sha256=%s\n' "$(sha256_file "$UBCORE_KO")"
     printf 'uburma_module_path=%s\n' "$UBURMA_KO"
     printf 'uburma_module_sha256=%s\n' "$(sha256_file "$UBURMA_KO")"
-    printf 'dist_sync_source_path=%s\n' "$LAB_DIR/tools/ou-dist-sync.c"
-    printf 'dist_sync_source_sha256=%s\n' "$(sha256_file "$LAB_DIR/tools/ou-dist-sync.c")"
-    printf 'checkpoint_source_path=%s\n' "$LAB_DIR/tools/ou-checkpoint.c"
-    printf 'checkpoint_source_sha256=%s\n' "$(sha256_file "$LAB_DIR/tools/ou-checkpoint.c")"
-    printf 'cpu_switch_source_path=%s\n' "$LAB_DIR/tools/ou-cpu-switch.c"
-    printf 'cpu_switch_source_sha256=%s\n' "$(sha256_file "$LAB_DIR/tools/ou-cpu-switch.c")"
+    printf 'dist_sync_source_path=%s\n' "$TOOLS_DIR/ubsim-dist-sync.c"
+    printf 'dist_sync_source_sha256=%s\n' "$(sha256_file "$TOOLS_DIR/ubsim-dist-sync.c")"
+    printf 'checkpoint_source_path=%s\n' "$TOOLS_DIR/ubsim-checkpoint.c"
+    printf 'checkpoint_source_sha256=%s\n' "$(sha256_file "$TOOLS_DIR/ubsim-checkpoint.c")"
+    printf 'cpu_switch_source_path=%s\n' "$TOOLS_DIR/ubsim-cpu-switch.c"
+    printf 'cpu_switch_source_sha256=%s\n' "$(sha256_file "$TOOLS_DIR/ubsim-cpu-switch.c")"
     printf 'm5ops_dispatch_source_path=%s\n' "$M5OPS_DISPATCH_HEADER"
     printf 'm5ops_dispatch_source_sha256=%s\n' "$(sha256_file "$M5OPS_DISPATCH_HEADER")"
     if [[ -n "$STOCK_UDMA_PROVIDER" ]]; then

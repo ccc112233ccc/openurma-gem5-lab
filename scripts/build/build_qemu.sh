@@ -30,20 +30,20 @@ if [[ ! -d "$source_dir" ]]; then
     tar -xJf "$archive" -C "$lab/sources"
 fi
 
-patch_file="$lab/integrations/qemu/patches/qemu-$version-openurma.patch"
-if ! grep -q 'openurma_ub_host_create' "$source_dir/hw/arm/virt.c"; then
+patch_file="$lab/integrations/qemu/patches/qemu-$version-ubsim.patch"
+if ! grep -q 'ubsim_ub_host_create' "$source_dir/hw/arm/virt.c"; then
     patch -d "$source_dir" -p1 < "$patch_file"
 fi
 
-cp "$lab/integrations/qemu/openurma-ub-host.c" "$source_dir/hw/misc/"
-cp "$lab/integrations/qemu/openurma-simbricks-base.c" "$source_dir/hw/misc/"
+cp "$lab/integrations/qemu/ubsim-ub-host.c" "$source_dir/hw/misc/"
+cp "$lab/integrations/qemu/ubsim-simbricks-base.c" "$source_dir/hw/misc/"
 cp "$lab/sources/simbricks/lib/simbricks/base/if.c" \
-   "$source_dir/hw/misc/openurma-simbricks-if-impl.c"
-mkdir -p "$source_dir/include/openurma" "$source_dir/include/hw/misc" \
+   "$source_dir/hw/misc/ubsim-simbricks-if-impl.c"
+mkdir -p "$source_dir/include/ubsim" "$source_dir/include/hw/misc" \
          "$source_dir/include/simbricks/base"
-cp "$lab/integrations/qemu/include/openurma/ub_host_proto.h" \
-   "$source_dir/include/openurma/"
-cp "$lab/integrations/qemu/include/hw/misc/openurma-ub-host.h" \
+cp "$lab/integrations/qemu/include/ubsim/ub_host_proto.h" \
+   "$source_dir/include/ubsim/"
+cp "$lab/integrations/qemu/include/hw/misc/ubsim-ub-host.h" \
    "$source_dir/include/hw/misc/"
 cp "$lab/sources/simbricks/lib/simbricks/base/if.h" \
    "$lab/sources/simbricks/lib/simbricks/base/proto.h" \
@@ -58,7 +58,7 @@ import sys
 
 root = Path(sys.argv[1])
 files = [
-    root / "hw/misc/openurma-simbricks-if-impl.c",
+    root / "hw/misc/ubsim-simbricks-if-impl.c",
     root / "include/simbricks/base/if.h",
     root / "include/simbricks/base/generic.h",
 ]
@@ -86,8 +86,8 @@ if [[ "$lab/artifacts/kernel/vmlinux" -nt "$lab/artifacts/kernel/Image" ]]; then
         echo "vmlinux is newer than Image; start the lab Docker container to regenerate it" >&2
         exit 1
     }
-    container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-    container_root="${OPENURMA_CONTAINER_LAB_ROOT:-/workspace/openurma-gem5-lab}"
+    container="${UBSIM_CONTAINER:-ubsim-gem5-lab}"
+    container_root="${UBSIM_CONTAINER_LAB_ROOT:-/workspace/ubsim-gem5-lab}"
     docker exec "$container" aarch64-linux-gnu-objcopy \
         -O binary -R .note -R .note.gnu.build-id -R .comment -S \
         "$container_root/artifacts/kernel/vmlinux" \

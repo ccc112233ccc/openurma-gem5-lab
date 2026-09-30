@@ -11,160 +11,160 @@ usage() {
     cat <<'EOF'
 usage: ./lab start [OPTIONS]
 
-Start multiple synchronized OpenURMA full-system guests connected through one
+Start multiple synchronized UBSim full-system guests connected through one
 EID-routing UB switch. Every timing-model knob
 can also be supplied through the environment variable shown below.
 
 Profiles:
-  --nodes N                     OPENURMA_NODE_COUNT (default: 2; 2..8)
+  --nodes N                     UBSIM_NODE_COUNT (default: 2; 2..8)
   --profile fast|kvm|server|udma400
-                                OPENURMA_DUAL_PROFILE (default: fast;
+                                UBSIM_DUAL_PROFILE (default: fast;
                                 fast is the AtomicSimpleCPU functional path)
   --restore-checkpoint NAME     restore coordinated state from checkpoints/NAME
 
 CPU, cache, and memory:
-  --cpu-mode MODE               OPENURMA_CPU_MODE (atomic_fast is portable;
+  --cpu-mode MODE               UBSIM_CPU_MODE (atomic_fast is portable;
                                 kvm is the fastest functional ARM64 path;
                                 server_o3 uses Atomic boot + ArmO3 ROI)
-  --m5ops-base HEX              OPENURMA_M5OPS_BASE (VExpress m5ops MMIO ABI)
-  --cpu-freq FREQ               OPENURMA_CPU_FREQ
-  --num-cpus N                  OPENURMA_NUM_CPUS
-  --benchmark-cpu N             OPENURMA_BENCHMARK_CPU
-  --o3-width N                  OPENURMA_O3_WIDTH
-  --o3-rob-entries N            OPENURMA_O3_ROB_ENTRIES
-  --o3-iq-entries N             OPENURMA_O3_IQ_ENTRIES
-  --o3-lq-entries N             OPENURMA_O3_LQ_ENTRIES
-  --o3-sq-entries N             OPENURMA_O3_SQ_ENTRIES
-  --o3-load-ports N             OPENURMA_O3_LOAD_PORTS
-  --o3-store-ports N            OPENURMA_O3_STORE_PORTS
-  --o3-fetch-buffer-bytes N     OPENURMA_O3_FETCH_BUFFER_BYTES
-  --o3-fetch-queue-entries N    OPENURMA_O3_FETCH_QUEUE_ENTRIES
-  --o3-phys-int-regs N          OPENURMA_O3_PHYS_INT_REGS
-  --o3-phys-float-regs N        OPENURMA_O3_PHYS_FLOAT_REGS
-  --o3-phys-vec-regs N          OPENURMA_O3_PHYS_VEC_REGS
-  --o3-phys-vec-pred-regs N     OPENURMA_O3_PHYS_VEC_PRED_REGS
-  --o3-phys-mat-regs N          OPENURMA_O3_PHYS_MAT_REGS
-  --cache-line-size N           OPENURMA_CACHE_LINE_SIZE
-  --last-cache-level 1|2|3      OPENURMA_LAST_CACHE_LEVEL
-  --l1i-size SIZE               OPENURMA_L1I_SIZE
-  --l1i-assoc N                 OPENURMA_L1I_ASSOC
-  --l1i-latency T,D,R           OPENURMA_L1I_LATENCY
-  --l1i-mshrs N                 OPENURMA_L1I_MSHRS
-  --l1i-targets N               OPENURMA_L1I_TARGETS
-  --l1i-write-buffers N         OPENURMA_L1I_WRITE_BUFFERS
-  --l1d-size SIZE               OPENURMA_L1D_SIZE
-  --l1d-assoc N                 OPENURMA_L1D_ASSOC
-  --l1d-latency T,D,R           OPENURMA_L1D_LATENCY
-  --l1d-mshrs N                 OPENURMA_L1D_MSHRS
-  --l1d-targets N               OPENURMA_L1D_TARGETS
-  --l1d-write-buffers N         OPENURMA_L1D_WRITE_BUFFERS
-  --l2-size SIZE                OPENURMA_L2_SIZE
-  --l2-assoc N                  OPENURMA_L2_ASSOC
-  --l2-latency T,D,R            OPENURMA_L2_LATENCY
-  --l2-mshrs N                  OPENURMA_L2_MSHRS
-  --l2-targets N                OPENURMA_L2_TARGETS
-  --l2-write-buffers N          OPENURMA_L2_WRITE_BUFFERS
-  --l3-size SIZE                OPENURMA_L3_SIZE
-  --l3-assoc N                  OPENURMA_L3_ASSOC
-  --l3-latency T,D,R            OPENURMA_L3_LATENCY
-  --l3-mshrs N                  OPENURMA_L3_MSHRS
-  --l3-targets N                OPENURMA_L3_TARGETS
-  --l3-write-buffers N          OPENURMA_L3_WRITE_BUFFERS
-  --fabric-freq FREQ            OPENURMA_FABRIC_FREQ
-  --fabric-width-bytes N        OPENURMA_FABRIC_WIDTH_BYTES
+  --m5ops-base HEX              UBSIM_M5OPS_BASE (VExpress m5ops MMIO ABI)
+  --cpu-freq FREQ               UBSIM_CPU_FREQ
+  --num-cpus N                  UBSIM_NUM_CPUS
+  --benchmark-cpu N             UBSIM_BENCHMARK_CPU
+  --o3-width N                  UBSIM_O3_WIDTH
+  --o3-rob-entries N            UBSIM_O3_ROB_ENTRIES
+  --o3-iq-entries N             UBSIM_O3_IQ_ENTRIES
+  --o3-lq-entries N             UBSIM_O3_LQ_ENTRIES
+  --o3-sq-entries N             UBSIM_O3_SQ_ENTRIES
+  --o3-load-ports N             UBSIM_O3_LOAD_PORTS
+  --o3-store-ports N            UBSIM_O3_STORE_PORTS
+  --o3-fetch-buffer-bytes N     UBSIM_O3_FETCH_BUFFER_BYTES
+  --o3-fetch-queue-entries N    UBSIM_O3_FETCH_QUEUE_ENTRIES
+  --o3-phys-int-regs N          UBSIM_O3_PHYS_INT_REGS
+  --o3-phys-float-regs N        UBSIM_O3_PHYS_FLOAT_REGS
+  --o3-phys-vec-regs N          UBSIM_O3_PHYS_VEC_REGS
+  --o3-phys-vec-pred-regs N     UBSIM_O3_PHYS_VEC_PRED_REGS
+  --o3-phys-mat-regs N          UBSIM_O3_PHYS_MAT_REGS
+  --cache-line-size N           UBSIM_CACHE_LINE_SIZE
+  --last-cache-level 1|2|3      UBSIM_LAST_CACHE_LEVEL
+  --l1i-size SIZE               UBSIM_L1I_SIZE
+  --l1i-assoc N                 UBSIM_L1I_ASSOC
+  --l1i-latency T,D,R           UBSIM_L1I_LATENCY
+  --l1i-mshrs N                 UBSIM_L1I_MSHRS
+  --l1i-targets N               UBSIM_L1I_TARGETS
+  --l1i-write-buffers N         UBSIM_L1I_WRITE_BUFFERS
+  --l1d-size SIZE               UBSIM_L1D_SIZE
+  --l1d-assoc N                 UBSIM_L1D_ASSOC
+  --l1d-latency T,D,R           UBSIM_L1D_LATENCY
+  --l1d-mshrs N                 UBSIM_L1D_MSHRS
+  --l1d-targets N               UBSIM_L1D_TARGETS
+  --l1d-write-buffers N         UBSIM_L1D_WRITE_BUFFERS
+  --l2-size SIZE                UBSIM_L2_SIZE
+  --l2-assoc N                  UBSIM_L2_ASSOC
+  --l2-latency T,D,R            UBSIM_L2_LATENCY
+  --l2-mshrs N                  UBSIM_L2_MSHRS
+  --l2-targets N                UBSIM_L2_TARGETS
+  --l2-write-buffers N          UBSIM_L2_WRITE_BUFFERS
+  --l3-size SIZE                UBSIM_L3_SIZE
+  --l3-assoc N                  UBSIM_L3_ASSOC
+  --l3-latency T,D,R            UBSIM_L3_LATENCY
+  --l3-mshrs N                  UBSIM_L3_MSHRS
+  --l3-targets N                UBSIM_L3_TARGETS
+  --l3-write-buffers N          UBSIM_L3_WRITE_BUFFERS
+  --fabric-freq FREQ            UBSIM_FABRIC_FREQ
+  --fabric-width-bytes N        UBSIM_FABRIC_WIDTH_BYTES
   --coherent-bus-frontend-latency N
-                                OPENURMA_COHERENT_BUS_FRONTEND_LATENCY
+                                UBSIM_COHERENT_BUS_FRONTEND_LATENCY
   --coherent-bus-forward-latency N
-                                OPENURMA_COHERENT_BUS_FORWARD_LATENCY
+                                UBSIM_COHERENT_BUS_FORWARD_LATENCY
   --coherent-bus-response-latency N
-                                OPENURMA_COHERENT_BUS_RESPONSE_LATENCY
+                                UBSIM_COHERENT_BUS_RESPONSE_LATENCY
   --coherent-bus-snoop-response-latency N
-                                OPENURMA_COHERENT_BUS_SNOOP_RESPONSE_LATENCY
+                                UBSIM_COHERENT_BUS_SNOOP_RESPONSE_LATENCY
   --coherent-bus-header-latency N
-                                OPENURMA_COHERENT_BUS_HEADER_LATENCY
+                                UBSIM_COHERENT_BUS_HEADER_LATENCY
   --memory-bus-frontend-latency N
-                                OPENURMA_MEMORY_BUS_FRONTEND_LATENCY
-  --memory-bus-forward-latency N OPENURMA_MEMORY_BUS_FORWARD_LATENCY
+                                UBSIM_MEMORY_BUS_FRONTEND_LATENCY
+  --memory-bus-forward-latency N UBSIM_MEMORY_BUS_FORWARD_LATENCY
   --memory-bus-response-latency N
-                                OPENURMA_MEMORY_BUS_RESPONSE_LATENCY
+                                UBSIM_MEMORY_BUS_RESPONSE_LATENCY
   --memory-bus-snoop-response-latency N
-                                OPENURMA_MEMORY_BUS_SNOOP_RESPONSE_LATENCY
-  --memory-bus-header-latency N  OPENURMA_MEMORY_BUS_HEADER_LATENCY
+                                UBSIM_MEMORY_BUS_SNOOP_RESPONSE_LATENCY
+  --memory-bus-header-latency N  UBSIM_MEMORY_BUS_HEADER_LATENCY
   --core-bus-snoop-filter-capacity SIZE
-                                OPENURMA_CORE_BUS_SNOOP_FILTER_CAPACITY
+                                UBSIM_CORE_BUS_SNOOP_FILTER_CAPACITY
   --l3-bus-snoop-filter-capacity SIZE
-                                OPENURMA_L3_BUS_SNOOP_FILTER_CAPACITY
+                                UBSIM_L3_BUS_SNOOP_FILTER_CAPACITY
   --membus-snoop-filter-capacity SIZE
-                                OPENURMA_MEMBUS_SNOOP_FILTER_CAPACITY
-  --io-bus-frontend-latency N   OPENURMA_IO_BUS_FRONTEND_LATENCY
-  --io-bus-forward-latency N    OPENURMA_IO_BUS_FORWARD_LATENCY
-  --io-bus-response-latency N   OPENURMA_IO_BUS_RESPONSE_LATENCY
-  --io-bus-header-latency N     OPENURMA_IO_BUS_HEADER_LATENCY
-  --io-cache-size SIZE          OPENURMA_IO_CACHE_SIZE
-  --io-cache-assoc N            OPENURMA_IO_CACHE_ASSOC
-  --io-cache-latency T,D,R      OPENURMA_IO_CACHE_LATENCY
-  --io-cache-mshrs N            OPENURMA_IO_CACHE_MSHRS
-  --io-cache-targets N          OPENURMA_IO_CACHE_TARGETS
-  --io-cache-write-buffers N    OPENURMA_IO_CACHE_WRITE_BUFFERS
-  --mem-size SIZE               OPENURMA_DUAL_MEM_SIZE
-  --guest-mem-limit SIZE        OPENURMA_GUEST_MEM_LIMIT
-  --mem-type TYPE               OPENURMA_MEM_TYPE
-  --mem-channels N              OPENURMA_MEM_CHANNELS
-  --mem-channels-intlv N        OPENURMA_MEM_CHANNELS_INTLV
-  --mem-addr-mapping ORDER      OPENURMA_MEM_ADDR_MAPPING
-  --mem-channel-xor-low-bit N   OPENURMA_MEM_CHANNEL_XOR_LOW_BIT
-  --mem-ranks N                 OPENURMA_MEM_RANKS
-  --mem-read-buffer-size N      OPENURMA_MEM_READ_BUFFER_SIZE
-  --mem-write-buffer-size N     OPENURMA_MEM_WRITE_BUFFER_SIZE
-  --mem-page-policy POLICY      OPENURMA_MEM_PAGE_POLICY
-  --mem-max-accesses-per-row N  OPENURMA_MEM_MAX_ACCESSES_PER_ROW
-  --mem-sched-policy POLICY     OPENURMA_MEM_SCHED_POLICY
-  --mem-write-high-thresh N     OPENURMA_MEM_WRITE_HIGH_THRESH
-  --mem-write-low-thresh N      OPENURMA_MEM_WRITE_LOW_THRESH
-  --mem-min-writes-per-switch N OPENURMA_MEM_MIN_WRITES_PER_SWITCH
-  --mem-min-reads-per-switch N  OPENURMA_MEM_MIN_READS_PER_SWITCH
-  --mem-ctrl-frontend-latency T OPENURMA_MEM_CTRL_FRONTEND_LATENCY
-  --mem-ctrl-backend-latency T  OPENURMA_MEM_CTRL_BACKEND_LATENCY
-  --mem-ctrl-command-window T   OPENURMA_MEM_CTRL_COMMAND_WINDOW
+                                UBSIM_MEMBUS_SNOOP_FILTER_CAPACITY
+  --io-bus-frontend-latency N   UBSIM_IO_BUS_FRONTEND_LATENCY
+  --io-bus-forward-latency N    UBSIM_IO_BUS_FORWARD_LATENCY
+  --io-bus-response-latency N   UBSIM_IO_BUS_RESPONSE_LATENCY
+  --io-bus-header-latency N     UBSIM_IO_BUS_HEADER_LATENCY
+  --io-cache-size SIZE          UBSIM_IO_CACHE_SIZE
+  --io-cache-assoc N            UBSIM_IO_CACHE_ASSOC
+  --io-cache-latency T,D,R      UBSIM_IO_CACHE_LATENCY
+  --io-cache-mshrs N            UBSIM_IO_CACHE_MSHRS
+  --io-cache-targets N          UBSIM_IO_CACHE_TARGETS
+  --io-cache-write-buffers N    UBSIM_IO_CACHE_WRITE_BUFFERS
+  --mem-size SIZE               UBSIM_DUAL_MEM_SIZE
+  --guest-mem-limit SIZE        UBSIM_GUEST_MEM_LIMIT
+  --mem-type TYPE               UBSIM_MEM_TYPE
+  --mem-channels N              UBSIM_MEM_CHANNELS
+  --mem-channels-intlv N        UBSIM_MEM_CHANNELS_INTLV
+  --mem-addr-mapping ORDER      UBSIM_MEM_ADDR_MAPPING
+  --mem-channel-xor-low-bit N   UBSIM_MEM_CHANNEL_XOR_LOW_BIT
+  --mem-ranks N                 UBSIM_MEM_RANKS
+  --mem-read-buffer-size N      UBSIM_MEM_READ_BUFFER_SIZE
+  --mem-write-buffer-size N     UBSIM_MEM_WRITE_BUFFER_SIZE
+  --mem-page-policy POLICY      UBSIM_MEM_PAGE_POLICY
+  --mem-max-accesses-per-row N  UBSIM_MEM_MAX_ACCESSES_PER_ROW
+  --mem-sched-policy POLICY     UBSIM_MEM_SCHED_POLICY
+  --mem-write-high-thresh N     UBSIM_MEM_WRITE_HIGH_THRESH
+  --mem-write-low-thresh N      UBSIM_MEM_WRITE_LOW_THRESH
+  --mem-min-writes-per-switch N UBSIM_MEM_MIN_WRITES_PER_SWITCH
+  --mem-min-reads-per-switch N  UBSIM_MEM_MIN_READS_PER_SWITCH
+  --mem-ctrl-frontend-latency T UBSIM_MEM_CTRL_FRONTEND_LATENCY
+  --mem-ctrl-backend-latency T  UBSIM_MEM_CTRL_BACKEND_LATENCY
+  --mem-ctrl-command-window T   UBSIM_MEM_CTRL_COMMAND_WINDOW
 
 UB link:
   --network-backend modular-ns3ub
-                                OPENURMA_NETWORK_BACKEND (only supported path)
-  --ub-transport switch-adapter OPENURMA_UB_TRANSPORT (only supported path)
-  --ub-port-count N             OPENURMA_UB_PORT_COUNT
-  --peer-topology MODE          OPENURMA_PEER_TOPOLOGY (direct|l1-switch)
-  --peer-port-map LIST          OPENURMA_PEER_PORT_MAP (for example 0,1)
-  --peer-port-selection MODE    OPENURMA_PEER_PORT_SELECTION
+                                UBSIM_NETWORK_BACKEND (only supported path)
+  --ub-transport switch-adapter UBSIM_UB_TRANSPORT (only supported path)
+  --ub-port-count N             UBSIM_UB_PORT_COUNT
+  --peer-topology MODE          UBSIM_PEER_TOPOLOGY (direct|l1-switch)
+  --peer-port-map LIST          UBSIM_PEER_PORT_MAP (for example 0,1)
+  --peer-port-selection MODE    UBSIM_PEER_PORT_SELECTION
                                 (tp-context; default: tp-context)
-  --peer-latency-ns NS          OPENURMA_PEER_LATENCY_NS
-  --sync-quantum-ns NS          OPENURMA_SYNC_QUANTUM_NS (default: lookahead)
+  --peer-latency-ns NS          UBSIM_PEER_LATENCY_NS
+  --sync-quantum-ns NS          UBSIM_SYNC_QUANTUM_NS (default: lookahead)
   --sync                        force inter-simulator virtual-time sync on
   --roi-sync                    boot freely, then enable sync at a drained fence
   --no-sync                     force inter-simulator virtual-time sync off
-                                OPENURMA_SYNC=(auto|on|roi|off; default: auto;
+                                UBSIM_SYNC=(auto|on|roi|off; default: auto;
                                 roi for modular Atomic, off for KVM)
-  --sync-mode adapter-local     OPENURMA_SYNC_MODE (only supported mode)
-  --peer-link-rate-gbps N       OPENURMA_PEER_LINK_RATE_GBPS
-  --peer-serialization-stages N OPENURMA_PEER_SERIALIZATION_STAGES
-  --peer-switch-delay TIME      OPENURMA_PEER_SWITCH_DELAY
-  --peer-link-overhead-bytes N  OPENURMA_PEER_LINK_OVERHEAD_BYTES
+  --sync-mode adapter-local     UBSIM_SYNC_MODE (only supported mode)
+  --peer-link-rate-gbps N       UBSIM_PEER_LINK_RATE_GBPS
+  --peer-serialization-stages N UBSIM_PEER_SERIALIZATION_STAGES
+  --peer-switch-delay TIME      UBSIM_PEER_SWITCH_DELAY
+  --peer-link-overhead-bytes N  UBSIM_PEER_LINK_OVERHEAD_BYTES
 
 UDMA front end:
-  --sq-control-bytes N          OPENURMA_SQ_CONTROL_BYTES
-  --wqebb-bytes N               OPENURMA_WQEBB_BYTES
-  --sq-sge-bytes N              OPENURMA_SQ_SGE_BYTES
-  --direct-wqe-max-blocks N     OPENURMA_DIRECT_WQE_MAX_BLOCKS
-  --direct-wqe-latency TIME     OPENURMA_DIRECT_WQE_LATENCY
-  --sq-fetch-latency TIME       OPENURMA_SQ_FETCH_LATENCY
-  --sq-wqebb-latency TIME       OPENURMA_SQ_WQEBB_LATENCY
-  --payload-dma-latency TIME    OPENURMA_PAYLOAD_DMA_LATENCY
-  --payload-dma-rate-gbps N     OPENURMA_PAYLOAD_DMA_RATE_GBPS
-  --udma-poll-interval TIME     OPENURMA_UDMA_POLL_INTERVAL
-  --udma-iotlb-entries N        OPENURMA_UDMA_IOTLB_ENTRIES
-  --dma-max-outstanding N       OPENURMA_DMA_MAX_OUTSTANDING
+  --sq-control-bytes N          UBSIM_SQ_CONTROL_BYTES
+  --wqebb-bytes N               UBSIM_WQEBB_BYTES
+  --sq-sge-bytes N              UBSIM_SQ_SGE_BYTES
+  --direct-wqe-max-blocks N     UBSIM_DIRECT_WQE_MAX_BLOCKS
+  --direct-wqe-latency TIME     UBSIM_DIRECT_WQE_LATENCY
+  --sq-fetch-latency TIME       UBSIM_SQ_FETCH_LATENCY
+  --sq-wqebb-latency TIME       UBSIM_SQ_WQEBB_LATENCY
+  --payload-dma-latency TIME    UBSIM_PAYLOAD_DMA_LATENCY
+  --payload-dma-rate-gbps N     UBSIM_PAYLOAD_DMA_RATE_GBPS
+  --udma-poll-interval TIME     UBSIM_UDMA_POLL_INTERVAL
+  --udma-iotlb-entries N        UBSIM_UDMA_IOTLB_ENTRIES
+  --dma-max-outstanding N       UBSIM_DMA_MAX_OUTSTANDING
 
 Other:
-  --provider official           OPENURMA_PROVIDER (only supported path; loads
+  --provider official           UBSIM_PROVIDER (only supported path; loads
                                 the unmodified OLK UDMA stack)
   --print-config                Print the resolved model without starting it
   -h, --help                    Show this help
@@ -177,8 +177,8 @@ EOF
 # Parse into separate command-line overrides so a --profile appearing anywhere
 # has the same precedence. Empty strings mean "not supplied"; zero is valid for
 # knobs which explicitly support disabling a modeled cost.
-profile="${OPENURMA_DUAL_PROFILE:-fast}"
-node_count="${OPENURMA_NODE_COUNT:-2}"
+profile="${UBSIM_DUAL_PROFILE:-fast}"
+node_count="${UBSIM_NODE_COUNT:-2}"
 cli_cpu_mode=""
 cli_m5ops_base=""
 cli_cpu_freq=""
@@ -296,7 +296,7 @@ cli_udma_poll_interval=""
 cli_udma_iotlb_entries=""
 cli_dma_max_outstanding=""
 cli_provider=""
-restore_checkpoint="${OPENURMA_RESTORE_CHECKPOINT:-}"
+restore_checkpoint="${UBSIM_RESTORE_CHECKPOINT:-}"
 print_config=0
 
 need_value() {
@@ -797,125 +797,125 @@ case "$profile" in
     *) die "unknown profile '$profile'; expected fast, kvm, server, or udma400" ;;
 esac
 
-cpu_mode="${OPENURMA_CPU_MODE:-${OPENURMA_DUAL_CPU:-$profile_cpu_mode}}"
-m5ops_base="${OPENURMA_M5OPS_BASE:-0x10010000}"
-cpu_freq="${OPENURMA_CPU_FREQ:-${OPENURMA_DUAL_CPU_FREQ:-$profile_cpu_freq}}"
-num_cpus="${OPENURMA_NUM_CPUS:-${OPENURMA_DUAL_NUM_CPUS:-$profile_num_cpus}}"
-benchmark_cpu="${OPENURMA_BENCHMARK_CPU:-$profile_benchmark_cpu}"
-o3_width="${OPENURMA_O3_WIDTH:-$profile_o3_width}"
-o3_rob_entries="${OPENURMA_O3_ROB_ENTRIES:-$profile_o3_rob_entries}"
-o3_iq_entries="${OPENURMA_O3_IQ_ENTRIES:-$profile_o3_iq_entries}"
-o3_lq_entries="${OPENURMA_O3_LQ_ENTRIES:-$profile_o3_lq_entries}"
-o3_sq_entries="${OPENURMA_O3_SQ_ENTRIES:-$profile_o3_sq_entries}"
-o3_load_ports="${OPENURMA_O3_LOAD_PORTS:-$profile_o3_load_ports}"
-o3_store_ports="${OPENURMA_O3_STORE_PORTS:-$profile_o3_store_ports}"
-o3_fetch_buffer_bytes="${OPENURMA_O3_FETCH_BUFFER_BYTES:-$profile_o3_fetch_buffer_bytes}"
-o3_fetch_queue_entries="${OPENURMA_O3_FETCH_QUEUE_ENTRIES:-$profile_o3_fetch_queue_entries}"
-o3_phys_int_regs="${OPENURMA_O3_PHYS_INT_REGS:-$profile_o3_phys_int_regs}"
-o3_phys_float_regs="${OPENURMA_O3_PHYS_FLOAT_REGS:-$profile_o3_phys_float_regs}"
-o3_phys_vec_regs="${OPENURMA_O3_PHYS_VEC_REGS:-$profile_o3_phys_vec_regs}"
-o3_phys_vec_pred_regs="${OPENURMA_O3_PHYS_VEC_PRED_REGS:-$profile_o3_phys_vec_pred_regs}"
-o3_phys_mat_regs="${OPENURMA_O3_PHYS_MAT_REGS:-$profile_o3_phys_mat_regs}"
-cache_line_size="${OPENURMA_CACHE_LINE_SIZE:-$profile_cache_line_size}"
-last_cache_level="${OPENURMA_LAST_CACHE_LEVEL:-$profile_last_cache_level}"
-l1i_size="${OPENURMA_L1I_SIZE:-$profile_l1i_size}"
-l1i_assoc="${OPENURMA_L1I_ASSOC:-$profile_l1i_assoc}"
-l1i_latency="${OPENURMA_L1I_LATENCY:-$profile_l1i_latency}"
-l1i_mshrs="${OPENURMA_L1I_MSHRS:-$profile_l1i_mshrs}"
-l1i_targets="${OPENURMA_L1I_TARGETS:-$profile_l1i_targets}"
-l1i_write_buffers="${OPENURMA_L1I_WRITE_BUFFERS:-$profile_l1i_write_buffers}"
-l1d_size="${OPENURMA_L1D_SIZE:-$profile_l1d_size}"
-l1d_assoc="${OPENURMA_L1D_ASSOC:-$profile_l1d_assoc}"
-l1d_latency="${OPENURMA_L1D_LATENCY:-$profile_l1d_latency}"
-l1d_mshrs="${OPENURMA_L1D_MSHRS:-$profile_l1d_mshrs}"
-l1d_targets="${OPENURMA_L1D_TARGETS:-$profile_l1d_targets}"
-l1d_write_buffers="${OPENURMA_L1D_WRITE_BUFFERS:-$profile_l1d_write_buffers}"
-l2_size="${OPENURMA_L2_SIZE:-$profile_l2_size}"
-l2_assoc="${OPENURMA_L2_ASSOC:-$profile_l2_assoc}"
-l2_latency="${OPENURMA_L2_LATENCY:-$profile_l2_latency}"
-l2_mshrs="${OPENURMA_L2_MSHRS:-$profile_l2_mshrs}"
-l2_targets="${OPENURMA_L2_TARGETS:-$profile_l2_targets}"
-l2_write_buffers="${OPENURMA_L2_WRITE_BUFFERS:-$profile_l2_write_buffers}"
-l3_size="${OPENURMA_L3_SIZE:-$profile_l3_size}"
-l3_assoc="${OPENURMA_L3_ASSOC:-$profile_l3_assoc}"
-l3_latency="${OPENURMA_L3_LATENCY:-$profile_l3_latency}"
-l3_mshrs="${OPENURMA_L3_MSHRS:-$profile_l3_mshrs}"
-l3_targets="${OPENURMA_L3_TARGETS:-$profile_l3_targets}"
-l3_write_buffers="${OPENURMA_L3_WRITE_BUFFERS:-$profile_l3_write_buffers}"
-fabric_freq="${OPENURMA_FABRIC_FREQ:-$profile_fabric_freq}"
-fabric_width_bytes="${OPENURMA_FABRIC_WIDTH_BYTES:-$profile_fabric_width_bytes}"
-coherent_bus_frontend_latency="${OPENURMA_COHERENT_BUS_FRONTEND_LATENCY:-$profile_coherent_bus_frontend_latency}"
-coherent_bus_forward_latency="${OPENURMA_COHERENT_BUS_FORWARD_LATENCY:-$profile_coherent_bus_forward_latency}"
-coherent_bus_response_latency="${OPENURMA_COHERENT_BUS_RESPONSE_LATENCY:-$profile_coherent_bus_response_latency}"
-coherent_bus_snoop_response_latency="${OPENURMA_COHERENT_BUS_SNOOP_RESPONSE_LATENCY:-$profile_coherent_bus_snoop_response_latency}"
-coherent_bus_header_latency="${OPENURMA_COHERENT_BUS_HEADER_LATENCY:-$profile_coherent_bus_header_latency}"
-memory_bus_frontend_latency="${OPENURMA_MEMORY_BUS_FRONTEND_LATENCY:-$profile_memory_bus_frontend_latency}"
-memory_bus_forward_latency="${OPENURMA_MEMORY_BUS_FORWARD_LATENCY:-$profile_memory_bus_forward_latency}"
-memory_bus_response_latency="${OPENURMA_MEMORY_BUS_RESPONSE_LATENCY:-$profile_memory_bus_response_latency}"
-memory_bus_snoop_response_latency="${OPENURMA_MEMORY_BUS_SNOOP_RESPONSE_LATENCY:-$profile_memory_bus_snoop_response_latency}"
-memory_bus_header_latency="${OPENURMA_MEMORY_BUS_HEADER_LATENCY:-$profile_memory_bus_header_latency}"
-core_bus_snoop_filter_capacity="${OPENURMA_CORE_BUS_SNOOP_FILTER_CAPACITY:-$profile_core_bus_snoop_filter_capacity}"
-l3_bus_snoop_filter_capacity="${OPENURMA_L3_BUS_SNOOP_FILTER_CAPACITY:-$profile_l3_bus_snoop_filter_capacity}"
-membus_snoop_filter_capacity="${OPENURMA_MEMBUS_SNOOP_FILTER_CAPACITY:-$profile_membus_snoop_filter_capacity}"
-io_bus_frontend_latency="${OPENURMA_IO_BUS_FRONTEND_LATENCY:-$profile_io_bus_frontend_latency}"
-io_bus_forward_latency="${OPENURMA_IO_BUS_FORWARD_LATENCY:-$profile_io_bus_forward_latency}"
-io_bus_response_latency="${OPENURMA_IO_BUS_RESPONSE_LATENCY:-$profile_io_bus_response_latency}"
-io_bus_header_latency="${OPENURMA_IO_BUS_HEADER_LATENCY:-$profile_io_bus_header_latency}"
-io_cache_size="${OPENURMA_IO_CACHE_SIZE:-$profile_io_cache_size}"
-io_cache_assoc="${OPENURMA_IO_CACHE_ASSOC:-$profile_io_cache_assoc}"
-io_cache_latency="${OPENURMA_IO_CACHE_LATENCY:-$profile_io_cache_latency}"
-io_cache_mshrs="${OPENURMA_IO_CACHE_MSHRS:-$profile_io_cache_mshrs}"
-io_cache_targets="${OPENURMA_IO_CACHE_TARGETS:-$profile_io_cache_targets}"
-io_cache_write_buffers="${OPENURMA_IO_CACHE_WRITE_BUFFERS:-$profile_io_cache_write_buffers}"
-mem_size="${OPENURMA_DUAL_MEM_SIZE:-$profile_mem_size}"
-guest_mem_limit="${OPENURMA_GUEST_MEM_LIMIT:-$profile_guest_mem_limit}"
-mem_type="${OPENURMA_MEM_TYPE:-$profile_mem_type}"
-mem_channels="${OPENURMA_MEM_CHANNELS:-$profile_mem_channels}"
-mem_channels_intlv="${OPENURMA_MEM_CHANNELS_INTLV:-$profile_mem_channels_intlv}"
-mem_addr_mapping="${OPENURMA_MEM_ADDR_MAPPING:-$profile_mem_addr_mapping}"
-mem_channel_xor_low_bit="${OPENURMA_MEM_CHANNEL_XOR_LOW_BIT:-$profile_mem_channel_xor_low_bit}"
-mem_ranks="${OPENURMA_MEM_RANKS:-$profile_mem_ranks}"
-mem_read_buffer_size="${OPENURMA_MEM_READ_BUFFER_SIZE:-$profile_mem_read_buffer_size}"
-mem_write_buffer_size="${OPENURMA_MEM_WRITE_BUFFER_SIZE:-$profile_mem_write_buffer_size}"
-mem_page_policy="${OPENURMA_MEM_PAGE_POLICY:-$profile_mem_page_policy}"
-mem_max_accesses_per_row="${OPENURMA_MEM_MAX_ACCESSES_PER_ROW:-$profile_mem_max_accesses_per_row}"
-mem_sched_policy="${OPENURMA_MEM_SCHED_POLICY:-$profile_mem_sched_policy}"
-mem_write_high_thresh="${OPENURMA_MEM_WRITE_HIGH_THRESH:-$profile_mem_write_high_thresh}"
-mem_write_low_thresh="${OPENURMA_MEM_WRITE_LOW_THRESH:-$profile_mem_write_low_thresh}"
-mem_min_writes_per_switch="${OPENURMA_MEM_MIN_WRITES_PER_SWITCH:-$profile_mem_min_writes_per_switch}"
-mem_min_reads_per_switch="${OPENURMA_MEM_MIN_READS_PER_SWITCH:-$profile_mem_min_reads_per_switch}"
-mem_ctrl_frontend_latency="${OPENURMA_MEM_CTRL_FRONTEND_LATENCY:-$profile_mem_ctrl_frontend_latency}"
-mem_ctrl_backend_latency="${OPENURMA_MEM_CTRL_BACKEND_LATENCY:-$profile_mem_ctrl_backend_latency}"
-mem_ctrl_command_window="${OPENURMA_MEM_CTRL_COMMAND_WINDOW:-$profile_mem_ctrl_command_window}"
-ub_port_count="${OPENURMA_UB_PORT_COUNT:-$profile_ub_port_count}"
-network_backend="${OPENURMA_NETWORK_BACKEND:-modular-ns3ub}"
-ub_transport="${OPENURMA_UB_TRANSPORT:-switch-adapter}"
-peer_topology="${OPENURMA_PEER_TOPOLOGY:-$profile_peer_topology}"
-peer_port_map="${OPENURMA_PEER_PORT_MAP:-$profile_peer_port_map}"
-peer_port_selection="${OPENURMA_PEER_PORT_SELECTION:-$profile_peer_port_selection}"
-peer_latency_ns="${OPENURMA_PEER_LATENCY_NS:-100}"
-sync_quantum_ns="${OPENURMA_SYNC_QUANTUM_NS:-$peer_latency_ns}"
-sync_request="${OPENURMA_SYNC:-auto}"
-sync_mode="${OPENURMA_SYNC_MODE:-adapter-local}"
-peer_link_rate_gbps="${OPENURMA_PEER_LINK_RATE_GBPS:-$profile_peer_link_rate_gbps}"
-peer_serialization_stages="${OPENURMA_PEER_SERIALIZATION_STAGES:-$profile_peer_serialization_stages}"
-peer_switch_delay="${OPENURMA_PEER_SWITCH_DELAY:-$profile_peer_switch_delay}"
-peer_link_overhead_bytes="${OPENURMA_PEER_LINK_OVERHEAD_BYTES:-$profile_peer_link_overhead_bytes}"
-sq_control_bytes="${OPENURMA_SQ_CONTROL_BYTES:-$profile_sq_control_bytes}"
-wqebb_bytes="${OPENURMA_WQEBB_BYTES:-$profile_wqebb_bytes}"
-sq_sge_bytes="${OPENURMA_SQ_SGE_BYTES:-$profile_sq_sge_bytes}"
-direct_wqe_max_blocks="${OPENURMA_DIRECT_WQE_MAX_BLOCKS:-$profile_direct_wqe_max_blocks}"
-direct_wqe_latency="${OPENURMA_DIRECT_WQE_LATENCY:-$profile_direct_wqe_latency}"
-sq_fetch_latency="${OPENURMA_SQ_FETCH_LATENCY:-$profile_sq_fetch_latency}"
-sq_wqebb_latency="${OPENURMA_SQ_WQEBB_LATENCY:-$profile_sq_wqebb_latency}"
-payload_dma_latency="${OPENURMA_PAYLOAD_DMA_LATENCY:-$profile_payload_dma_latency}"
-payload_dma_rate_gbps="${OPENURMA_PAYLOAD_DMA_RATE_GBPS:-$profile_payload_dma_rate_gbps}"
-udma_poll_interval="${OPENURMA_UDMA_POLL_INTERVAL:-$profile_udma_poll_interval}"
-external_udma_poll_interval="${OPENURMA_UDMA_HOST_POLL_INTERVAL:-1us}"
-external_udma_host_latency_ns="${OPENURMA_UDMA_HOST_LATENCY_NS:-$sync_quantum_ns}"
-udma_iotlb_entries="${OPENURMA_UDMA_IOTLB_ENTRIES:-$profile_udma_iotlb_entries}"
-dma_max_outstanding="${OPENURMA_DMA_MAX_OUTSTANDING:-$profile_dma_max_outstanding}"
-provider="${OPENURMA_PROVIDER:-official}"
+cpu_mode="${UBSIM_CPU_MODE:-${UBSIM_DUAL_CPU:-$profile_cpu_mode}}"
+m5ops_base="${UBSIM_M5OPS_BASE:-0x10010000}"
+cpu_freq="${UBSIM_CPU_FREQ:-${UBSIM_DUAL_CPU_FREQ:-$profile_cpu_freq}}"
+num_cpus="${UBSIM_NUM_CPUS:-${UBSIM_DUAL_NUM_CPUS:-$profile_num_cpus}}"
+benchmark_cpu="${UBSIM_BENCHMARK_CPU:-$profile_benchmark_cpu}"
+o3_width="${UBSIM_O3_WIDTH:-$profile_o3_width}"
+o3_rob_entries="${UBSIM_O3_ROB_ENTRIES:-$profile_o3_rob_entries}"
+o3_iq_entries="${UBSIM_O3_IQ_ENTRIES:-$profile_o3_iq_entries}"
+o3_lq_entries="${UBSIM_O3_LQ_ENTRIES:-$profile_o3_lq_entries}"
+o3_sq_entries="${UBSIM_O3_SQ_ENTRIES:-$profile_o3_sq_entries}"
+o3_load_ports="${UBSIM_O3_LOAD_PORTS:-$profile_o3_load_ports}"
+o3_store_ports="${UBSIM_O3_STORE_PORTS:-$profile_o3_store_ports}"
+o3_fetch_buffer_bytes="${UBSIM_O3_FETCH_BUFFER_BYTES:-$profile_o3_fetch_buffer_bytes}"
+o3_fetch_queue_entries="${UBSIM_O3_FETCH_QUEUE_ENTRIES:-$profile_o3_fetch_queue_entries}"
+o3_phys_int_regs="${UBSIM_O3_PHYS_INT_REGS:-$profile_o3_phys_int_regs}"
+o3_phys_float_regs="${UBSIM_O3_PHYS_FLOAT_REGS:-$profile_o3_phys_float_regs}"
+o3_phys_vec_regs="${UBSIM_O3_PHYS_VEC_REGS:-$profile_o3_phys_vec_regs}"
+o3_phys_vec_pred_regs="${UBSIM_O3_PHYS_VEC_PRED_REGS:-$profile_o3_phys_vec_pred_regs}"
+o3_phys_mat_regs="${UBSIM_O3_PHYS_MAT_REGS:-$profile_o3_phys_mat_regs}"
+cache_line_size="${UBSIM_CACHE_LINE_SIZE:-$profile_cache_line_size}"
+last_cache_level="${UBSIM_LAST_CACHE_LEVEL:-$profile_last_cache_level}"
+l1i_size="${UBSIM_L1I_SIZE:-$profile_l1i_size}"
+l1i_assoc="${UBSIM_L1I_ASSOC:-$profile_l1i_assoc}"
+l1i_latency="${UBSIM_L1I_LATENCY:-$profile_l1i_latency}"
+l1i_mshrs="${UBSIM_L1I_MSHRS:-$profile_l1i_mshrs}"
+l1i_targets="${UBSIM_L1I_TARGETS:-$profile_l1i_targets}"
+l1i_write_buffers="${UBSIM_L1I_WRITE_BUFFERS:-$profile_l1i_write_buffers}"
+l1d_size="${UBSIM_L1D_SIZE:-$profile_l1d_size}"
+l1d_assoc="${UBSIM_L1D_ASSOC:-$profile_l1d_assoc}"
+l1d_latency="${UBSIM_L1D_LATENCY:-$profile_l1d_latency}"
+l1d_mshrs="${UBSIM_L1D_MSHRS:-$profile_l1d_mshrs}"
+l1d_targets="${UBSIM_L1D_TARGETS:-$profile_l1d_targets}"
+l1d_write_buffers="${UBSIM_L1D_WRITE_BUFFERS:-$profile_l1d_write_buffers}"
+l2_size="${UBSIM_L2_SIZE:-$profile_l2_size}"
+l2_assoc="${UBSIM_L2_ASSOC:-$profile_l2_assoc}"
+l2_latency="${UBSIM_L2_LATENCY:-$profile_l2_latency}"
+l2_mshrs="${UBSIM_L2_MSHRS:-$profile_l2_mshrs}"
+l2_targets="${UBSIM_L2_TARGETS:-$profile_l2_targets}"
+l2_write_buffers="${UBSIM_L2_WRITE_BUFFERS:-$profile_l2_write_buffers}"
+l3_size="${UBSIM_L3_SIZE:-$profile_l3_size}"
+l3_assoc="${UBSIM_L3_ASSOC:-$profile_l3_assoc}"
+l3_latency="${UBSIM_L3_LATENCY:-$profile_l3_latency}"
+l3_mshrs="${UBSIM_L3_MSHRS:-$profile_l3_mshrs}"
+l3_targets="${UBSIM_L3_TARGETS:-$profile_l3_targets}"
+l3_write_buffers="${UBSIM_L3_WRITE_BUFFERS:-$profile_l3_write_buffers}"
+fabric_freq="${UBSIM_FABRIC_FREQ:-$profile_fabric_freq}"
+fabric_width_bytes="${UBSIM_FABRIC_WIDTH_BYTES:-$profile_fabric_width_bytes}"
+coherent_bus_frontend_latency="${UBSIM_COHERENT_BUS_FRONTEND_LATENCY:-$profile_coherent_bus_frontend_latency}"
+coherent_bus_forward_latency="${UBSIM_COHERENT_BUS_FORWARD_LATENCY:-$profile_coherent_bus_forward_latency}"
+coherent_bus_response_latency="${UBSIM_COHERENT_BUS_RESPONSE_LATENCY:-$profile_coherent_bus_response_latency}"
+coherent_bus_snoop_response_latency="${UBSIM_COHERENT_BUS_SNOOP_RESPONSE_LATENCY:-$profile_coherent_bus_snoop_response_latency}"
+coherent_bus_header_latency="${UBSIM_COHERENT_BUS_HEADER_LATENCY:-$profile_coherent_bus_header_latency}"
+memory_bus_frontend_latency="${UBSIM_MEMORY_BUS_FRONTEND_LATENCY:-$profile_memory_bus_frontend_latency}"
+memory_bus_forward_latency="${UBSIM_MEMORY_BUS_FORWARD_LATENCY:-$profile_memory_bus_forward_latency}"
+memory_bus_response_latency="${UBSIM_MEMORY_BUS_RESPONSE_LATENCY:-$profile_memory_bus_response_latency}"
+memory_bus_snoop_response_latency="${UBSIM_MEMORY_BUS_SNOOP_RESPONSE_LATENCY:-$profile_memory_bus_snoop_response_latency}"
+memory_bus_header_latency="${UBSIM_MEMORY_BUS_HEADER_LATENCY:-$profile_memory_bus_header_latency}"
+core_bus_snoop_filter_capacity="${UBSIM_CORE_BUS_SNOOP_FILTER_CAPACITY:-$profile_core_bus_snoop_filter_capacity}"
+l3_bus_snoop_filter_capacity="${UBSIM_L3_BUS_SNOOP_FILTER_CAPACITY:-$profile_l3_bus_snoop_filter_capacity}"
+membus_snoop_filter_capacity="${UBSIM_MEMBUS_SNOOP_FILTER_CAPACITY:-$profile_membus_snoop_filter_capacity}"
+io_bus_frontend_latency="${UBSIM_IO_BUS_FRONTEND_LATENCY:-$profile_io_bus_frontend_latency}"
+io_bus_forward_latency="${UBSIM_IO_BUS_FORWARD_LATENCY:-$profile_io_bus_forward_latency}"
+io_bus_response_latency="${UBSIM_IO_BUS_RESPONSE_LATENCY:-$profile_io_bus_response_latency}"
+io_bus_header_latency="${UBSIM_IO_BUS_HEADER_LATENCY:-$profile_io_bus_header_latency}"
+io_cache_size="${UBSIM_IO_CACHE_SIZE:-$profile_io_cache_size}"
+io_cache_assoc="${UBSIM_IO_CACHE_ASSOC:-$profile_io_cache_assoc}"
+io_cache_latency="${UBSIM_IO_CACHE_LATENCY:-$profile_io_cache_latency}"
+io_cache_mshrs="${UBSIM_IO_CACHE_MSHRS:-$profile_io_cache_mshrs}"
+io_cache_targets="${UBSIM_IO_CACHE_TARGETS:-$profile_io_cache_targets}"
+io_cache_write_buffers="${UBSIM_IO_CACHE_WRITE_BUFFERS:-$profile_io_cache_write_buffers}"
+mem_size="${UBSIM_DUAL_MEM_SIZE:-$profile_mem_size}"
+guest_mem_limit="${UBSIM_GUEST_MEM_LIMIT:-$profile_guest_mem_limit}"
+mem_type="${UBSIM_MEM_TYPE:-$profile_mem_type}"
+mem_channels="${UBSIM_MEM_CHANNELS:-$profile_mem_channels}"
+mem_channels_intlv="${UBSIM_MEM_CHANNELS_INTLV:-$profile_mem_channels_intlv}"
+mem_addr_mapping="${UBSIM_MEM_ADDR_MAPPING:-$profile_mem_addr_mapping}"
+mem_channel_xor_low_bit="${UBSIM_MEM_CHANNEL_XOR_LOW_BIT:-$profile_mem_channel_xor_low_bit}"
+mem_ranks="${UBSIM_MEM_RANKS:-$profile_mem_ranks}"
+mem_read_buffer_size="${UBSIM_MEM_READ_BUFFER_SIZE:-$profile_mem_read_buffer_size}"
+mem_write_buffer_size="${UBSIM_MEM_WRITE_BUFFER_SIZE:-$profile_mem_write_buffer_size}"
+mem_page_policy="${UBSIM_MEM_PAGE_POLICY:-$profile_mem_page_policy}"
+mem_max_accesses_per_row="${UBSIM_MEM_MAX_ACCESSES_PER_ROW:-$profile_mem_max_accesses_per_row}"
+mem_sched_policy="${UBSIM_MEM_SCHED_POLICY:-$profile_mem_sched_policy}"
+mem_write_high_thresh="${UBSIM_MEM_WRITE_HIGH_THRESH:-$profile_mem_write_high_thresh}"
+mem_write_low_thresh="${UBSIM_MEM_WRITE_LOW_THRESH:-$profile_mem_write_low_thresh}"
+mem_min_writes_per_switch="${UBSIM_MEM_MIN_WRITES_PER_SWITCH:-$profile_mem_min_writes_per_switch}"
+mem_min_reads_per_switch="${UBSIM_MEM_MIN_READS_PER_SWITCH:-$profile_mem_min_reads_per_switch}"
+mem_ctrl_frontend_latency="${UBSIM_MEM_CTRL_FRONTEND_LATENCY:-$profile_mem_ctrl_frontend_latency}"
+mem_ctrl_backend_latency="${UBSIM_MEM_CTRL_BACKEND_LATENCY:-$profile_mem_ctrl_backend_latency}"
+mem_ctrl_command_window="${UBSIM_MEM_CTRL_COMMAND_WINDOW:-$profile_mem_ctrl_command_window}"
+ub_port_count="${UBSIM_UB_PORT_COUNT:-$profile_ub_port_count}"
+network_backend="${UBSIM_NETWORK_BACKEND:-modular-ns3ub}"
+ub_transport="${UBSIM_UB_TRANSPORT:-switch-adapter}"
+peer_topology="${UBSIM_PEER_TOPOLOGY:-$profile_peer_topology}"
+peer_port_map="${UBSIM_PEER_PORT_MAP:-$profile_peer_port_map}"
+peer_port_selection="${UBSIM_PEER_PORT_SELECTION:-$profile_peer_port_selection}"
+peer_latency_ns="${UBSIM_PEER_LATENCY_NS:-100}"
+sync_quantum_ns="${UBSIM_SYNC_QUANTUM_NS:-$peer_latency_ns}"
+sync_request="${UBSIM_SYNC:-auto}"
+sync_mode="${UBSIM_SYNC_MODE:-adapter-local}"
+peer_link_rate_gbps="${UBSIM_PEER_LINK_RATE_GBPS:-$profile_peer_link_rate_gbps}"
+peer_serialization_stages="${UBSIM_PEER_SERIALIZATION_STAGES:-$profile_peer_serialization_stages}"
+peer_switch_delay="${UBSIM_PEER_SWITCH_DELAY:-$profile_peer_switch_delay}"
+peer_link_overhead_bytes="${UBSIM_PEER_LINK_OVERHEAD_BYTES:-$profile_peer_link_overhead_bytes}"
+sq_control_bytes="${UBSIM_SQ_CONTROL_BYTES:-$profile_sq_control_bytes}"
+wqebb_bytes="${UBSIM_WQEBB_BYTES:-$profile_wqebb_bytes}"
+sq_sge_bytes="${UBSIM_SQ_SGE_BYTES:-$profile_sq_sge_bytes}"
+direct_wqe_max_blocks="${UBSIM_DIRECT_WQE_MAX_BLOCKS:-$profile_direct_wqe_max_blocks}"
+direct_wqe_latency="${UBSIM_DIRECT_WQE_LATENCY:-$profile_direct_wqe_latency}"
+sq_fetch_latency="${UBSIM_SQ_FETCH_LATENCY:-$profile_sq_fetch_latency}"
+sq_wqebb_latency="${UBSIM_SQ_WQEBB_LATENCY:-$profile_sq_wqebb_latency}"
+payload_dma_latency="${UBSIM_PAYLOAD_DMA_LATENCY:-$profile_payload_dma_latency}"
+payload_dma_rate_gbps="${UBSIM_PAYLOAD_DMA_RATE_GBPS:-$profile_payload_dma_rate_gbps}"
+udma_poll_interval="${UBSIM_UDMA_POLL_INTERVAL:-$profile_udma_poll_interval}"
+external_udma_poll_interval="${UBSIM_UDMA_HOST_POLL_INTERVAL:-1us}"
+external_udma_host_latency_ns="${UBSIM_UDMA_HOST_LATENCY_NS:-$sync_quantum_ns}"
+udma_iotlb_entries="${UBSIM_UDMA_IOTLB_ENTRIES:-$profile_udma_iotlb_entries}"
+dma_max_outstanding="${UBSIM_DMA_MAX_OUTSTANDING:-$profile_dma_max_outstanding}"
+provider="${UBSIM_PROVIDER:-official}"
 
 [[ -n "$cli_cpu_mode" ]] && cpu_mode=$cli_cpu_mode
 [[ -n "$cli_m5ops_base" ]] && m5ops_base=$cli_m5ops_base
@@ -1039,12 +1039,12 @@ provider="${OPENURMA_PROVIDER:-official}"
 # CLI/environment poll value, but never accidentally pair KVM with the generic
 # 10-ns idle fallback inherited from another profile.
 if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]] &&
-   [[ -z "$cli_udma_poll_interval" && -z "${OPENURMA_UDMA_POLL_INTERVAL+x}" ]]; then
+   [[ -z "$cli_udma_poll_interval" && -z "${UBSIM_UDMA_POLL_INTERVAL+x}" ]]; then
     udma_poll_interval=1ms
 fi
 
 default_dma_backend=udma
-dma_backend="${OPENURMA_DMA_BACKEND:-$default_dma_backend}"
+dma_backend="${UBSIM_DMA_BACKEND:-$default_dma_backend}"
 kvm_host_cpu_contract=not_applicable
 if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]]; then
     kvm_host_cpu_contract=official_provider_host_dependent_ksva
@@ -1116,7 +1116,7 @@ case "$sync_request" in
     on|1|true|yes) sync_enabled=1; lifecycle_sync_enabled=0 ;;
     roi|lifecycle) sync_enabled=0; lifecycle_sync_enabled=1 ;;
     off|0|false|no) sync_enabled=0; lifecycle_sync_enabled=0 ;;
-    *) die "OPENURMA_SYNC must be auto, on, roi, or off" ;;
+    *) die "UBSIM_SYNC must be auto, on, roi, or off" ;;
 esac
 if (( lifecycle_sync_enabled )); then
     [[ "$network_backend" == modular-ns3ub ]] ||
@@ -1129,37 +1129,37 @@ else
 fi
 
 lab_host="$(cd "$script_dir/../.." && pwd)"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$lab_host")}"
+lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$lab_host")}"
 checkpoint_root=""
 if [[ -n "$restore_checkpoint" ]]; then
     case "$restore_checkpoint" in
         *[!A-Za-z0-9._-]*|.|..) die "checkpoint name must use letters, digits, '.', '_' or '-'" ;;
     esac
     checkpoint_root="$lab/checkpoints/$restore_checkpoint"
-    ou_exec test -r "$checkpoint_root/run-manifest.txt" ||
+    ubsim_exec test -r "$checkpoint_root/run-manifest.txt" ||
         die "checkpoint does not exist: checkpoints/$restore_checkpoint"
 fi
-container="$OPENURMA_CONTAINER"
-gem5="${OPENURMA_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
-m5_path="${OPENURMA_M5_PATH:-$lab/system}"
-kernel="${OPENURMA_KERNEL:-$lab/artifacts/kernel/vmlinux}"
+container="$UBSIM_CONTAINER"
+gem5="${UBSIM_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
+m5_path="${UBSIM_M5_PATH:-$lab/system}"
+kernel="${UBSIM_KERNEL:-$lab/artifacts/kernel/vmlinux}"
 default_initrd="$lab/out/official-udma.cpio.gz"
-initrd="${OPENURMA_INITRD:-$default_initrd}"
-config="${OPENURMA_CONFIG:-$lab/configs/arm64_fs.py}"
-ns3ub_root="${OPENURMA_NS3UB_ROOT:-$lab/sources/ns-3-ub}"
-ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-net-adapter}"
-runtime_arch="${OPENURMA_RUNTIME_ARCH:-$(uname -m)}"
+initrd="${UBSIM_INITRD:-$default_initrd}"
+config="${UBSIM_CONFIG:-$lab/configs/arm64_fs.py}"
+ns3ub_root="${UBSIM_NS3UB_ROOT:-$lab/sources/ns-3-ub}"
+ub_switch_binary="${UBSIM_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-net-adapter}"
+runtime_arch="${UBSIM_RUNTIME_ARCH:-$(uname -m)}"
 [[ "$runtime_arch" != arm64 ]] || runtime_arch=aarch64
-udma_device_binary="${OPENURMA_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
+udma_device_binary="${UBSIM_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
 ub_switch_ready_pattern='\[NS3_UB_NET\] connected'
-run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
-tap0="${OPENURMA_DUAL_TAP0:-/tmp/openurma-dual.eth0.sock}"
-tap1="${OPENURMA_DUAL_TAP1:-/tmp/openurma-dual.eth1.sock}"
-uart0="${OPENURMA_DUAL_UART0:-3460}"
-uart1="${OPENURMA_DUAL_UART1:-3470}"
-pipe_data="${OPENURMA_PIPE_DATA:-0}"
-packet_trace="${OPENURMA_TRACE_PACKETS:-0}"
-oob_link_speed="${OPENURMA_OOB_LINK_SPEED:-100Gbps}"
+run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"
+tap0="${UBSIM_DUAL_TAP0:-/tmp/ubsim-dual.eth0.sock}"
+tap1="${UBSIM_DUAL_TAP1:-/tmp/ubsim-dual.eth1.sock}"
+uart0="${UBSIM_DUAL_UART0:-3460}"
+uart1="${UBSIM_DUAL_UART1:-3470}"
+pipe_data="${UBSIM_PIPE_DATA:-0}"
+packet_trace="${UBSIM_TRACE_PACKETS:-0}"
+oob_link_speed="${UBSIM_OOB_LINK_SPEED:-100Gbps}"
 
 uart_stride=$((uart1 - uart0))
 (( uart_stride > 0 )) || die "node1 UART must be greater than node0 UART"
@@ -1171,16 +1171,16 @@ node_uart() {
 node_tap_path() {
     if (( $1 == 0 )); then echo "$tap0";
     elif (( $1 == 1 )); then echo "$tap1";
-    else echo "/tmp/openurma-dual.eth$1.sock"; fi
+    else echo "/tmp/ubsim-dual.eth$1.sock"; fi
 }
 node_host_socket_path() {
-    echo "/tmp/openurma-dual.node$1.ub-host.sock"
+    echo "/tmp/ubsim-dual.node$1.ub-host.sock"
 }
 node_net_socket_path() {
-    echo "/tmp/openurma-dual.node$1.ub-net.sock"
+    echo "/tmp/ubsim-dual.node$1.ub-net.sock"
 }
 node_udma_shm_path() {
-    echo "/tmp/openurma-dual.node$1.udma.shm"
+    echo "/tmp/ubsim-dual.node$1.udma.shm"
 }
 [[ "$node_count" =~ ^[0-9]+$ ]] &&
     (( node_count >= 2 && node_count <= 8 )) ||
@@ -1221,7 +1221,7 @@ case "$provider" in
 esac
 case "$dma_backend" in
     udma) ;;
-    *) die "OPENURMA_DMA_BACKEND must be udma" ;;
+    *) die "UBSIM_DMA_BACKEND must be udma" ;;
 esac
 case "$cpu_freq" in
     ""|*[!0-9A-Za-z.+_-]*) die "invalid CPU frequency '$cpu_freq'" ;;
@@ -1412,7 +1412,7 @@ fi
 print_resolved_config() {
     cat <<EOF
 manifest_version=1
-execution_mode=$OPENURMA_EXECUTION_MODE
+execution_mode=$UBSIM_EXECUTION_MODE
 node_count=$node_count
 routing=dynamic_eid
 profile=$profile
@@ -1580,14 +1580,14 @@ if (( print_config )); then
     exit 0
 fi
 
-ou_runtime_start
+ubsim_runtime_start
 
 for path in "$gem5" "$kernel" "$initrd" "$config" \
             "$lab/tools/run-background.sh"; do
-    ou_exec test -f "$path" || die "missing in runtime environment: $path"
+    ubsim_exec test -f "$path" || die "missing in runtime environment: $path"
 done
 if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]]; then
-    ou_exec bash "$lab/tools/kvm-preflight.sh" "$gem5"
+    ubsim_exec bash "$lab/tools/kvm-preflight.sh" "$gem5"
 fi
 
 # The default image records both its own digest and the exact paths/digests of
@@ -1595,10 +1595,10 @@ fi
 # Custom initramfs paths remain the caller's own contract.
 if [[ "$initrd" == "$lab/out/official-udma.cpio.gz" ]]; then
     image_manifest="${initrd%.cpio.gz}.manifest.txt"
-    ou_exec test -r "$image_manifest" ||
+    ubsim_exec test -r "$image_manifest" ||
         die "missing default initramfs manifest: $image_manifest"
     image_manifest_value() {
-        ou_exec awk -F= -v key="$1" \
+        ubsim_exec awk -F= -v key="$1" \
             '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$image_manifest"
     }
     verify_image_hash() {
@@ -1607,14 +1607,14 @@ if [[ "$initrd" == "$lab/out/official-udma.cpio.gz" ]]; then
         expected_hash=$(image_manifest_value "$hash_key")
         [[ -n "$expected_hash" ]] ||
             die "initramfs manifest lacks $hash_key; rebuild it first"
-        actual_hash=$(ou_exec sha256sum "$image_input" | awk '{print $1}')
+        actual_hash=$(ubsim_exec sha256sum "$image_input" | awk '{print $1}')
         [[ "$actual_hash" == "$expected_hash" ]] ||
             die "hash mismatch for $image_input; rebuild the initramfs first"
     }
     verify_image_hash initramfs_sha256 "$initrd"
     verify_image_hash kernel_sha256 "$kernel"
     image_components=(
-        overlay_init ou_cpu_switch ou_lat_server ou_lat_client
+        overlay_init ubsim_cpu_switch ubsim_lat_server ubsim_lat_client
         urma_perftest stock_udma_provider ummu_library
         ipv6_module ubcore_module uburma_module
         dist_sync_source cpu_switch_source m5ops_dispatch_source
@@ -1626,18 +1626,18 @@ if [[ "$initrd" == "$lab/out/official-udma.cpio.gz" ]]; then
         image_input=$(image_manifest_value "${image_component}_path")
         [[ -n "$image_input" ]] ||
             die "initramfs manifest lacks ${image_component}_path; rebuild it first"
-        ou_exec test -e "$image_input" ||
+        ubsim_exec test -e "$image_input" ||
             die "recorded initramfs input is missing: $image_input"
         verify_image_hash "${image_component}_sha256" "$image_input"
     done
 fi
 for resource in boot.arm64 boot.arm; do
-    ou_exec test -f "$m5_path/binaries/$resource" ||
+    ubsim_exec test -f "$m5_path/binaries/$resource" ||
         die "missing gem5 ARM resource: $m5_path/binaries/$resource"
 done
 
 pid_is_live() {
-    ou_exec bash -c '
+    ubsim_exec bash -c '
         pidfile=$1
         expected=$2
         test -r "$pidfile" || exit 1
@@ -1649,7 +1649,7 @@ pid_is_live() {
 }
 
 find_process_with_argument() {
-    ou_exec bash -c '
+    ubsim_exec bash -c '
         expected=$1
         for cmdline in /proc/[0-9]*/cmdline; do
             test -r "$cmdline" || continue
@@ -1694,13 +1694,13 @@ fi
 case "$run_root" in
     ""|/|.) die "unsafe run output directory: '$run_root'" ;;
 esac
-if ou_exec test -d "$run_root"; then
+if ubsim_exec test -d "$run_root"; then
     # Completed run directories are reproducible output, not durable evidence.
     # A benchmark that must be retained should use its --raw-output/result
     # option before the next launch. Keeping only the active run prevents each
     # restart from accumulating another full gem5 output tree.
     # Remove only names owned by this launcher. Never recursively remove an
-    # arbitrary OPENURMA_DUAL_OUT root supplied by the caller.
+    # arbitrary UBSIM_DUAL_OUT root supplied by the caller.
     stale_run_paths=(
         "$run_root/switch" "$run_root/ub-switch" "$run_root/oob-switch"
         "$run_root/udma-node0" "$run_root/udma-node1"
@@ -1712,7 +1712,7 @@ if ou_exec test -d "$run_root"; then
         "$run_root/node6" "$run_root/node7"
         "$run_root/run-manifest.txt" "$run_root/sync.ready"
     )
-    ou_exec rm -rf -- "${stale_run_paths[@]}"
+    ubsim_exec rm -rf -- "${stale_run_paths[@]}"
     echo "Cleared inactive previous run output under: $run_root"
 fi
 run_directories=("$run_root/ub-switch" "$run_root/oob-switch")
@@ -1727,14 +1727,14 @@ for ((node = 0; node < node_count; ++node)); do
     net_socket_paths+=("$(node_net_socket_path "$node")")
     udma_shm_paths+=("$(node_udma_shm_path "$node")")
 done
-ou_exec mkdir -p "${run_directories[@]}"
-print_resolved_config | ou_exec_i sh -c \
+ubsim_exec mkdir -p "${run_directories[@]}"
+print_resolved_config | ubsim_exec_i sh -c \
     'umask 022; tee "$1" >/dev/null' _ "$run_root/run-manifest.txt"
-ou_exec rm -f "${tap_paths[@]}" "${host_socket_paths[@]}" \
+ubsim_exec rm -f "${tap_paths[@]}" "${host_socket_paths[@]}" \
     "${net_socket_paths[@]}" "${udma_shm_paths[@]}"
-ou_exec test -x "$ub_switch_binary" ||
+ubsim_exec test -x "$ub_switch_binary" ||
     die "missing ns-3 UB-NET adapter: $ub_switch_binary; run './lab build ns3ub'"
-ou_exec test -x "$udma_device_binary" ||
+ubsim_exec test -x "$udma_device_binary" ||
     die "missing standalone UDMA device: $udma_device_binary; run './lab build udma-device'"
     # UDMA owns both sockets and therefore starts first as the listener.  Its
     # two-interface Establish waits until the host and fabric peers exist, so
@@ -1760,7 +1760,7 @@ ou_exec test -x "$udma_device_binary" ||
             udma_args+=(--state-in "$checkpoint_root/udma-node$node.state")
         fi
         udma_args+=(--state-out "$run_root/udma-node$node/state.bin")
-        ou_exec_detached \
+        ubsim_exec_detached \
             bash "$lab/tools/run-background.sh" \
             "$run_root/udma-node$node/udma.pid" \
             "$run_root/udma-node$node/udma.log" \
@@ -1768,10 +1768,10 @@ ou_exec test -x "$udma_device_binary" ||
     done
     for node_socket in "${host_socket_paths[@]}" "${net_socket_paths[@]}"; do
         for _ in $(seq 1 100); do
-            ou_exec test -S "$node_socket" 2>/dev/null && break
+            ubsim_exec test -S "$node_socket" 2>/dev/null && break
             sleep 0.05
         done
-        ou_exec test -S "$node_socket" ||
+        ubsim_exec test -S "$node_socket" ||
             die "standalone UDMA socket did not appear: $node_socket"
     done
 
@@ -1794,7 +1794,7 @@ ou_exec test -x "$udma_device_binary" ||
         ub_switch_args+=(--endpoint
             "${net_socket_paths[$node]},$((0x100 + node))")
     done
-    ou_exec_detached \
+    ubsim_exec_detached \
         bash "$lab/tools/run-background.sh" \
         "$run_root/ub-switch/gem5.pid" "$run_root/ub-switch/gem5.log" \
         "$ub_switch_binary" "${ub_switch_args[@]}"
@@ -1812,20 +1812,20 @@ launch_node() {
     if [[ -n "$checkpoint_root" ]]; then
         sync_args+=(--restore-from="$checkpoint_root/node$node-cpt")
     fi
-    ou_exec_detached_env \
+    ubsim_exec_detached_env \
         "M5_PATH=$m5_path" \
-        "OPENURMA_PIPE_DATA=$pipe_data" \
-        "OPENURMA_TRACE_PACKETS=$packet_trace" \
-        "OPENURMA_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
-        "OPENURMA_LIFECYCLE_SYNC=$lifecycle_sync_enabled" \
-        "OPENURMA_EXIT_AFTER_CHECKPOINT=1" \
-        "OPENURMA_UDMA_HOST_SOCKET=$external_udma_socket" \
-        "OPENURMA_UDMA_HOST_POLL_INTERVAL=$external_udma_poll_interval" \
-        "OPENURMA_UDMA_HOST_SYNC=$sync_enabled" \
-        "OPENURMA_UDMA_HOST_LIFECYCLE_SYNC=$lifecycle_sync_enabled" \
-        "OPENURMA_UDMA_HOST_LINK_LATENCY=${external_udma_host_latency_ns}ns" \
-        "OPENURMA_UDMA_HOST_SYNC_INTERVAL=${sync_quantum_ns}ns" \
-        "OPENURMA_UDMA_HOST_PIO_LATENCY=$((2 * external_udma_host_latency_ns))ns" \
+        "UBSIM_PIPE_DATA=$pipe_data" \
+        "UBSIM_TRACE_PACKETS=$packet_trace" \
+        "UBSIM_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
+        "UBSIM_LIFECYCLE_SYNC=$lifecycle_sync_enabled" \
+        "UBSIM_EXIT_AFTER_CHECKPOINT=1" \
+        "UBSIM_UDMA_HOST_SOCKET=$external_udma_socket" \
+        "UBSIM_UDMA_HOST_POLL_INTERVAL=$external_udma_poll_interval" \
+        "UBSIM_UDMA_HOST_SYNC=$sync_enabled" \
+        "UBSIM_UDMA_HOST_LIFECYCLE_SYNC=$lifecycle_sync_enabled" \
+        "UBSIM_UDMA_HOST_LINK_LATENCY=${external_udma_host_latency_ns}ns" \
+        "UBSIM_UDMA_HOST_SYNC_INTERVAL=${sync_quantum_ns}ns" \
+        "UBSIM_UDMA_HOST_PIO_LATENCY=$((2 * external_udma_host_latency_ns))ns" \
         -- \
         bash "$lab/tools/run-background.sh" "$out/gem5.pid" "$out/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$out" "$config" \
@@ -1916,7 +1916,7 @@ launch_node() {
         --eth-tap-socket="$tap" \
         --eth-link-speed="$oob_link_speed" --eth-link-delay="${peer_latency_ns}ns" \
         --terminal-port="$uart" --eth-mac="$mac" \
-        --extra-cmdline="openurma_node=$node openurma_provider=$provider"
+        --extra-cmdline="ubsim_node=$node ubsim_provider=$provider"
 }
 
 for ((node = 0; node < node_count; ++node)); do
@@ -1926,13 +1926,13 @@ for ((node = 0; node < node_count; ++node)); do
 done
 
 for _ in $(seq 1 200); do
-    if ou_exec grep -q "$ub_switch_ready_pattern" \
+    if ubsim_exec grep -q "$ub_switch_ready_pattern" \
         "$run_root/ub-switch/gem5.log" 2>/dev/null; then
         break
     fi
     sleep 0.05
 done
-ou_exec grep -q "$ub_switch_ready_pattern" \
+ubsim_exec grep -q "$ub_switch_ready_pattern" \
     "$run_root/ub-switch/gem5.log" 2>/dev/null ||
     die "modular ns-3 fabric did not connect; inspect UB switch, UDMA, and node logs"
 
@@ -1943,7 +1943,7 @@ oob_endpoints=()
 for tap in "${tap_paths[@]}"; do
     oob_endpoints+=("unix:$tap")
 done
-ou_exec_detached \
+ubsim_exec_detached \
     bash "$lab/tools/run-background.sh" \
     "$run_root/oob-switch/relay.pid" "$run_root/oob-switch/relay.log" \
     python3 "$lab/tools/ethernet_relay.py" "${oob_endpoints[@]}"
@@ -1976,6 +1976,6 @@ echo "  UB routing: destination EID -> registered endpoint adapter"
 echo "  OOB control network: one learning Ethernet switch across all nodes"
 echo
 echo "After all shells are ready, detach any existing UART clients and run:"
-echo "  $lab_host/lab --runtime $OPENURMA_EXECUTION_MODE sync"
+echo "  $lab_host/lab --runtime $UBSIM_EXECUTION_MODE sync"
 echo
-echo "Attach node N with: $lab_host/lab --runtime $OPENURMA_EXECUTION_MODE attach N"
+echo "Attach node N with: $lab_host/lab --runtime $UBSIM_EXECUTION_MODE attach N"

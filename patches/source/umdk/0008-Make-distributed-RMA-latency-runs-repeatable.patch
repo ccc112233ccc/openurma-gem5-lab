@@ -98,7 +98,7 @@ index e4d4a86..b41174b 100644
      /*
 @@ -1650,8 +1665,25 @@ int run_read_lat(perftest_context_t *ctx, perftest_config_t *cfg)
       * served the final READ response.  This coordination is enabled only by
-      * OPENURMA_DIST_SYNC and leaves the ordinary perftest protocol unchanged.
+      * UBSIM_DIST_SYNC and leaves the ordinary perftest protocol unchanged.
       */
 +    /*
 +     * WR construction can fault in newly allocated provider pages.  Keep it

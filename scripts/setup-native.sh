@@ -7,9 +7,9 @@ lab_root="$(cd "$script_dir/.." && pwd)"
 jobs="${JOBS:-2}"
 sources_only=0
 install_deps=1
-target_arch="${OPENURMA_TARGET_ARCH:-arm64}"
-build_mode="${OPENURMA_BUILD_MODE:-auto}"
-arm64_sysroot="${OPENURMA_ARM64_SYSROOT:-}"
+target_arch="${UBSIM_TARGET_ARCH:-arm64}"
+build_mode="${UBSIM_BUILD_MODE:-auto}"
+arm64_sysroot="${UBSIM_ARM64_SYSROOT:-}"
 
 usage() {
     cat <<'EOF'
@@ -67,12 +67,12 @@ fi
 
 (( install_deps == 0 )) || "$script_dir/install-ubuntu-deps.sh"
 
-export OPENURMA_EXECUTION_MODE=native
-export OPENURMA_LAB_ROOT="${OPENURMA_LAB_ROOT:-$lab_root}"
-export KSRC="${KSRC:-$OPENURMA_LAB_ROOT/oe66}"
+export UBSIM_EXECUTION_MODE=native
+export UBSIM_LAB_ROOT="${UBSIM_LAB_ROOT:-$lab_root}"
+export KSRC="${KSRC:-$UBSIM_LAB_ROOT/oe66}"
 export JOBS="$jobs"
-export OPENURMA_TARGET_ARCH="$target_arch"
-export OPENURMA_BUILD_MODE="$build_mode"
+export UBSIM_TARGET_ARCH="$target_arch"
+export UBSIM_BUILD_MODE="$build_mode"
 
 echo "[native-setup] fetching pinned source trees"
 "$script_dir/fetch-sources.sh"
@@ -83,17 +83,17 @@ fi
 
 if [[ "$target_arch" == arm64 && "$build_mode" == cross ]]; then
     if [[ -z "$arm64_sysroot" ]]; then
-        arm64_sysroot="$OPENURMA_LAB_ROOT/artifacts/sysroots/ubuntu-22.04-arm64"
-        export OPENURMA_ARM64_SYSROOT="$arm64_sysroot"
+        arm64_sysroot="$UBSIM_LAB_ROOT/artifacts/sysroots/ubuntu-22.04-arm64"
+        export UBSIM_ARM64_SYSROOT="$arm64_sysroot"
         "$script_dir/build/prepare-arm64-sysroot.sh"
     else
-        export OPENURMA_ARM64_SYSROOT="$arm64_sysroot"
+        export UBSIM_ARM64_SYSROOT="$arm64_sysroot"
     fi
-    [[ -x "$OPENURMA_ARM64_SYSROOT/bin/busybox" ]] || {
-        echo "setup-native.sh: ARM64 sysroot lacks /bin/busybox: $OPENURMA_ARM64_SYSROOT" >&2
+    [[ -x "$UBSIM_ARM64_SYSROOT/bin/busybox" ]] || {
+        echo "setup-native.sh: ARM64 sysroot lacks /bin/busybox: $UBSIM_ARM64_SYSROOT" >&2
         exit 2
     }
-    echo "[native-setup] direct x86_64 -> ARM64 cross-build using $OPENURMA_ARM64_SYSROOT"
+    echo "[native-setup] direct x86_64 -> ARM64 cross-build using $UBSIM_ARM64_SYSROOT"
 fi
 
 if [[ "$target_arch" == x86_64 ]]; then

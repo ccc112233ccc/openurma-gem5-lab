@@ -25,24 +25,24 @@ inline-WQEBB, inline/non-inline, and non-inline DMA boundary points.
   --stagger SECONDS           rendezvous regression delay (default: 0; fastest)
   -h, --help
 
-Environment equivalents: OPENURMA_LAT_PROFILE, OPENURMA_SWEEP_SAMPLES,
-OPENURMA_SWEEP_SIZES, OPENURMA_LAT_PORT, OPENURMA_SWEEP_OUT,
-OPENURMA_ROI_STATS, OPENURMA_LAT_TIMEOUT, and OPENURMA_LAT_STAGGER.
+Environment equivalents: UBSIM_LAT_PROFILE, UBSIM_SWEEP_SAMPLES,
+UBSIM_SWEEP_SIZES, UBSIM_LAT_PORT, UBSIM_SWEEP_OUT,
+UBSIM_ROI_STATS, UBSIM_LAT_TIMEOUT, and UBSIM_LAT_STAGGER.
 EOF
 }
 
-container="$OPENURMA_CONTAINER"
+container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
-run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
-profile="${OPENURMA_LAT_PROFILE:-ctp-rm-send-imm-i128}"
-samples="${OPENURMA_SWEEP_SAMPLES:-100}"
-sizes_text="${OPENURMA_SWEEP_SIZES:-2 4 8 16 17 32 64 65 80 81 128 129 192 193 256 512 1024 1025 2048 4096}"
-port="${OPENURMA_LAT_PORT:-21115}"
-roi_stats="${OPENURMA_ROI_STATS:-0}"
-timeout="${OPENURMA_LAT_TIMEOUT:-300}"
-stagger="${OPENURMA_LAT_STAGGER:-0}"
-output_dir="${OPENURMA_SWEEP_OUT:-$repo_root/sweeps/$(date -u +%Y%m%dT%H%M%SZ)}"
+lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
+run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"
+profile="${UBSIM_LAT_PROFILE:-ctp-rm-send-imm-i128}"
+samples="${UBSIM_SWEEP_SAMPLES:-100}"
+sizes_text="${UBSIM_SWEEP_SIZES:-2 4 8 16 17 32 64 65 80 81 128 129 192 193 256 512 1024 1025 2048 4096}"
+port="${UBSIM_LAT_PORT:-21115}"
+roi_stats="${UBSIM_ROI_STATS:-0}"
+timeout="${UBSIM_LAT_TIMEOUT:-300}"
+stagger="${UBSIM_LAT_STAGGER:-0}"
+output_dir="${UBSIM_SWEEP_OUT:-$repo_root/sweeps/$(date -u +%Y%m%dT%H%M%SZ)}"
 positional_sizes=()
 
 need_value() {
@@ -88,7 +88,7 @@ case "$samples:$port" in
     *[!0-9:]*|0:*|*:0) die "samples and port must be positive decimal integers" ;;
 esac
 (( port <= 65535 )) || die "port must be <= 65535"
-case "$roi_stats" in 0|1) ;; *) die "OPENURMA_ROI_STATS must be 0 or 1" ;; esac
+case "$roi_stats" in 0|1) ;; *) die "UBSIM_ROI_STATS must be 0 or 1" ;; esac
 [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "timeout must be a positive number"
 [[ "$stagger" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "stagger must be a non-negative number"
 for size in "${sizes[@]}"; do
@@ -116,9 +116,9 @@ printf '%s\n' $'profile\tnode\tbytes\titerations\tt_min_us\tt_max_us\tt_median_u
     printf 'client_stagger_seconds=%s\n' "$stagger"
 } >"$output_dir/sweep-manifest.txt"
 
-ou_runtime_start
-if ou_exec test -r "$run_root/run-manifest.txt"; then
-    ou_exec cat "$run_root/run-manifest.txt" >"$output_dir/model-manifest.txt"
+ubsim_runtime_start
+if ubsim_exec test -r "$run_root/run-manifest.txt"; then
+    ubsim_exec cat "$run_root/run-manifest.txt" >"$output_dir/model-manifest.txt"
 else
     printf '%s\n' "model manifest unavailable: $run_root/run-manifest.txt" >"$output_dir/model-manifest.txt"
 fi
@@ -129,13 +129,13 @@ roi_arg=(--no-roi-stats)
 (( roi_stats == 0 )) || roi_arg=(--roi-stats)
 
 stats_block_count() {
-    ou_exec awk "/Begin Simulation Statistics/ { count++ } END { print count + 0 }" "$1"
+    ubsim_exec awk "/Begin Simulation Statistics/ { count++ } END { print count + 0 }" "$1"
 }
 
 extract_stats_block() {
     local stats_path=$1
     local wanted=$2
-    ou_exec awk -v wanted="$wanted" '
+    ubsim_exec awk -v wanted="$wanted" '
         /Begin Simulation Statistics/ {
             block++
             capture = (block == wanted)

@@ -3,8 +3,8 @@ export LD_LIBRARY_PATH=/lib:/usr/lib
 export HOME=/root
 export TERM="${TERM:-vt100}"
 export GLIBC_TUNABLES=glibc.pthread.rseq=0
-case "${OPENURMA_NODE:-}" in
-    ''|*[!0-9]*) export PS1='(openurma-gem5) \w # ' ;;
-    *) export PS1="(openurma-node${OPENURMA_NODE}) \\w # " ;;
+case "${UBSIM_NODE:-}" in
+    ''|*[!0-9]*) export PS1='(ubsim-gem5) \w # ' ;;
+    *) export PS1="(ubsim-node${UBSIM_NODE}) \\w # " ;;
 esac
 cd /root

@@ -8,7 +8,7 @@
 
 // UB endpoint <-> fabric boundary. Payload is a wire-visible UB frame or flit,
 // never a WQE or an internal RMA transaction.
-namespace openurma::proto::net {
+namespace ubsim::proto::net {
 
 inline constexpr std::uint64_t kProtocolId = 0x55424e4554000001ULL; // UBNET v1
 inline constexpr std::uint32_t kVersion = 1;
@@ -87,4 +87,4 @@ static_assert(sizeof(Lifecycle) == 64);
 static_assert(sizeof(Message) == 64);
 static_assert(offsetof(Frame, timestamp) == 48);
 
-} // namespace openurma::proto::net
+} // namespace ubsim::proto::net

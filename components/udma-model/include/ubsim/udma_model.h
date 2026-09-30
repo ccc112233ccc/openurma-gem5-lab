@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace openurma::device {
+namespace ubsim::device {
 
 using Completion = std::function<void(bool)>;
 using ReadCompletion = std::function<void(bool, std::vector<std::uint8_t>)>;
@@ -453,4 +453,4 @@ class UdmaModel {
     std::unordered_map<std::uint64_t, PendingRma> pending_rma_;
 };
 
-} // namespace openurma::device
+} // namespace ubsim::device

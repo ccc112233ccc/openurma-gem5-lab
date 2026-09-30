@@ -21,80 +21,85 @@ chmod 1777 /tmp
 exec </dev/console >/dev/console 2>&1
 
 # The same initramfs serves the standalone guest and every multi-node guest.
-# gem5 appends a non-negative openurma_node=N to the kernel command line.
-OPENURMA_NODE=""
-OPENURMA_PROVIDER=official
-OPENURMA_CPU_SWITCH=""
-OPENURMA_BENCH_CPU=""
-OPENURMA_M5OPS_MODE=inst
-OPENURMA_M5OPS_BASE=""
+# gem5 appends a non-negative ubsim_node=N to the kernel command line.
+UBSIM_NODE=""
+UBSIM_PROVIDER=official
+UBSIM_CPU_SWITCH=""
+UBSIM_BENCH_CPU=""
+UBSIM_M5OPS_MODE=inst
+UBSIM_M5OPS_BASE=""
+UBSIM_AUTO_NET=0
+UBSIM_SSH=0
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
-        openurma_node=*)
+        ubsim_node=*)
             node_value=${arg#*=}
             case "$node_value" in
                 ''|*[!0-9]*) ;;
-                *) OPENURMA_NODE=$node_value ;;
+                *) UBSIM_NODE=$node_value ;;
             esac
             ;;
-        openurma_cpu_switch=server_o3) OPENURMA_CPU_SWITCH=server_o3 ;;
-        openurma_bench_cpu=*) OPENURMA_BENCH_CPU=${arg#*=} ;;
-        openurma_m5ops_mode=inst) OPENURMA_M5OPS_MODE=inst ;;
-        openurma_m5ops_mode=addr) OPENURMA_M5OPS_MODE=addr ;;
-        openurma_m5ops_base=*) OPENURMA_M5OPS_BASE=${arg#*=} ;;
+        ubsim_cpu_switch=server_o3) UBSIM_CPU_SWITCH=server_o3 ;;
+        ubsim_bench_cpu=*) UBSIM_BENCH_CPU=${arg#*=} ;;
+        ubsim_m5ops_mode=inst) UBSIM_M5OPS_MODE=inst ;;
+        ubsim_m5ops_mode=addr) UBSIM_M5OPS_MODE=addr ;;
+        ubsim_m5ops_base=*) UBSIM_M5OPS_BASE=${arg#*=} ;;
+        ubsim_auto_net=1) UBSIM_AUTO_NET=1 ;;
+        ubsim_ssh=1) UBSIM_SSH=1 ;;
     esac
 done
-export OPENURMA_NODE OPENURMA_PROVIDER OPENURMA_CPU_SWITCH OPENURMA_BENCH_CPU
-export OPENURMA_M5OPS_MODE OPENURMA_M5OPS_BASE
-case "$OPENURMA_NODE" in
-    '') hostname openurma-gem5; eid_last_byte=1; guest_ip="" ;;
+export UBSIM_NODE UBSIM_PROVIDER UBSIM_CPU_SWITCH UBSIM_BENCH_CPU
+export UBSIM_M5OPS_MODE UBSIM_M5OPS_BASE
+export UBSIM_AUTO_NET UBSIM_SSH
+case "$UBSIM_NODE" in
+    '') hostname ubsim-gem5; eid_last_byte=1; guest_ip="" ;;
     *)
-        hostname "openurma-node$OPENURMA_NODE"
-        eid_last_byte=$((OPENURMA_NODE + 1))
-        guest_ip="10.0.0.$((OPENURMA_NODE + 1))"
+        hostname "ubsim-node$UBSIM_NODE"
+        eid_last_byte=$((UBSIM_NODE + 1))
+        guest_ip="10.0.0.$((UBSIM_NODE + 1))"
         ;;
 esac
-eid_suffix=$(printf '%04x' "$((0x100 + ${OPENURMA_NODE:-0}))")
+eid_suffix=$(printf '%04x' "$((0x100 + ${UBSIM_NODE:-0}))")
 eid_display="0000:0000:0000:0000:0000:0000:0000:$eid_suffix"
 
 load_one() {
     module="$1"
     shift
     if [ ! -r "/lib/modules/$module" ]; then
-        echo "[openurma-init] MISSING /lib/modules/$module"
+        echo "[ubsim-init] MISSING /lib/modules/$module"
         return 1
     fi
     if insmod "/lib/modules/$module" "$@"; then
-        echo "[openurma-init] loaded $module"
+        echo "[ubsim-init] loaded $module"
         return 0
     fi
-    echo "[openurma-init] FAILED $module (use dmesg for details)"
+    echo "[ubsim-init] FAILED $module (use dmesg for details)"
     return 1
 }
 
 emergency_shell() {
     echo
-    echo "[openurma-init] FAIL CLOSED: $1"
-    echo "[openurma-init] the official UDMA stack was not loaded"
-    echo "[openurma-init] inspect /etc/openurma-available-providers, then rebuild the initramfs"
-    echo "[openurma-init] starting an emergency shell; exit restarts it"
+    echo "[ubsim-init] FAIL CLOSED: $1"
+    echo "[ubsim-init] the official UDMA stack was not loaded"
+    echo "[ubsim-init] inspect /etc/ubsim-available-providers, then rebuild the initramfs"
+    echo "[ubsim-init] starting an emergency shell; exit restarts it"
     while true; do
         setsid cttyhack /bin/sh -l
-        echo "[openurma-init] emergency shell exited; starting a new one"
+        echo "[ubsim-init] emergency shell exited; starting a new one"
         sleep 1
     done
 }
 
 echo
-echo "[openurma-init] mounting guest filesystems"
+echo "[ubsim-init] mounting guest filesystems"
 load_one ipv6.ko || true
-ip link set lo up 2>/dev/null || echo "[openurma-init] warning: could not bring lo up"
-grep -qw udma /etc/openurma-available-providers 2>/dev/null &&
+ip link set lo up 2>/dev/null || echo "[ubsim-init] warning: could not bring lo up"
+grep -qw udma /etc/ubsim-available-providers 2>/dev/null &&
     [ -r /lib/urma/liburma-udma.so ] && [ -r /lib/libummu.so.1 ] ||
     emergency_shell "official UDMA provider or libummu is not packaged"
 load_one ubcore.ko || emergency_shell "ubcore.ko failed to load"
 load_one uburma.ko || emergency_shell "uburma.ko failed to load"
-for module in ubfi.ko ubus.ko openurma_ub_v2m.ko ummu-core.ko ummu.ko \
+for module in ubfi.ko ubus.ko ubsim_ub_v2m.ko ummu-core.ko ummu.ko \
               hisi_ubus.ko ubase.ko udma.ko ubagg.ko; do
     load_one "$module" || emergency_shell "$module failed to load"
 done
@@ -114,9 +119,34 @@ if [ -n "$guest_ip" ]; then
     if [ -e /sys/class/net/eth0 ]; then
         echo 1 > /proc/sys/net/ipv6/conf/eth0/disable_ipv6 2>/dev/null || true
         ip link set eth0 up 2>/dev/null || true
-        echo "[openurma-init] node $OPENURMA_NODE Ethernet OOB UP, address deferred: $guest_ip/24"
+        if [ "$UBSIM_AUTO_NET" = 1 ]; then
+            ip addr replace "$guest_ip/24" dev eth0
+            echo "[ubsim-init] node $UBSIM_NODE Ethernet OOB ready: $guest_ip/24"
+        else
+            echo "[ubsim-init] node $UBSIM_NODE Ethernet OOB UP, address deferred: $guest_ip/24"
+        fi
     else
-        echo "[openurma-init] warning: e1000 eth0 was not discovered"
+        echo "[ubsim-init] warning: e1000 eth0 was not discovered"
+    fi
+fi
+
+# QEMU adds a second e1000 management NIC backed by user-mode networking.
+# It is deliberately separate from the peer-to-peer OOB socket and UB data
+# plane. Host forwarding binds only to localhost (2220 + node -> guest:22).
+if [ "$UBSIM_SSH" = 1 ]; then
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -e /sys/class/net/eth1 ]; do
+        sleep 0.02
+        i=$((i + 1))
+    done
+    if [ -e /sys/class/net/eth1 ]; then
+        ip link set eth1 up
+        ip addr replace 10.0.2.15/24 dev eth1
+        /usr/sbin/dropbear -B -E -p 22 -P /run/dropbear.pid \
+            -r /etc/dropbear/dropbear_ed25519_host_key
+        echo "[ubsim-init] SSH ready on management eth1 (root, empty password)"
+    else
+        echo "[ubsim-init] warning: QEMU SSH management NIC was not discovered"
     fi
 fi
 
@@ -124,7 +154,7 @@ fi
 # sysfs/devtmpfs before the first interactive command.
 i=0
 expected_device=udma0
-export OPENURMA_DEVICE="$expected_device"
+export UBSIM_DEVICE="$expected_device"
 while [ "$i" -lt 50 ] && [ ! -e "/sys/class/ubcore/$expected_device" ]; do
     sleep 0.02
     i=$((i + 1))
@@ -135,18 +165,21 @@ echo "=============================================================="
 echo " Official UDMA full-system guest"
 echo " path: official liburma-udma.so -> official udma.ko -> external UDMA model"
 echo "=============================================================="
-if [ -n "$OPENURMA_NODE" ]; then
-    echo "Node $OPENURMA_NODE: EID $eid_display, OOB IPv4 $guest_ip"
+if [ -n "$UBSIM_NODE" ]; then
+    echo "Node $UBSIM_NODE: EID $eid_display, OOB IPv4 $guest_ip"
 fi
-echo "Type 'ou-help' for examples and 'ou-status' to inspect the stack."
+echo "Type 'ubsim-help' for examples and 'ubsim-status' to inspect the stack."
+if [ "$UBSIM_SSH" = 1 ]; then
+    echo "SSH: root with empty password through the host-forwarded localhost port."
+fi
 echo "Exit restarts the shell; 'poweroff -f' stops the guest."
 echo
-ou-status
+ubsim-status
 
 # Keep PID 1 alive and attach each shell to ttyAMA0. cttyhack supplies a
 # controlling terminal, so Ctrl-C and interactive job control behave normally.
 while true; do
     setsid cttyhack /bin/sh -l
-    echo "[openurma-init] shell exited; starting a new one"
+    echo "[ubsim-init] shell exited; starting a new one"
     sleep 1
 done

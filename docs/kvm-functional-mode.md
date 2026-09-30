@@ -28,7 +28,7 @@ no periodic SYNC horizons are generated. This is the useful KVM mode for fast
 driver, boot and functional validation. Cross-process latency numbers from it
 are not virtual-time performance results.
 
-The policy is selected by `OPENURMA_SYNC=auto` (the default): `kvm` and
+The policy is selected by `UBSIM_SYNC=auto` (the default): `kvm` and
 `kvm_server_o3` resolve to off, while Atomic/Timing/O3 profiles resolve to on.
 Use `--sync` or `--no-sync` to override it, and inspect
 `virtual_time_synchronization` in `run-dual/run-manifest.txt`. For example:

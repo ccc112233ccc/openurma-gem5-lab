@@ -4,9 +4,9 @@ set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 lab_root=$(cd "$script_dir/.." && pwd)
-image="${OPENURMA_IMAGE:-openurma-gem5-lab:ubuntu22.04-arm64}"
-container="${OPENURMA_CONTAINER:-openurma-gem5-lab}"
-kernel_volume="${OPENURMA_KERNEL_VOLUME:-openurma-gem5-lab-kernel}"
+image="${UBSIM_IMAGE:-ubsim-gem5-lab:ubuntu22.04-arm64}"
+container="${UBSIM_CONTAINER:-ubsim-gem5-lab}"
+kernel_volume="${UBSIM_KERNEL_VOLUME:-ubsim-gem5-lab-kernel}"
 jobs="${JOBS:-2}"
 sources_only=0
 enable_kvm=0
@@ -55,7 +55,7 @@ docker volume create "$kernel_volume" >/dev/null
 if docker container inspect "$container" >/dev/null 2>&1; then
     desired_image=$(docker image inspect -f '{{.Id}}' "$image")
     current_image=$(docker inspect -f '{{.Image}}' "$container")
-    current_lab=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/workspace/openurma-gem5-lab"}}{{.Source}}{{end}}{{end}}' "$container")
+    current_lab=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/workspace/ubsim-gem5-lab"}}{{.Source}}{{end}}{{end}}' "$container")
     current_kvm=$(docker inspect -f '{{range .HostConfig.Devices}}{{if eq .PathInContainer "/dev/kvm"}}yes{{end}}{{end}}' "$container")
     if [[ "$current_image" != "$desired_image" || "$current_lab" != "$lab_root" || \
           ( "$enable_kvm" == 1 && "$current_kvm" != yes ) ]]; then
@@ -67,9 +67,9 @@ if ! docker container inspect "$container" >/dev/null 2>&1; then
     docker_run_args=(run -d --name "$container" --platform linux/arm64)
     (( enable_kvm == 0 )) || docker_run_args+=(--device /dev/kvm:/dev/kvm)
     docker_run_args+=(
-        --label openurma.gem5.lab=managed
-        --mount "type=bind,src=$lab_root,dst=/workspace/openurma-gem5-lab"
-        --mount "type=volume,src=$kernel_volume,dst=/opt/openurma-gem5-lab"
+        --label ubsim.gem5.lab=managed
+        --mount "type=bind,src=$lab_root,dst=/workspace/ubsim-gem5-lab"
+        --mount "type=volume,src=$kernel_volume,dst=/opt/ubsim-gem5-lab"
         "$image"
     )
     docker "${docker_run_args[@]}" >/dev/null
@@ -82,11 +82,11 @@ native_args=(--skip-deps --jobs "$jobs")
 (( sources_only == 0 )) || native_args+=(--sources-only)
 echo "[setup] invoking the shared native Ubuntu setup inside $container"
 docker exec \
-    -e OPENURMA_EXECUTION_MODE=native \
-    -e OPENURMA_LAB_ROOT=/workspace/openurma-gem5-lab \
-    -e KSRC=/opt/openurma-gem5-lab/oe66 \
+    -e UBSIM_EXECUTION_MODE=native \
+    -e UBSIM_LAB_ROOT=/workspace/ubsim-gem5-lab \
+    -e KSRC=/opt/ubsim-gem5-lab/oe66 \
     -e JOBS="$jobs" \
-    "$container" bash /workspace/openurma-gem5-lab/scripts/setup-native.sh \
+    "$container" bash /workspace/ubsim-gem5-lab/scripts/setup-native.sh \
     "${native_args[@]}"
 echo "[setup] PASS"
 echo "Start the official two-node stack with: ./lab start --profile fast --provider official"

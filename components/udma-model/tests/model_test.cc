@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "openurma/udma_model.h"
+#include "ubsim/udma_model.h"
 #include "protocol/ub_host/if.h"
 #include "protocol/ub_host/proto.h"
 #include "protocol/ub_net/if.h"
@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-namespace device = openurma::device;
+namespace device = ubsim::device;
 
 class MockHost final : public device::HostInterface {
   public:
@@ -147,12 +147,12 @@ class MockNetwork final : public device::NetworkInterface {
 
 int main()
 {
-    static_assert(sizeof(openurma::proto::host::H2DMessage) == 64);
-    static_assert(sizeof(openurma::proto::host::D2HMessage) == 64);
-    static_assert(sizeof(openurma::proto::net::Message) == 64);
-    static_assert(sizeof(openurma::proto::host::Interface) ==
+    static_assert(sizeof(ubsim::proto::host::H2DMessage) == 64);
+    static_assert(sizeof(ubsim::proto::host::D2HMessage) == 64);
+    static_assert(sizeof(ubsim::proto::net::Message) == 64);
+    static_assert(sizeof(ubsim::proto::host::Interface) ==
                   sizeof(SimbricksBaseIf));
-    static_assert(sizeof(openurma::proto::net::Interface) ==
+    static_assert(sizeof(ubsim::proto::net::Interface) ==
                   sizeof(SimbricksBaseIf));
 
     constexpr std::uint64_t descriptor_address = 0x10000;

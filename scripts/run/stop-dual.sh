@@ -4,12 +4,12 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
 source "$script_dir/../runtime.sh"
-container="$OPENURMA_CONTAINER"
+container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-lab="${OPENURMA_LAB_ROOT:-$(ou_runtime_default_lab "$repo_root")}"
-run_root="${OPENURMA_DUAL_OUT:-$lab/run-dual}"
+lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
+run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"
 
-if [[ "$OPENURMA_EXECUTION_MODE" == docker ]]; then
+if [[ "$UBSIM_EXECUTION_MODE" == docker ]]; then
     if ! docker inspect "$container" >/dev/null 2>&1; then
         echo "Container does not exist: $container" >&2
         exit 2
@@ -19,21 +19,21 @@ if [[ "$OPENURMA_EXECUTION_MODE" == docker ]]; then
         exit 0
     fi
 else
-    ou_runtime_validate
+    ubsim_runtime_validate
 fi
 
 manifest="$run_root/run-manifest.txt"
-network_backend="$(ou_exec awk -F= \
+network_backend="$(ubsim_exec awk -F= \
     '$1 == "network_backend" { print $2; exit }' "$manifest" 2>/dev/null || true)"
-ub_switch_binary="${OPENURMA_UB_SWITCH_BINARY:-$lab/sources/ns-3-ub/build-linux/scratch/ns3.44-ub-net-adapter}"
-runtime_arch="$(ou_exec uname -m)"
-udma_device_binary="${OPENURMA_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
+ub_switch_binary="${UBSIM_UB_SWITCH_BINARY:-$lab/sources/ns-3-ub/build-linux/scratch/ns3.44-ub-net-adapter}"
+runtime_arch="$(ubsim_exec uname -m)"
+udma_device_binary="${UBSIM_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
 
 stop_one() {
     label=$1
     pidfile=$2
     expected=$3
-    ou_exec bash -c '
+    ubsim_exec bash -c '
         label=$1
         pidfile=$2
         expected=$3
@@ -51,7 +51,7 @@ stop_one() {
     ' _ "$label" "$pidfile" "$expected"
 }
 
-node_count="$(ou_exec awk -F= \
+node_count="$(ubsim_exec awk -F= \
     '$1 == "node_count" { print $2; exit }' \
     "$run_root/run-manifest.txt" 2>/dev/null || true)"
 node_count=${node_count:-2}
@@ -64,10 +64,10 @@ for ((node = 0; node < node_count; ++node)); do
 done
 stop_one switch "$run_root/switch/gem5.pid" "$run_root/switch"
 stop_one ub-switch "$run_root/ub-switch/gem5.pid" "$ub_switch_binary"
-if ou_exec test -r "$run_root/oob-switch/relay.pid"; then
+if ubsim_exec test -r "$run_root/oob-switch/relay.pid"; then
     stop_one oob-switch "$run_root/oob-switch/relay.pid" \
         "$lab/tools/ethernet_relay.py"
-elif ou_exec test -r "$run_root/relay/relay.pid"; then
+elif ubsim_exec test -r "$run_root/relay/relay.pid"; then
     stop_one relay "$run_root/relay/relay.pid" "$lab/tools/ethernet_relay.py"
 else
     for ((pair = 0; pair < node_count / 2; ++pair)); do

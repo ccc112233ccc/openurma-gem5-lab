@@ -1,1 +1,1 @@
-obj-m += openurma_ub_v2m.o
+obj-m += ubsim_ub_v2m.o

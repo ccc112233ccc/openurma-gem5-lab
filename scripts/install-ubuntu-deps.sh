@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab_dir="$(cd "$script_dir/.." && pwd)"
-package_file="${OPENURMA_UBUNTU_PACKAGES:-$lab_dir/docker/ubuntu-22.04-packages.txt}"
+package_file="${UBSIM_UBUNTU_PACKAGES:-$lab_dir/docker/ubuntu-22.04-packages.txt}"
 
 die() { printf 'install-ubuntu-deps.sh: %s\n' "$*" >&2; exit 2; }
 

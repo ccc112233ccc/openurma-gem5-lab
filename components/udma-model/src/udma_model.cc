@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "openurma/udma_model.h"
-#include "openurma/udma_abi.h"
+#include "ubsim/udma_model.h"
+#include "ubsim/udma_abi.h"
 
 #include <algorithm>
 #include <cstring>
@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace openurma::device {
+namespace ubsim::device {
 
 namespace {
 constexpr std::uint64_t kStateMagic = 0x3154504355444f55ULL; // OUDCPT1
@@ -2625,4 +2625,4 @@ UdmaModel::FinishReceive(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
         }, frame->source_jetty, frame->source_eid, frame->tpn);
 }
 
-} // namespace openurma::device
+} // namespace ubsim::device

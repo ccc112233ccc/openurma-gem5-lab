@@ -18,8 +18,8 @@ Validation date: 2026-09-17
 The official image and nodes are created with:
 
 ```sh
-docker exec openurma-gem5-lab \
-  bash /workspace/openurma-gem5-lab/official-udma/build_initramfs.sh
+docker exec ubsim-gem5-lab \
+  bash /workspace/ubsim-gem5-lab/official-udma/build_initramfs.sh
 
 ./lab start \
   --profile fast --provider official
@@ -78,10 +78,10 @@ Representative 8-KiB commands are:
 
 ```sh
 # node 0, start first
-OPENURMA_DIST_SYNC=1 urma_perftest write_bw -d udma0 --eid_idx 0 \
+UBSIM_DIST_SYNC=1 urma_perftest write_bw -d udma0 --eid_idx 0 \
   --ctp -B -s 8192 -P 21252 -J 1 -I 64 -n 5 -l 1 -Q 1 -p 0
 # node 1
-OPENURMA_DIST_SYNC=1 urma_perftest write_bw -d udma0 -S 10.0.0.1 \
+UBSIM_DIST_SYNC=1 urma_perftest write_bw -d udma0 -S 10.0.0.1 \
   --eid_idx 0 --ctp -B -s 8192 -P 21252 -J 1 -I 64 \
   -n 5 -l 1 -Q 1 -p 0
 

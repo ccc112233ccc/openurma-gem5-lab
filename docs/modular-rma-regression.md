@@ -43,7 +43,7 @@ bidirectional cases maintain 16 outstanding WQEs.  The 64 KiB and 1 MiB cases
 exercise asynchronous multi-packet READ/WRITE fragmentation in both
 directions.
 
-A second full run after removing the legacy OpenURMA integration path passed
+A second full run after removing the legacy UBSim integration path passed
 all ten cases on 2026-09-29 in **233.592 seconds**.  Its per-case host times
 were 27.759, 14.799, 11.954, 11.894, 14.962, 14.482, 19.846, 19.593,
 49.352 and 48.939 seconds in the table order above.  Boundary counters showed

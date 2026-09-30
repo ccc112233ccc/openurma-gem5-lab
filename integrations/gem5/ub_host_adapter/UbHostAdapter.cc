@@ -13,7 +13,7 @@
 namespace gem5
 {
 
-namespace host_proto = openurma::proto::host;
+namespace host_proto = ubsim::proto::host;
 
 namespace
 {

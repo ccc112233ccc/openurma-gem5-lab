@@ -6,8 +6,8 @@ set -euo pipefail
 # files, and (optionally) evidence left by a completed CPU switch.
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-lab_root="${OPENURMA_LAB_ROOT:-$(CDPATH= cd -- "$script_dir/../.." && pwd)}"
-run_root="${OPENURMA_DUAL_OUT:-$lab_root/run-dual}"
+lab_root="${UBSIM_LAB_ROOT:-$(CDPATH= cd -- "$script_dir/../.." && pwd)}"
+run_root="${UBSIM_DUAL_OUT:-$lab_root/run-dual}"
 runtime_mode=auto
 positional_root_seen=0
 
@@ -670,9 +670,9 @@ validate_node_config() {
     assert_ini_match "$cfg" system.workload command_line \
         '(^| )mem=8GB( |$)'
     assert_ini_match "$cfg" system.workload command_line \
-        '(^| )openurma_cpu_switch=server_o3( |$)'
+        '(^| )ubsim_cpu_switch=server_o3( |$)'
     assert_ini_match "$cfg" system.workload command_line \
-        '(^| )openurma_bench_cpu=2( |$)'
+        '(^| )ubsim_bench_cpu=2( |$)'
 }
 
 validate_node_config node0

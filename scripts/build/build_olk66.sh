@@ -7,11 +7,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAB_DIR="${OPENURMA_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+LAB_DIR="${UBSIM_LAB_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 KSRC="${KSRC:-$LAB_DIR/oe66}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$LAB_DIR/artifacts/kernel}"
 JOBS="${JOBS:-$(nproc)}"
-TARGET_ARCH="${OPENURMA_TARGET_ARCH:-arm64}"
+TARGET_ARCH="${UBSIM_TARGET_ARCH:-arm64}"
 ARCH=arm64
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 EXPECTED_KERNEL_COMMIT="5078a3a23a1e1825ec136485173ec98668cdd640"
@@ -72,7 +72,7 @@ have_commit="$(git -C "$KSRC" rev-parse HEAD)"
 
 # Refuse case-insensitive source trees.  Linux has tracked paths that differ
 # only by case, so such a checkout can look successful while being corrupted.
-case_probe="$(mktemp -d "$KSRC/.openurma-casecheck.XXXXXX")"
+case_probe="$(mktemp -d "$KSRC/.ubsim-casecheck.XXXXXX")"
 touch "$case_probe/lower"
 touch "$case_probe/LOWER"
 case_count="$(find "$case_probe" -maxdepth 1 -type f | wc -l)"

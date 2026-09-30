@@ -13,7 +13,7 @@ extern "C" {
 
 #include "protocol/ub_host/proto.h"
 
-namespace openurma::proto::host {
+namespace ubsim::proto::host {
 
 struct Interface {
     SimbricksBaseIf base;
@@ -29,4 +29,4 @@ inline void DefaultParams(SimbricksBaseIfParams* params)
     params->in_entries_size = params->out_entries_size = 8192 + 64;
 }
 
-} // namespace openurma::proto::host
+} // namespace ubsim::proto::host

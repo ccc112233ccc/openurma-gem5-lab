@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(openurma_ub_switch_sim VERSION 0.1.0 LANGUAGES C CXX)
+project(ubsim_ub_switch_sim VERSION 0.1.0 LANGUAGES C CXX)
 
 set(SIMBRICKS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../sources/simbricks"
     CACHE PATH "Pinned SimBricks source root")
