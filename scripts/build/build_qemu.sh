@@ -36,6 +36,7 @@ if ! grep -q 'ubsim_ub_host_create' "$source_dir/hw/arm/virt.c"; then
 fi
 
 cp "$lab/integrations/qemu/ubsim-ub-host.c" "$source_dir/hw/misc/"
+cp "$lab/integrations/qemu/ubsim-tcg-sync.c" "$source_dir/hw/misc/"
 cp "$lab/integrations/qemu/ubsim-simbricks-base.c" "$source_dir/hw/misc/"
 cp "$lab/sources/simbricks/lib/simbricks/base/if.c" \
    "$source_dir/hw/misc/ubsim-simbricks-if-impl.c"
@@ -44,6 +45,8 @@ mkdir -p "$source_dir/include/ubsim" "$source_dir/include/hw/misc" \
 cp "$lab/integrations/qemu/include/ubsim/ub_host_proto.h" \
    "$source_dir/include/ubsim/"
 cp "$lab/integrations/qemu/include/hw/misc/ubsim-ub-host.h" \
+   "$source_dir/include/hw/misc/"
+cp "$lab/integrations/qemu/include/hw/misc/ubsim-tcg-sync.h" \
    "$source_dir/include/hw/misc/"
 cp "$lab/sources/simbricks/lib/simbricks/base/if.h" \
    "$lab/sources/simbricks/lib/simbricks/base/proto.h" \
@@ -67,6 +70,36 @@ for path in files:
     text = text.replace("<simbricks/base/if.h>", '"simbricks/base/if.h"')
     text = text.replace("<simbricks/base/proto.h>", '"simbricks/base/proto.h"')
     path.write_text(text)
+
+# The source tree may already contain an earlier UBSim patch revision.  Keep
+# these small timing hooks idempotent so an incremental build gains the same
+# TCG instruction-retry support as a clean extraction.
+meson = root / "hw/misc/meson.build"
+text = meson.read_text()
+if "'ubsim-tcg-sync.c'" not in text:
+    text = text.replace("  'ubsim-ub-host.c',\n",
+                        "  'ubsim-ub-host.c',\n  'ubsim-tcg-sync.c',\n")
+meson.write_text(text)
+
+cputlb = root / "accel/tcg/cputlb.c"
+text = cputlb.read_text()
+if '"hw/misc/ubsim-tcg-sync.h"' not in text:
+    text = text.replace('#include "qemu/atomic.h"\n',
+                        '#include "qemu/atomic.h"\n'
+                        '#include "hw/misc/ubsim-tcg-sync.h"\n')
+read_call = ("        r = memory_region_dispatch_read(mr, mr_offset, &val,\n"
+             "                                        this_mop, full->attrs);\n")
+if "ubsim_tcg_set_retaddr(ra);\n" not in text:
+    text = text.replace(read_call,
+        "        ubsim_tcg_set_retaddr(ra);\n" + read_call +
+        "        ubsim_tcg_set_retaddr(0);\n", 1)
+write_call = ("        r = memory_region_dispatch_write(mr, mr_offset, val_le,\n"
+              "                                         this_mop, full->attrs);\n")
+if text.count("ubsim_tcg_set_retaddr(ra);") < 2:
+    text = text.replace(write_call,
+        "        ubsim_tcg_set_retaddr(ra);\n" + write_call +
+        "        ubsim_tcg_set_retaddr(0);\n", 1)
+cputlb.write_text(text)
 PY
 
 if [[ ! -f "$source_dir/build/build.ninja" ]]; then
@@ -82,16 +115,19 @@ ninja -C "$source_dir/build" -j "$jobs" qemu-system-aarch64
 # build has made vmlinux newer than the copied Image.
 mkdir -p "$lab/out"
 if [[ "$lab/artifacts/kernel/vmlinux" -nt "$lab/artifacts/kernel/Image" ]]; then
-    command -v docker >/dev/null || {
-        echo "vmlinux is newer than Image; start the lab Docker container to regenerate it" >&2
-        exit 1
-    }
-    container="${UBSIM_CONTAINER:-ubsim-gem5-lab}"
-    container_root="${UBSIM_CONTAINER_LAB_ROOT:-/workspace/ubsim-gem5-lab}"
-    docker exec "$container" aarch64-linux-gnu-objcopy \
-        -O binary -R .note -R .note.gnu.build-id -R .comment -S \
-        "$container_root/artifacts/kernel/vmlinux" \
-        "$container_root/out/qemu-Image"
+    if [[ "$lab/out/qemu-Image" -nt "$lab/artifacts/kernel/vmlinux" ]]; then
+        : # Preserve a flat image already generated from this vmlinux.
+    elif command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+        container="${UBSIM_CONTAINER:-ubsim-gem5-lab}"
+        container_root="${UBSIM_CONTAINER_LAB_ROOT:-/workspace/ubsim-gem5-lab}"
+        docker exec "$container" aarch64-linux-gnu-objcopy \
+            -O binary -R .note -R .note.gnu.build-id -R .comment -S \
+            "$container_root/artifacts/kernel/vmlinux" \
+            "$container_root/out/qemu-Image"
+    else
+        python3 "$lab/tools/elf_to_flat_binary.py" \
+            "$lab/artifacts/kernel/vmlinux" "$lab/out/qemu-Image"
+    fi
 else
     cp "$lab/artifacts/kernel/Image" "$lab/out/qemu-Image"
 fi

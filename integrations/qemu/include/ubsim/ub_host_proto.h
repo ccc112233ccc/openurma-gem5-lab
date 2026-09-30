@@ -41,6 +41,11 @@ enum UbSimUbHostInterruptAction {
     UBSIM_INTERRUPT_PULSE = 2,
 };
 
+enum UbSimUbHostLifecycleAction {
+    UBSIM_LIFECYCLE_PREPARE_SYNC = 1,
+    UBSIM_LIFECYCLE_COMMIT_SYNC = 2,
+};
+
 struct UbSimUbHostDeviceIntro {
     uint32_t version;
     uint32_t region_count;

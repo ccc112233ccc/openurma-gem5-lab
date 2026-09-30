@@ -6,10 +6,10 @@ to the same UB-HOST v1 process protocol used by gem5.  WQE decoding, queue
 state, RMA, packetization, port selection, and ns-3 timing stay in the existing
 standalone processes.
 
-The first supported host is Apple Silicon macOS with QEMU 11.1.1.  TCG is the
-reference mode; HVF uses the same device and is an optional acceleration mode.
-The initial adapter deliberately runs UB-HOST synchronization disabled.  It
-does not yet implement QEMU lifecycle-fence control or coordinated snapshots.
+The first supported host is Apple Silicon macOS with QEMU 11.1.1. TCG is the
+reference mode. Functional mode runs without a common virtual clock; timing
+mode combines QEMU icount with pairwise timestamp/SYNC messages on every
+QEMU↔UDMA and UDMA↔ns-3 boundary.
 
 Build and launch the verified single-node probe with:
 
@@ -45,6 +45,27 @@ traffic, and a two-sided 128-byte CTP/RM `urma_perftest send_lat` completes
 through the standalone UDMA and ns-3 processes.  Synchronization is off, so
 the reported microseconds are host-scheduling observations and are not a
 modeled latency result.
+
+For deterministic timing, synchronize all five processes from virtual time
+zero:
+
+```bash
+UBSIM_PEER_LATENCY_NS=500 ./lab start-qemu-dual --timing
+```
+
+`--timing-strict` is an alias for compatibility. Timed MMIO reads suspend the
+TCG vCPU, allow the conservative clock to advance to the device completion,
+then restore and retry the exact guest load instruction. The MMIO region opts
+out of QEMU's normal reentrancy guard because this protocol deliberately exits
+the callback through TCG's longjmp path, matching the SimBricks QEMU adapter.
+
+The 500-ns reference run boots both unchanged official UDMA stacks and scans
+bidirectional `write_bw` from 2 bytes through 1 MiB. It measured about 58 us
+for 128-byte `send_lat`, 315 MB/s at 4 KiB, and a 553 MB/s large-message
+plateau. The plateau is currently set by serialized external UDMA fragments,
+host DMA transactions, and adapter crossings rather than the configured
+400-Gbit/s ns-3 link. Treat it as a deterministic model baseline and trend,
+not as the final device-throughput calibration.
 
 Apple HVF itself is available in the same QEMU binary, but QEMU HVF only
 supports GICv3.  The current simulation glue publishes the official UBUS MSI

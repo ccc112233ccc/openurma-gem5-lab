@@ -179,6 +179,7 @@ struct Endpoint {
     bool lifecycle_prepare{false};
     std::uint64_t lifecycle_generation{};
     bool lifecycle_enabled{false};
+    bool sync_primed{false};
 };
 
 template <typename T>
@@ -285,14 +286,19 @@ class UbNetFabric {
                     std::this_thread::yield();
                     continue;
                 }
-                const std::uint64_t absolute_now = AbsoluteNowPs();
+                const std::uint64_t absolute_now = NowPs();
                 for (auto& endpoint : endpoints_) {
                     endpoint.interface.base.in_timestamp = enable ? 0 : absolute_now;
                     endpoint.interface.base.out_timestamp = enable ? 0 : absolute_now;
                     endpoint.interface.base.sync = enable;
                     endpoint.lifecycle_prepare = false;
+                    endpoint.sync_primed = false;
                 }
                 epoch_origin_ps_ = enable ? absolute_now : 0;
+                if (enable) {
+                    time_offset_ps_ = -static_cast<std::int64_t>(
+                        AbsoluteNowPs());
+                }
                 lifecycle_active_ = enable;
                 std::cerr << "[NS3_UB_NET_FENCE] generation=" << generation
                           << " active=" << (enable ? 1 : 0)
@@ -307,13 +313,18 @@ class UbNetFabric {
                 continue;
             }
             bool sync_blocked = false;
-            for (auto& endpoint : endpoints_)
-                sync_blocked =
-                    ubnet::UbNetOutSync(&endpoint.interface, now) != 0 ||
-                    sync_blocked;
+            for (auto& endpoint : endpoints_) {
+                if (!SimbricksBaseIfSyncEnabled(&endpoint.interface.base))
+                    continue;
+                if (endpoint.sync_primed &&
+                    now < ubnet::UbNetOutNextSync(&endpoint.interface))
+                    continue;
+                const int result = ubnet::UbNetOutSync(&endpoint.interface, now);
+                if (result == 0) endpoint.sync_primed = true;
+                sync_blocked = result != 0 || sync_blocked;
+            }
             if (sync_blocked) {
                 ++sync_backpressure_;
-                std::this_thread::yield();
                 continue;
             }
 
@@ -342,7 +353,8 @@ class UbNetFabric {
             if (!progress)
             {
                 ++idle_sleeps_;
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
+                if (!synchronized)
+                    std::this_thread::sleep_for(std::chrono::microseconds(50));
             }
         }
         const auto wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -649,14 +661,24 @@ class UbNetFabric {
 
     std::uint64_t NowPs() const
     {
-        return lifecycle_active_ ? AbsoluteNowPs() - epoch_origin_ps_
-                                 : AbsoluteNowPs();
+        const std::int64_t logical =
+            static_cast<std::int64_t>(AbsoluteNowPs()) + time_offset_ps_;
+        return logical > 0 ? static_cast<std::uint64_t>(logical) : 0;
     }
 
     void AdvanceTo(std::uint64_t target)
     {
         const std::uint64_t now = NowPs();
         if (target <= now) return;
+        /* SYNC horizons are protocol promises, not ns-3 events.  When the
+         * fabric is idle, advance the adapter's logical clock without running
+         * the complete ns-3 scheduler once per synchronization quantum.  The
+         * next real frame is scheduled relative to the then-current ns-3
+         * clock, and the offset maps its callbacks back to protocol time. */
+        if (scheduled_packets_ == 0) {
+            time_offset_ps_ += static_cast<std::int64_t>(target - now);
+            return;
+        }
         Simulator::Schedule(PicoSeconds(target - now), [] { Simulator::Stop(); });
         Simulator::Run();
     }
@@ -677,6 +699,7 @@ class UbNetFabric {
     std::uint64_t delivered_{};
     std::uint64_t payload_bytes_{};
     std::uint64_t epoch_origin_ps_{};
+    std::int64_t time_offset_ps_{};
     std::uint64_t loop_iterations_{};
     std::uint64_t idle_sleeps_{};
     std::uint64_t sync_steps_{};

@@ -36,7 +36,8 @@ struct Options {
     std::string shm_path;
     std::uint64_t host_link_latency_ps{100000};
     std::uint64_t net_link_latency_ps{100000};
-    std::uint64_t sync_interval_ps{100000};
+    std::uint64_t host_sync_interval_ps{100000};
+    std::uint64_t net_sync_interval_ps{100000};
     std::uint64_t endpoint_eid{0x100};
     std::uint64_t port_count{2};
     SimbricksBaseIfSyncMode sync_mode{kSimbricksBaseIfSyncOptional};
@@ -72,7 +73,12 @@ bool ParseOptions(int argc, char** argv, Options& options)
         } else if (arg == "--net-link-latency-ps" && i + 1 < argc) {
             if (!ParseUnsigned(argv[++i], options.net_link_latency_ps)) return false;
         } else if (arg == "--sync-interval-ps" && i + 1 < argc) {
-            if (!ParseUnsigned(argv[++i], options.sync_interval_ps)) return false;
+            if (!ParseUnsigned(argv[++i], options.host_sync_interval_ps)) return false;
+            options.net_sync_interval_ps = options.host_sync_interval_ps;
+        } else if (arg == "--host-sync-interval-ps" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.host_sync_interval_ps)) return false;
+        } else if (arg == "--net-sync-interval-ps" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.net_sync_interval_ps)) return false;
         } else if (arg == "--sync" && i + 1 < argc) {
             const std::string mode(argv[++i]);
             if (mode == "off") options.sync_mode = kSimbricksBaseIfSyncDisabled;
@@ -100,9 +106,8 @@ bool ParseOptions(int argc, char** argv, Options& options)
     return !options.host_socket.empty() && !options.net_socket.empty() &&
            !options.shm_path.empty() &&
            (options.sync_mode == kSimbricksBaseIfSyncDisabled ||
-            options.sync_interval_ps <=
-                std::min(options.host_link_latency_ps,
-                         options.net_link_latency_ps));
+            (options.host_sync_interval_ps <= options.host_link_latency_ps &&
+             options.net_sync_interval_ps <= options.net_link_latency_ps));
 }
 
 template <typename T>
@@ -617,7 +622,8 @@ int Run(const Options& options)
     net_params.sock_path = options.net_socket.c_str();
     host_params.link_latency = options.host_link_latency_ps;
     net_params.link_latency = options.net_link_latency_ps;
-    host_params.sync_interval = net_params.sync_interval = options.sync_interval_ps;
+    host_params.sync_interval = options.host_sync_interval_ps;
+    net_params.sync_interval = options.net_sync_interval_ps;
     host_params.sync_mode = net_params.sync_mode = options.sync_mode;
 
     SimbricksBaseIfSHMPool pool{};
@@ -680,6 +686,8 @@ int Run(const Options& options)
     std::uint64_t sync_steps = 0;
     bool prepare_forwarded = false;
     bool lifecycle_active = false;
+    bool host_sync_primed = false;
+    bool net_sync_primed = false;
     std::uint64_t epoch_origin_ps = 0;
 
     while (running.load() && !SimbricksBaseIfInTerminated(&host_if.base) &&
@@ -722,6 +730,7 @@ int Run(const Options& options)
                 host_if.base.in_timestamp = host_if.base.out_timestamp = 0;
                 net_if.base.in_timestamp = net_if.base.out_timestamp = 0;
                 host_if.base.sync = net_if.base.sync = true;
+                host_sync_primed = net_sync_primed = false;
                 now = 0;
                 model.RebaseTime(0);
             } else {
@@ -730,6 +739,7 @@ int Run(const Options& options)
                 host_if.base.in_timestamp = host_if.base.out_timestamp = now;
                 net_if.base.in_timestamp = net_if.base.out_timestamp = now;
                 host_if.base.sync = net_if.base.sync = false;
+                host_sync_primed = net_sync_primed = false;
                 epoch_origin_ps = 0;
             }
             lifecycle_active = enable;
@@ -740,12 +750,23 @@ int Run(const Options& options)
                       << " eid=0x" << std::hex << options.endpoint_eid
                       << std::dec << " active=" << (enable ? 1 : 0) << '\n';
         }
+        const auto send_sync = [now](auto& interface, bool& primed,
+                                     auto out_sync, auto next_sync) {
+            if (!SimbricksBaseIfSyncEnabled(&interface.base)) return 0;
+            if (primed && now < next_sync(&interface)) return 0;
+            const int result = out_sync(&interface, now);
+            if (result == 0) primed = true;
+            return result;
+        };
         const bool sync_blocked =
-            host_proto::UbHostD2HOutSync(&host_if, now) != 0 ||
-            net_proto::UbNetOutSync(&net_if, now) != 0;
+            send_sync(host_if, host_sync_primed,
+                      host_proto::UbHostD2HOutSync,
+                      host_proto::UbHostD2HOutNextSync) != 0 ||
+            send_sync(net_if, net_sync_primed,
+                      net_proto::UbNetOutSync,
+                      net_proto::UbNetOutNextSync) != 0;
         if (sync_blocked) {
             ++sync_backpressure;
-            std::this_thread::yield();
             continue;
         }
         bool synchronized = false;
@@ -778,10 +799,12 @@ int Run(const Options& options)
         } else if (next > now && next != std::numeric_limits<std::uint64_t>::max()) {
             now = next;
             ++sync_steps;
+            progress = true;
         }
         if (!progress) {
             ++idle_sleeps;
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            if (!synchronized)
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
     }
     const auto wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(

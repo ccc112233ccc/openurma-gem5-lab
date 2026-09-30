@@ -21,17 +21,22 @@ ssh1="${UBSIM_QEMU_SSH1_PORT:-2221}"
 rate_gbps="${UBSIM_PEER_LINK_RATE_GBPS:-400}"
 link_delay_ns="${UBSIM_PEER_LATENCY_NS:-100}"
 switch_delay_ns="${UBSIM_QEMU_SWITCH_DELAY_NS:-50}"
+host_link_delay_ns="${UBSIM_QEMU_HOST_LATENCY_NS:-500}"
+icount_shift="${UBSIM_QEMU_ICOUNT_SHIFT:-0}"
+mode=functional
+sync_mode=off
 
 die() { echo "run-qemu-dual.sh: $*" >&2; exit 2; }
 
 if [[ "${1:-}" == --help ]]; then
     cat <<EOF
-usage: ./lab start-qemu-dual
+usage: ./lab start-qemu-dual [--functional|--timing|--timing-strict]
 
 Starts two ARM64 QEMU/TCG guests, two standalone UDMA device processes, one
-native ns-3 UB fabric process, and one QEMU socket OOB link.  Conservative
-virtual-time synchronization is intentionally disabled: this is a functional
-bring-up path, not a timing-result path.
+native ns-3 UB fabric process, and one QEMU socket OOB link.  Functional mode
+is the default. Timing mode uses deterministic TCG icount and conservative
+adapter synchronization from virtual time zero. '--timing-strict' is retained
+as an alias for existing automation.
 
 Attach with './lab attach-qemu 0' and './lab attach-qemu 1'.  Stop with
 './lab stop-qemu'.  UARTs default to localhost:$uart0 and localhost:$uart1.
@@ -40,22 +45,35 @@ and press Enter at the empty-password prompt.
 EOF
     exit 0
 fi
-(( $# == 0 )) || die "this command takes no positional arguments"
+case "${1:-}" in
+    ""|--functional) ;;
+    --timing) mode=timing; sync_mode=required ;;
+    --timing-strict) mode=timing; sync_mode=required ;;
+    *) die "unknown argument: $1" ;;
+esac
+(( $# <= 1 )) || die "too many arguments"
 
 for path in "$qemu" "$kernel" "$initrd" "$udma" "$ns3" "$lab/tools/run-background.sh"; do
     [[ -x "$path" || -r "$path" ]] || die "missing required artifact: $path"
 done
-for value in "$uart0" "$uart1" "$oob_port" "$ssh0" "$ssh1" "$rate_gbps" "$link_delay_ns" "$switch_delay_ns"; do
+for value in "$uart0" "$uart1" "$oob_port" "$ssh0" "$ssh1" "$rate_gbps" "$link_delay_ns" "$switch_delay_ns" "$host_link_delay_ns"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "ports, rates and delays must be decimal integers"
 done
+[[ "$icount_shift" =~ ^[0-9]+$ ]] || die "UBSIM_QEMU_ICOUNT_SHIFT must be a non-negative integer"
 (( uart0 > 1023 && uart1 > 1023 && oob_port > 1023 )) || die "ports must exceed 1023"
 (( uart0 != uart1 && ssh0 != ssh1 && rate_gbps > 0 && link_delay_ns > 0 )) || die "invalid UART, SSH port, rate or delay"
 
 pid_live() {
-    local file=$1 pid
+    local file=$1 pid command
     [[ -r "$file" ]] || return 1
     pid=$(sed -n '1p' "$file")
-    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    case "$command" in
+        *qemu-system-aarch64*|*udma-device-sim*|*ub-net-adapter*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 for file in "$run_dir"/*/*.pid; do
     [[ -e "$file" ]] || continue
@@ -77,7 +95,6 @@ net1="/tmp/ubsim-qemu-dual.node1.net.sock"
 shm0="/tmp/ubsim-qemu-dual.node0.shm"
 shm1="/tmp/ubsim-qemu-dual.node1.shm"
 rm -f "$host0" "$host1" "$net0" "$net1" "$shm0" "$shm1"
-
 start_complete=0
 cleanup_failed_start() {
     local pidfile pid
@@ -105,9 +122,10 @@ for node in 0 1; do
     eval "shm=\$shm$node"
     start_bg "$run_dir/udma-node$node/udma.pid" "$run_dir/udma-node$node/udma.log" \
         "$udma" --host-socket "$host" --net-socket "$net" --shm "$shm" \
-        --sync off --host-link-latency-ps "$((link_delay_ns * 1000))" \
+        --sync "$sync_mode" --host-link-latency-ps "$((host_link_delay_ns * 1000))" \
         --net-link-latency-ps "$((link_delay_ns * 1000))" \
-        --sync-interval-ps "$((link_delay_ns * 1000))" \
+        --host-sync-interval-ps "$((host_link_delay_ns * 1000))" \
+        --net-sync-interval-ps "$((link_delay_ns * 1000))" \
         --eid "$((0x100 + node))" --ports 2 \
         --state-out "$run_dir/udma-node$node/state.bin"
 done
@@ -122,14 +140,26 @@ done
 start_bg "$run_dir/ub-fabric/ns3.pid" "$run_dir/ub-fabric/ns3.log" \
     "$ns3" --ports 2 --link-delay-ps "$((link_delay_ns * 1000))" \
     --switch-delay-ps "$((switch_delay_ns * 1000))" --rate-gbps "$rate_gbps" \
-    --sync off --sync-interval-ps "$((link_delay_ns * 1000))" \
+    --sync "$sync_mode" --sync-interval-ps "$((link_delay_ns * 1000))" \
     --endpoint "$net0,256" --endpoint "$net1,257"
 
 launch_qemu() {
     local node=$1 host=$2 uart=$3 netdev=$4 mac=$5 ssh_port=$6 out="$run_dir/node$1"
+    local -a timing_args=()
+    local adapter_poll_ns=1000
+    if [[ "$mode" != functional ]]; then
+        timing_args=(-icount "shift=$icount_shift,sleep=off")
+        adapter_poll_ns=1000000
+    fi
     start_bg "$out/qemu.pid" "$out/qemu.log" env \
-        UBSIM_QEMU_UB_HOST_SOCKET="$host" "$qemu" \
+        UBSIM_QEMU_UB_HOST_SOCKET="$host" \
+        UBSIM_QEMU_UB_HOST_SYNC="$sync_mode" \
+        UBSIM_QEMU_UB_HOST_POLL_NS="$adapter_poll_ns" \
+        UBSIM_QEMU_UB_HOST_LATENCY_PS="$((host_link_delay_ns * 1000))" \
+        UBSIM_QEMU_UB_HOST_SYNC_INTERVAL_PS="$((host_link_delay_ns * 1000))" \
+        "$qemu" \
         -machine virt,accel=tcg,gic-version=2,highmem=off -cpu cortex-a72 \
+        ${timing_args[@]+"${timing_args[@]}"} \
         -smp 1 -m 1024 -kernel "$kernel" -initrd "$initrd" \
         -append "console=ttyAMA0 rdinit=/init nokaslr loglevel=5 ubsim_node=$node ubsim_provider=official ubsim_auto_net=1 ubsim_ssh=1" \
         -display none -monitor none -no-reboot \
@@ -145,22 +175,24 @@ sleep 0.5
 launch_qemu 1 "$host1" "$uart1" "socket,id=oob,connect=127.0.0.1:$oob_port" "02:00:00:00:00:02" "$ssh1"
 
 cat >"$run_dir/run-manifest.txt" <<EOF
-runtime=qemu-tcg
+runtime=qemu-tcg-$mode
 node_count=2
 network_backend=modular-ns3ub
-synchronization=disabled
+synchronization=$sync_mode
 uart0=$uart0
 uart1=$uart1
 oob_port=$oob_port
 ssh0_port=$ssh0
 ssh1_port=$ssh1
 peer_link_rate_gbps=$rate_gbps
+host_link_latency_ns=$host_link_delay_ns
 peer_latency_ns=$link_delay_ns
 switch_delay_ns=$switch_delay_ns
+icount_shift=$icount_shift
 EOF
 start_complete=1
 
-echo "Started the two-node QEMU functional environment."
+echo "Started the two-node QEMU $mode environment."
 echo "  node0 UART: localhost:$uart0; EID ...:0100; OOB 10.0.0.1"
 echo "  node1 UART: localhost:$uart1; EID ...:0101; OOB 10.0.0.2"
 echo "  SSH: ssh -p $ssh0 root@127.0.0.1   (node0; empty password)"
@@ -168,4 +200,8 @@ echo "       ssh -p $ssh1 root@127.0.0.1   (node1; empty password)"
 echo "  attach: ./lab attach-qemu 0   (and node 1 in another terminal)"
 echo "  status: ./lab status-qemu"
 echo "  logs:   $run_dir"
-echo "  timing: conservative synchronization is OFF; do not use this run for latency claims"
+if [[ "$mode" == timing ]]; then
+    echo "  timing: TCG icount shift=$icount_shift; conservative synchronization REQUIRED from time zero"
+else
+    echo "  timing: conservative synchronization is OFF; do not use this run for latency claims"
+fi

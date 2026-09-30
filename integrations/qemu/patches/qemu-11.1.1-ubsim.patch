@@ -64,14 +64,41 @@
      if (aarch64 && firmware_loaded && virt_is_acpi_enabled(vms)) {
 --- a/hw/misc/meson.build
 +++ b/hw/misc/meson.build
-@@ -26,6 +26,10 @@
+@@ -26,6 +26,11 @@
  
  # virt devices
  system_ss.add(when: 'CONFIG_VIRT_CTRL', if_true: files('virt_ctrl.c'))
 +system_ss.add(when: 'CONFIG_ARM_VIRT', if_true: files(
 +  'ubsim-ub-host.c',
++  'ubsim-tcg-sync.c',
 +  'ubsim-simbricks-base.c',
 +))
  
  # RISC-V devices
  system_ss.add(when: 'CONFIG_MCHP_PFSOC_DMC', if_true: files('mchp_pfsoc_dmc.c'))
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -36,6 +36,7 @@
+ #include "exec/helper-proto-common.h"
+ #include "exec/tlb-flags.h"
+ #include "qemu/atomic.h"
++#include "hw/misc/ubsim-tcg-sync.h"
+ #include "qemu/atomic128.h"
+ #include "tb-internal.h"
+ #include "trace.h"
+@@ -1954,5 +1955,7 @@ static uint64_t int_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
++        ubsim_tcg_set_retaddr(ra);
+         r = memory_region_dispatch_read(mr, mr_offset, &val,
+                                         this_mop, full->attrs);
++        ubsim_tcg_set_retaddr(0);
+         if (unlikely(r != MEMTX_OK)) {
+             io_failed(cpu, full, addr, this_size, type, mmu_idx, r, ra);
+         }
+@@ -2467,5 +2470,7 @@ static uint64_t int_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
++        ubsim_tcg_set_retaddr(ra);
+         r = memory_region_dispatch_write(mr, mr_offset, val_le,
+                                          this_mop, full->attrs);
++        ubsim_tcg_set_retaddr(0);
+         if (unlikely(r != MEMTX_OK)) {
+             io_failed(cpu, full, addr, this_size, MMU_DATA_STORE,
+                       mmu_idx, r, ra);
