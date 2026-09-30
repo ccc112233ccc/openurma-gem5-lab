@@ -5,7 +5,21 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from dual_serial_command import connect_until_ready
+from dual_serial_command import SHELL_PROMPT_PATTERN, connect_until_ready
+
+
+class PromptPatternTests(unittest.TestCase):
+    def test_accepts_current_and_checkpoint_hostnames(self) -> None:
+        import re
+
+        for prompt in (b"(ubsim-node0) ~ # ", b"(openurma-node1) ~ # "):
+            with self.subTest(prompt=prompt):
+                self.assertIsNotNone(re.search(SHELL_PROMPT_PATTERN, prompt))
+
+    def test_rejects_boot_output(self) -> None:
+        import re
+
+        self.assertIsNone(re.search(SHELL_PROMPT_PATTERN, b"[  1.23] booting Linux"))
 
 
 class ConnectUntilReadyTests(unittest.TestCase):

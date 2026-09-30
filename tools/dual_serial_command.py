@@ -10,6 +10,12 @@ import threading
 import time
 
 
+# Checkpoints preserve the guest hostname that was active when they were
+# created.  Prompt detection must therefore be independent of product naming
+# (for example, both legacy ``openurma-node0`` and current ``ubsim-node0``).
+SHELL_PROMPT_PATTERN = rb"\([A-Za-z0-9][A-Za-z0-9_.-]*\)[^\r\n]*# "
+
+
 def connect_until_ready(port: int, deadline: float) -> socket.socket:
     """Connect to a UART that may not have opened its listener yet."""
 
@@ -41,7 +47,7 @@ def run_one(
     try:
         with connect_until_ready(port, deadline) as sock:
             sock.settimeout(0.2)
-            prompt_pattern = rb"\(ubsim-[^)]+\)[^\r\n]*# "
+            prompt_pattern = SHELL_PROMPT_PATTERN
             # A freshly started full-system guest can take minutes of host
             # time to reach its shell while conservative dist synchronization
             # is active.  Never inject into the boot stream: bytes sent before

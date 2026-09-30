@@ -10,6 +10,9 @@ import threading
 import time
 
 
+SHELL_PROMPT_PATTERN = rb"\([A-Za-z0-9][A-Za-z0-9_.-]*\)[^\r\n]*# "
+
+
 def checkpoint_one(port: int, timeout: float, gate: threading.Barrier,
                    errors: list[str]) -> None:
     deadline = time.monotonic() + timeout
@@ -31,7 +34,7 @@ def checkpoint_one(port: int, timeout: float, gate: threading.Barrier,
                 data += chunk
                 if b"terminal already attached" in data:
                     raise RuntimeError("terminal already attached; detach with ~. first")
-                if re.search(rb"\(ubsim-[^)]+\)[^\r\n]*# ", data):
+                if re.search(SHELL_PROMPT_PATTERN, data):
                     break
             else:
                 raise TimeoutError("shell prompt timeout")
