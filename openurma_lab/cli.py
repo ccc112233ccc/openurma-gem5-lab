@@ -40,6 +40,10 @@ COMMANDS = {
     "latency-pairs": Command("scripts/run/run-paired-latency.sh", "test adjacent node pairs concurrently"),
     "sweep-latency": Command("scripts/run/sweep-latency.sh", "scan send_lat across message sizes"),
     "rma-regression": Command("scripts/run/run-rma-regression.sh", "run the timed modular SEND/READ/WRITE matrix"),
+    "qemu-rma-regression": Command(
+        "scripts/run/run-qemu-rma-regression.sh",
+        "run the QEMU functional SEND/READ/WRITE matrix",
+    ),
     "validate-server": Command("scripts/validation/validate-server-profile.sh", "validate the modeled server profile"),
 }
 
@@ -78,6 +82,7 @@ def _usage(stream=None) -> None:
         "  latency-pairs     run adjacent pairs concurrently\n"
         "  sweep-latency     scan latency across message sizes\n\n"
         "  rma-regression    run timed SEND/READ/WRITE fragmentation and SQ tests\n\n"
+        "  qemu-rma-regression  run the same functional matrix on dual QEMU\n\n"
         "Build and validation:\n"
         "  build TARGET      TARGET: " + ", ".join(BUILD_TARGETS) + "\n"
         "  validate-server   validate the instantiated server profile\n"
@@ -239,7 +244,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _build(tail[0], tail[1:], runtime)
     if command in COMMANDS:
         qemu_host_commands = {
-            "start-qemu", "start-qemu-dual", "status-qemu", "stop-qemu"
+            "start-qemu", "start-qemu-dual", "status-qemu", "stop-qemu",
+            "qemu-rma-regression",
         }
         command_runtime = "native" if command in qemu_host_commands else runtime
         return _script(COMMANDS[command].script, tail, command_runtime)

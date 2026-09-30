@@ -5,6 +5,13 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab="$(cd "$script_dir/../.." && pwd)"
 run_dir="${OPENURMA_QEMU_DUAL_OUT:-$lab/run-qemu-dual}"
 
+pid_live() {
+    local file=$1 pid
+    [[ -r "$file" ]] || return 1
+    pid=$(sed -n '1p' "$file")
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
 show_process() {
     local label=$1 file=$2 pid
     if [[ ! -r "$file" ]]; then printf '%-10s not started\n' "$label"; return; fi
@@ -23,9 +30,10 @@ show_process udma1 "$run_dir/udma-node1/udma.pid"
 show_process ns3-fabric "$run_dir/ub-fabric/ns3.pid"
 for node in 0 1; do
     terminal="$run_dir/node$node/system.terminal"
-    if [[ -r "$terminal" ]] && grep -aq 'Official UDMA full-system guest' "$terminal"; then
+    pidfile="$run_dir/node$node/qemu.pid"
+    if pid_live "$pidfile" && [[ -r "$terminal" ]] && grep -aq 'Official UDMA full-system guest' "$terminal"; then
         echo "node$node      guest shell ready"
-    elif [[ -r "$terminal" ]]; then
+    elif pid_live "$pidfile" && [[ -r "$terminal" ]]; then
         echo "node$node      booting (see $terminal)"
     fi
 done

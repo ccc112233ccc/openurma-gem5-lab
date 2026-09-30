@@ -13,6 +13,7 @@ import time
 
 
 FULL_CASES = [
+    ("send_lat_128", "send_lat", 128, 20, 1, 1, False),
     ("send_bw_128_wrap", "send_bw", 128, 128, 16, 16, False),
     ("send_bw_4096", "send_bw", 4096, 32, 16, 16, False),
     ("write_lat_128", "write_lat", 128, 8, 1, 1, False),
@@ -78,6 +79,10 @@ def main() -> int:
     parser.add_argument("--uart1", type=int, default=3470)
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument(
+        "--simulator", choices=("gem5", "qemu"), default="gem5",
+        help="guest simulator; QEMU functional runs do not expose gem5 tick timing",
+    )
+    parser.add_argument(
         "--suite", choices=("full", "sync-smoke"), default="full",
         help="full functional stress without a fine-grained fence, or a small synchronized ROI smoke suite",
     )
@@ -98,10 +103,13 @@ def main() -> int:
         client_command = command(verb, size, iterations, post_list, cq_mod,
                                  port, "10.0.0.1", bidirectional, dist_sync)
         raw = args.output / f"{index:02d}-{label}.uart.txt"
-        ticks_before = [
-            last_gem5_tick(args.run_root / f"node{node}" / "gem5.log")
-            for node in range(2)
-        ]
+        ticks_before = (
+            [
+                last_gem5_tick(args.run_root / f"node{node}" / "gem5.log")
+                for node in range(2)
+            ]
+            if args.simulator == "gem5" else [None, None]
+        )
         started = time.perf_counter()
         result = subprocess.run(
             ["python3", str(args.lab / "tools/dual_serial_command.py"),
@@ -112,10 +120,13 @@ def main() -> int:
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         elapsed = time.perf_counter() - started
-        ticks_after = [
-            last_gem5_tick(args.run_root / f"node{node}" / "gem5.log")
-            for node in range(2)
-        ]
+        ticks_after = (
+            [
+                last_gem5_tick(args.run_root / f"node{node}" / "gem5.log")
+                for node in range(2)
+            ]
+            if args.simulator == "gem5" else [None, None]
+        )
         tick_deltas = [
             tick_delta(before, after)
             for before, after in zip(ticks_before, ticks_after)
@@ -140,10 +151,14 @@ def main() -> int:
         print(f"[{label}] rc={result.returncode} wall={elapsed:.3f}s", flush=True)
     suite_wall = time.perf_counter() - suite_started
     report = {
+        "simulator": args.simulator,
         "suite": args.suite,
         "virtual_time_synchronized": dist_sync,
-        "simulated_time_source": "max gem5 UART-boundary tick delta",
-        "gem5_tick_period_ps": 1,
+        "simulated_time_source": (
+            "max gem5 UART-boundary tick delta"
+            if args.simulator == "gem5" else None
+        ),
+        "gem5_tick_period_ps": 1 if args.simulator == "gem5" else None,
         "suite_wall_seconds": suite_wall,
         "cases": records,
     }

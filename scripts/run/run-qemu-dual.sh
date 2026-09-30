@@ -59,6 +59,13 @@ for file in "$run_dir"/*/*.pid; do
 done
 
 mkdir -p "$run_dir"/{node0,node1,udma-node0,udma-node1,ub-fabric}
+: >"$run_dir/node0/qemu.log"
+: >"$run_dir/node0/system.terminal"
+: >"$run_dir/node1/qemu.log"
+: >"$run_dir/node1/system.terminal"
+: >"$run_dir/udma-node0/udma.log"
+: >"$run_dir/udma-node1/udma.log"
+: >"$run_dir/ub-fabric/ns3.log"
 host0="/tmp/openurma-qemu-dual.node0.host.sock"
 host1="/tmp/openurma-qemu-dual.node1.host.sock"
 net0="/tmp/openurma-qemu-dual.node0.net.sock"
@@ -84,7 +91,8 @@ trap cleanup_failed_start EXIT
 start_bg() {
     local pidfile=$1 logfile=$2
     shift 2
-    nohup bash "$lab/tools/run-background.sh" "$pidfile" "$logfile" "$@" </dev/null &
+    nohup bash "$lab/tools/run-background.sh" "$pidfile" "$logfile" "$@" \
+        </dev/null >/dev/null 2>&1 &
 }
 
 for node in 0 1; do

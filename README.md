@@ -81,6 +81,7 @@ urma_admin show
 ./lab --runtime native build ns3ub
 ./lab start-qemu-dual
 ./lab status-qemu
+./lab qemu-rma-regression
 ./lab attach-qemu 0
 ./lab attach-qemu 1
 ```
@@ -249,14 +250,20 @@ delivery event at its modeled virtual timestamp:
 ```
 
 `rma-regression` writes `results.csv`, `report.json`, the resolved model
-manifest and one complete UART transcript per case.  It covers SEND bandwidth,
-READ/WRITE latency and bandwidth, 4 KiB/64 KiB/1 MiB fragmentation, SQ ring
-wrap and 16 outstanding operations.  Every row includes wall-clock time and
-the per-node gem5 tick delta observed across that case.  In `--no-sync` mode
+manifest and one complete UART transcript per case.  It covers SEND latency
+and bandwidth, READ/WRITE latency and bandwidth, 4 KiB/64 KiB/1 MiB
+fragmentation, SQ ring wrap and 16 outstanding operations.  Every row includes
+wall-clock time and the per-node gem5 tick delta observed across that case.  In `--no-sync` mode
 the two node deltas are deliberately reported separately; their maximum is a
 progress indicator, not a globally synchronized latency.  The verified matrix
 and its measured host times are summarized in
 [`docs/modular-rma-regression.md`](docs/modular-rma-regression.md).
+
+The same functional matrix can be run on the dual-QEMU path with
+`./lab qemu-rma-regression`. QEMU conservative synchronization is disabled,
+so this command records wall time and validates data movement but intentionally
+does not report gem5 virtual ticks. The current Apple Silicon result is in
+[`results/qemu-functional-regression-20260930.md`](results/qemu-functional-regression-20260930.md).
 
 Create a new coordinated shell snapshot only when both guests and the external
 device are idle:
