@@ -705,7 +705,7 @@ int main()
     // next WQE and permanently stall the queue.
     std::array<std::uint8_t, 128> inline_write{};
     const std::uint32_t inline_write_flags =
-        5U | (0x40U << 16) | (1U << 31); // slot 5, inline, owner=1
+        5U | (0x60U << 16) | (1U << 31); // slot 5, inline + CQE, owner=1
     std::memcpy(inline_write.data(), &inline_write_flags, 4);
     const std::uint32_t inline_write_command =
         (3U << 8) | (32U << 22); // WRITE, 32-byte inline payload
@@ -729,6 +729,11 @@ int main()
     const device::Frame inline_write_ack = network.frames.back();
     assert(inline_write_ack.operation == device::Frame::Operation::WriteAck);
     official_model.Receive(inline_write_ack);
+    const auto& inline_write_cqe = host.Load(cq_iova + 4 * 64);
+    const std::uint16_t inline_write_entry =
+        std::uint16_t(inline_write_cqe[4]) |
+        (std::uint16_t(inline_write_cqe[5]) << 8);
+    assert(inline_write_entry == 6); // final block of the slot-5/6 WQE
 
     std::array<std::uint8_t, 64> after_multi_wqebb = send_wqe;
     const std::uint32_t after_multi_flags =

@@ -26,7 +26,7 @@ FULL_CASES = [
     ("read_bw_1m_frag", "read_bw", 1048576, 5, 1, 1, True, None),
     # Keep all sizes in one process so SQ state crosses the 1- to 2-WQEBB
     # inline boundary and repeatedly wraps the ring.
-    ("write_bw_all_2_to_1m_inline64", "write_bw", 1048576, 16, 1, 1,
+    ("write_bw_all_2_to_1m_inline64", "write_bw", 1048576, 64, 1, 1,
      True, 20),
 ]
 

@@ -1374,8 +1374,10 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         const abi::Sge local = wqe.first_sge();
         if (!local.address || !local.length || !wqe.remote_address()) return fail();
         const std::uint64_t request_id = next_rma_request_++;
+        // The official provider interprets CQE entry_idx as the last WQEBB
+        // consumed by the completed WQE, then advances CI to entry_idx + 1.
         const std::uint16_t completed_index = static_cast<std::uint16_t>(
-            jetty.consumer & (jetty.depth - 1U));
+            (jetty.consumer + decoded_wqebbs - 1U) & (jetty.depth - 1U));
         pending_rma_[request_id] = PendingRma{
             jetty_id, producer, decoded_wqebbs, completed_index,
             wqe.opcode(), local.length,
@@ -1460,8 +1462,11 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
     frame.remote_address = wqe.remote_address();
     frame.bytes = std::move(payload);
     const std::uint32_t count = static_cast<std::uint32_t>(frame.bytes.size());
+    // CQE entry_idx names the final WQEBB, not the first one.  This matters
+    // for inline WQEs spanning two or more blocks: the provider reconstructs
+    // its SQ consumer as entry_idx + 1.
     const std::uint16_t completed_index = static_cast<std::uint16_t>(
-        jetty.consumer & (jetty.depth - 1U));
+        (jetty.consumer + wqebbs - 1U) & (jetty.depth - 1U));
     std::uint64_t request_id = 0;
     if (wqe.opcode() == 3) {
         request_id = next_rma_request_++;
