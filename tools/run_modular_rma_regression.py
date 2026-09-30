@@ -13,24 +13,28 @@ import time
 
 
 FULL_CASES = [
-    ("send_lat_128", "send_lat", 128, 20, 1, 1, False),
-    ("send_bw_128_wrap", "send_bw", 128, 128, 16, 16, False),
-    ("send_bw_4096", "send_bw", 4096, 32, 16, 16, False),
-    ("write_lat_128", "write_lat", 128, 8, 1, 1, False),
-    ("read_lat_128", "read_lat", 128, 8, 1, 1, False),
-    ("write_bw_4096_out16", "write_bw", 4096, 64, 16, 16, True),
-    ("read_bw_4096_out16", "read_bw", 4096, 64, 16, 16, True),
-    ("write_bw_65536_frag", "write_bw", 65536, 16, 1, 1, True),
-    ("read_bw_65536_frag", "read_bw", 65536, 16, 1, 1, True),
-    ("write_bw_1m_frag", "write_bw", 1048576, 5, 1, 1, True),
-    ("read_bw_1m_frag", "read_bw", 1048576, 5, 1, 1, True),
+    ("send_lat_128", "send_lat", 128, 20, 1, 1, False, None),
+    ("send_bw_128_wrap", "send_bw", 128, 128, 16, 16, False, None),
+    ("send_bw_4096", "send_bw", 4096, 32, 16, 16, False, None),
+    ("write_lat_128", "write_lat", 128, 8, 1, 1, False, None),
+    ("read_lat_128", "read_lat", 128, 8, 1, 1, False, None),
+    ("write_bw_4096_out16", "write_bw", 4096, 64, 16, 16, True, None),
+    ("read_bw_4096_out16", "read_bw", 4096, 64, 16, 16, True, None),
+    ("write_bw_65536_frag", "write_bw", 65536, 16, 1, 1, True, None),
+    ("read_bw_65536_frag", "read_bw", 65536, 16, 1, 1, True, None),
+    ("write_bw_1m_frag", "write_bw", 1048576, 5, 1, 1, True, None),
+    ("read_bw_1m_frag", "read_bw", 1048576, 5, 1, 1, True, None),
+    # Keep all sizes in one process so SQ state crosses the 1- to 2-WQEBB
+    # inline boundary and repeatedly wraps the ring.
+    ("write_bw_all_2_to_1m_inline64", "write_bw", 1048576, 16, 1, 1,
+     True, 20),
 ]
 
 SYNC_SMOKE_CASES = [
-    ("send_lat_128_sync", "send_lat", 128, 8, 1, 1, False),
-    ("write_lat_128_sync", "write_lat", 128, 8, 1, 1, False),
-    ("read_lat_128_sync", "read_lat", 128, 8, 1, 1, False),
-    ("send_bw_128_sync", "send_bw", 128, 16, 16, 16, False),
+    ("send_lat_128_sync", "send_lat", 128, 8, 1, 1, False, None),
+    ("write_lat_128_sync", "write_lat", 128, 8, 1, 1, False, None),
+    ("read_lat_128_sync", "read_lat", 128, 8, 1, 1, False, None),
+    ("send_bw_128_sync", "send_bw", 128, 16, 16, 16, False, None),
 ]
 
 GEM5_TICK_RE = re.compile(r"(?m)^(\d+):")
@@ -53,14 +57,19 @@ def tick_delta(before: int | None, after: int | None) -> int | None:
 
 def command(verb: str, size: int, iterations: int, post_list: int,
             cq_mod: int, port: int, server: str | None,
-            bidirectional: bool, dist_sync: bool) -> str:
+            bidirectional: bool, dist_sync: bool,
+            all_exponent: int | None) -> str:
     parts = [
         "LD_LIBRARY_PATH=/lib:/usr/lib", "urma_perftest", verb,
         "-d", "udma0", "--eid_idx", "0", "--ctp",
-        "-s", str(size), "-P", str(port), "-J", "1", "-I", "64",
+        "-P", str(port), "-J", "1", "-I", "64",
         "-n", str(iterations), "-l", str(post_list), "-Q", str(cq_mod),
         "-p", "0",
     ]
+    parts.extend(
+        [f"-a{all_exponent}"] if all_exponent is not None
+        else ["-s", str(size)]
+    )
     if dist_sync:
         parts.insert(0, "UBSIM_DIST_SYNC=1")
     if bidirectional:
@@ -96,12 +105,14 @@ def main() -> int:
     dist_sync = args.suite == "sync-smoke"
     cases = SYNC_SMOKE_CASES if dist_sync else FULL_CASES
     for index, (label, verb, size, iterations, post_list, cq_mod,
-                bidirectional) in enumerate(cases):
+                bidirectional, all_exponent) in enumerate(cases):
         port = 21300 + index
         server_command = command(verb, size, iterations, post_list, cq_mod,
-                                 port, None, bidirectional, dist_sync)
+                                 port, None, bidirectional, dist_sync,
+                                 all_exponent)
         client_command = command(verb, size, iterations, post_list, cq_mod,
-                                 port, "10.0.0.1", bidirectional, dist_sync)
+                                 port, "10.0.0.1", bidirectional, dist_sync,
+                                 all_exponent)
         raw = args.output / f"{index:02d}-{label}.uart.txt"
         ticks_before = (
             [
@@ -137,6 +148,7 @@ def main() -> int:
             "case": label, "verb": verb, "size_bytes": size,
             "iterations": iterations, "post_list": post_list,
             "cq_mod": cq_mod, "bidirectional": bidirectional,
+            "all_exponent": all_exponent,
             "wall_seconds": elapsed, "returncode": result.returncode,
             "node0_sim_ticks": tick_deltas[0],
             "node1_sim_ticks": tick_deltas[1],
@@ -168,7 +180,7 @@ def main() -> int:
     with (args.output / "results.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=[
             "case", "verb", "size_bytes", "iterations", "post_list",
-            "cq_mod", "bidirectional", "wall_seconds", "returncode",
+            "cq_mod", "bidirectional", "all_exponent", "wall_seconds", "returncode",
             "node0_sim_ticks", "node1_sim_ticks",
             "simulated_elapsed_ns_max", "raw_output",
         ], extrasaction="ignore")

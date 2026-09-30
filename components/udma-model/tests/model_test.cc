@@ -699,6 +699,49 @@ int main()
     assert(official_model.sq_doorbells() == 2);
     assert(official_model.sq_completions() >= 5);
 
+    // Inline WQEs can span multiple 64-byte WQEBBs.  The RMA acknowledgement
+    // must advance the SQ consumer by the decoded WQE size, not by one.  A
+    // one-block advance would make the continuation payload look like the
+    // next WQE and permanently stall the queue.
+    std::array<std::uint8_t, 128> inline_write{};
+    const std::uint32_t inline_write_flags =
+        5U | (0x40U << 16) | (1U << 31); // slot 5, inline, owner=1
+    std::memcpy(inline_write.data(), &inline_write_flags, 4);
+    const std::uint32_t inline_write_command =
+        (3U << 8) | (32U << 22); // WRITE, 32-byte inline payload
+    std::memcpy(inline_write.data() + 4, &inline_write_command, 4);
+    std::memcpy(inline_write.data() + 8, &tp_id, 4);
+    std::memcpy(inline_write.data() + 12, &remote_jetty, 4);
+    std::memcpy(inline_write.data() + 40, &write_target, 8);
+    for (std::size_t i = 0; i < 32; ++i)
+        inline_write[48 + i] = static_cast<std::uint8_t>(i);
+    host.Store(sq_iova + 5 * 64,
+               std::vector<std::uint8_t>(inline_write.begin(),
+                                         inline_write.begin() + 64));
+    host.Store(sq_iova + 6 * 64,
+               std::vector<std::uint8_t>(inline_write.begin() + 64,
+                                         inline_write.end()));
+    assert(official_model.WriteMmio(jetty_page + 0x80, 4, 7));
+    const device::Frame inline_write_frame = network.frames.back();
+    assert(inline_write_frame.operation == device::Frame::Operation::Write);
+    assert(inline_write_frame.bytes.size() == 32);
+    official_model.Receive(inline_write_frame);
+    const device::Frame inline_write_ack = network.frames.back();
+    assert(inline_write_ack.operation == device::Frame::Operation::WriteAck);
+    official_model.Receive(inline_write_ack);
+
+    std::array<std::uint8_t, 64> after_multi_wqebb = send_wqe;
+    const std::uint32_t after_multi_flags =
+        7U | (0x40U << 16) | (1U << 31); // slot 7, inline, owner=1
+    std::memcpy(after_multi_wqebb.data(), &after_multi_flags, 4);
+    host.Store(sq_iova + 7 * 64,
+               std::vector<std::uint8_t>(after_multi_wqebb.begin(),
+                                         after_multi_wqebb.end()));
+    const std::size_t frames_before_after_multi = network.frames.size();
+    assert(official_model.WriteMmio(jetty_page + 0x80, 4, 8));
+    assert(network.frames.size() == frames_before_after_multi + 1);
+    assert(network.frames.back().operation == device::Frame::Operation::Send);
+
     device::Frame invalid_token_write{};
     invalid_token_write.operation = device::Frame::Operation::Write;
     invalid_token_write.segment = 100;

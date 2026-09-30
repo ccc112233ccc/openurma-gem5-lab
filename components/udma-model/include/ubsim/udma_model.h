@@ -442,6 +442,7 @@ class UdmaModel {
     struct PendingRma {
         std::uint32_t jetty_id{};
         std::uint32_t producer{};
+        std::uint32_t wqebbs{};
         std::uint16_t completed_index{};
         std::uint8_t opcode{};
         std::uint32_t byte_count{};

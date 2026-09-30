@@ -1324,11 +1324,29 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
     const abi::SqWqe wqe(bytes);
     QueueContext& jetty = found->second;
     const bool expected_owner = ((jetty.consumer / jetty.depth) & 1U) == 0;
-    if (wqe.owner() != expected_owner ||
-        raw.size() != std::size_t(wqe.wqebb_count()) * abi::kWqebbBytes ||
-        (wqe.opcode() != 0 && wqe.opcode() != 1 &&
-         wqe.opcode() != 3 && wqe.opcode() != 6)) {
-        std::cerr << "udma-model: rejected SQ WQE header\n";
+    const std::uint32_t decoded_wqebbs = wqe.wqebb_count();
+    const bool owner_valid = wqe.owner() == expected_owner;
+    const bool length_valid =
+        raw.size() == std::size_t(decoded_wqebbs) * abi::kWqebbBytes;
+    const bool opcode_valid = wqe.opcode() == 0 || wqe.opcode() == 1 ||
+        wqe.opcode() == 3 || wqe.opcode() == 6;
+    if (!owner_valid || !length_valid || !opcode_valid) {
+        ++sq_decode_rejects_;
+        std::cerr << "udma-model: rejected SQ WQE header"
+                  << " jetty=" << jetty_id
+                  << " consumer=" << jetty.consumer
+                  << " producer=" << producer
+                  << " depth=" << jetty.depth
+                  << " owner=" << wqe.owner()
+                  << " expected_owner=" << expected_owner
+                  << " opcode=" << unsigned(wqe.opcode())
+                  << " flags=0x" << std::hex << unsigned(wqe.flags())
+                  << std::dec
+                  << " inline_len=" << wqe.inline_length()
+                  << " sges=" << unsigned(wqe.sge_count())
+                  << " raw_bytes=" << raw.size()
+                  << " decoded_wqebbs=" << decoded_wqebbs
+                  << '\n';
         return fail();
     }
     ++sq_wqes_;
@@ -1339,6 +1357,15 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         std::cerr << "udma-model: rejected SQ route found="
                   << (route != tp_routes_.end())
                   << " active=" << (route != tp_routes_.end() && route->second.active)
+                  << " jetty=" << jetty_id
+                  << " consumer=" << jetty.consumer
+                  << " producer=" << producer
+                  << " depth=" << jetty.depth
+                  << " tpn=" << wqe.tpn()
+                  << " opcode=" << unsigned(wqe.opcode())
+                  << " owner=" << wqe.owner()
+                  << " inline_len=" << wqe.inline_length()
+                  << " wqebbs=" << wqe.wqebb_count()
                   << '\n';
         return fail();
     }
@@ -1350,7 +1377,8 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         const std::uint16_t completed_index = static_cast<std::uint16_t>(
             jetty.consumer & (jetty.depth - 1U));
         pending_rma_[request_id] = PendingRma{
-            jetty_id, producer, completed_index, wqe.opcode(), local.length,
+            jetty_id, producer, decoded_wqebbs, completed_index,
+            wqe.opcode(), local.length,
             0, wqe.completion(), jetty.payload_token, local.address};
         Frame frame{};
         frame.sequence = next_sequence_++;
@@ -1440,7 +1468,7 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
         frame.request_id = request_id;
         frame.transfer_length = count;
         pending_rma_[request_id] = PendingRma{
-            jetty_id, producer, completed_index, wqe.opcode(), count,
+            jetty_id, producer, wqebbs, completed_index, wqe.opcode(), count,
             wqe.immediate(), wqe.completion(), 0, 0};
     }
     network_.Send(std::move(frame),
@@ -2460,7 +2488,7 @@ UdmaModel::ReceiveWriteAck(Frame frame)
     }
     const PendingRma pending = found->second;
     pending_rma_.erase(found);
-    CompleteSq(pending.jetty_id, pending.producer, 1,
+    CompleteSq(pending.jetty_id, pending.producer, pending.wqebbs,
                pending.completed_index, pending.opcode, pending.byte_count,
                pending.immediate, pending.completion);
 }
@@ -2485,7 +2513,7 @@ UdmaModel::ReceiveReadResponse(Frame frame)
                 ++ubase_errors_;
                 return;
             }
-            CompleteSq(pending.jetty_id, pending.producer, 1,
+            CompleteSq(pending.jetty_id, pending.producer, pending.wqebbs,
                        pending.completed_index, pending.opcode,
                        pending.byte_count, pending.immediate,
                        pending.completion);
