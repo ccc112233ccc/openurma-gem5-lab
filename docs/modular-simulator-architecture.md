@@ -167,9 +167,10 @@ The default 100 ns lookahead is correct but costly during a cold Linux boot. A
 two-node five-process gate reached exactly 5,131,000,000 ticks and 14,743,314
 instructions on both gem5 instances after 66.36 host seconds, demonstrating
 lockstep conservative progress from tick zero. This mode is the timing-valid
-path. `--no-sync` remains an explicit functional/debug path, and future boot
-checkpoint automation should remove cold-boot cost without changing runtime
-lookahead.
+path. `--no-sync` remains an explicit functional/debug path. Routine validation
+uses `./lab start-ready`, which restores the newest fully compatible shell-ready
+checkpoint and refuses a mismatched or incomplete one. Cold boot is reserved
+for work that explicitly tests boot and initialization.
 
 The device core receives time explicitly through `AdvanceTime(picoseconds)`.
 JFC completion-period moderation therefore uses the official encoded

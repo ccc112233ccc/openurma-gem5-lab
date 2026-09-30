@@ -47,6 +47,15 @@ COMMANDS = {
     "validate-server": Command("scripts/validation/validate-server-profile.sh", "validate the modeled server profile"),
 }
 
+CHECKPOINT_IGNORED_MANIFEST_KEYS = {
+    # Runtime/generated metadata which does not describe checkpointed machine
+    # state and is expected to differ when the checkpoint is restored again.
+    "restore_checkpoint",
+    "endpoint_eids",
+    "peer_ring_bytes",
+    "dist_link_speed",
+}
+
 BUILD_TARGETS = {
     "all": "scripts/build-all.sh",
     "gem5": "scripts/build/build_gem5.sh",
@@ -71,6 +80,7 @@ def _usage(stream=None) -> None:
         "Lifecycle:\n"
         "  setup             fetch and build the reproducible environment\n"
         "  start             start N gem5 nodes plus the UB/OOB switches\n"
+        "  start-ready       restore the newest compatible shell-ready checkpoint\n"
         "  status            show simulator process and guest readiness\n"
         "  sync              initialize the guest control network\n"
         "  checkpoint NAME   save a shell-ready coordinated checkpoint\n"
@@ -146,6 +156,82 @@ def _script(relative: str, args: Sequence[str], runtime: str) -> int:
         if runtime == "docker" else str(ROOT)
     )
     return subprocess.run(["bash", str(path), *args], env=env).returncode
+
+
+def _script_environment(runtime: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["UBSIM_EXECUTION_MODE"] = runtime
+    env["UBSIM_LAB_ROOT"] = (
+        env.get("UBSIM_CONTAINER_LAB_ROOT", "/workspace/ubsim-gem5-lab")
+        if runtime == "docker" else str(ROOT)
+    )
+    return env
+
+
+def _parse_manifest(text: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for raw in text.splitlines():
+        key, separator, value = raw.partition("=")
+        if separator and key:
+            result[key] = value
+    return result
+
+
+def _select_compatible_checkpoint(desired: dict[str, str]) -> str | None:
+    checkpoint_root = ROOT / "checkpoints"
+    compatible: list[tuple[str, str]] = []
+    node_count = int(desired.get("node_count", "2"))
+    for manifest_path in checkpoint_root.glob("*/run-manifest.txt"):
+        manifest = _parse_manifest(manifest_path.read_text(errors="replace"))
+        keys = set(desired) - CHECKPOINT_IGNORED_MANIFEST_KEYS
+        if any(manifest.get(key) != desired[key] for key in keys):
+            continue
+        directory = manifest_path.parent
+        required = [directory / f"node{node}-cpt" for node in range(node_count)]
+        required += [directory / f"udma-node{node}.state" for node in range(node_count)]
+        if not all(path.exists() for path in required):
+            continue
+        metadata_path = directory / "checkpoint-manifest.txt"
+        metadata = (
+            _parse_manifest(metadata_path.read_text(errors="replace"))
+            if metadata_path.is_file() else {}
+        )
+        compatible.append((metadata.get("created_utc", ""), directory.name))
+    return max(compatible)[1] if compatible else None
+
+
+def _start_ready(args: Sequence[str], runtime: str) -> int:
+    if "--help" in args or "-h" in args:
+        return _script(COMMANDS["start"].script, args, runtime)
+    if any(value == "--restore-checkpoint" or
+           value.startswith("--restore-checkpoint=") for value in args):
+        print("lab: start-ready selects the checkpoint automatically; do not pass --restore-checkpoint",
+              file=sys.stderr)
+        return 2
+    path = ROOT / COMMANDS["start"].script
+    env = _script_environment(runtime)
+    probe = subprocess.run(
+        ["bash", str(path), *args, "--print-config"], env=env,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if probe.returncode != 0:
+        sys.stderr.write(probe.stderr)
+        return probe.returncode
+    selected = _select_compatible_checkpoint(_parse_manifest(probe.stdout))
+    if selected is None:
+        print(
+            "lab: no compatible shell-ready checkpoint; use './lab start ...' "
+            "only when a cold boot is intentionally required",
+            file=sys.stderr,
+        )
+        return 2
+    if "--print-config" in args:
+        print(f"start_ready_checkpoint={selected}")
+        print(probe.stdout, end="")
+        return 0
+    print(f"start-ready: restoring compatible checkpoint '{selected}'", flush=True)
+    return _script(COMMANDS["start"].script,
+                   [*args, "--restore-checkpoint", selected], runtime)
 
 
 def _build(target: str, args: Sequence[str], runtime: str) -> int:
@@ -229,6 +315,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _attach(tail, runtime)
     if command == "attach-qemu":
         return _script("scripts/run/attach-qemu.sh", tail, "native")
+    if command == "start-ready":
+        return _start_ready(tail, runtime)
     if command == "build":
         if not tail or tail[0] not in BUILD_TARGETS:
             print("lab: build target must be one of: " + ", ".join(BUILD_TARGETS), file=sys.stderr)

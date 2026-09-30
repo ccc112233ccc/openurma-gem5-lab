@@ -57,6 +57,9 @@ Examples:
 ./lab start --help
 ./lab start --print-config
 
+# Routine development: restore the newest fully compatible shell checkpoint.
+./lab start-ready --nodes 2 --profile fast --provider official --no-sync
+
 # Attach to any node. UART ports are derived from node ID centrally.
 ./lab attach 0
 ./lab attach 1
@@ -243,15 +246,17 @@ cold full-system Atomic boot is intentionally expensive, so synchronized
 experiments should restore a prepared coordinated checkpoint rather than
 weakening the runtime causality contract.
 
-The normal regression path deliberately restores a shell-ready checkpoint and
-runs without conservative synchronization.  This keeps functional stress
+The normal development and regression path restores a shell-ready checkpoint
+with `start-ready` and runs without conservative synchronization. It compares
+the complete requested machine/network manifest and fails rather than using an
+incompatible checkpoint. Plain `start` is reserved for work that intentionally
+tests kernel boot, initialization, or checkpoint creation. This keeps functional stress
 tests fast while ns-3 still executes every serialization, queueing, routing and
 delivery event at its modeled virtual timestamp:
 
 ```bash
-./lab start --profile fast --provider official \
-  --network-backend modular-ns3ub --no-sync \
-  --restore-checkpoint shell-ready-rma
+./lab start-ready --profile fast --provider official \
+  --network-backend modular-ns3ub --no-sync
 ./lab sync
 ./lab rma-regression experiments/rma-regression
 ```

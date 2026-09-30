@@ -15,9 +15,8 @@ serialization, queueing, routing, and delivery events at modeled timestamps;
 the reported URMA latency values are not claimed as synchronized timing data.
 
 ```bash
-./lab start --profile fast --provider official \
-  --network-backend modular-ns3ub --no-sync \
-  --restore-checkpoint shell-ready-rma
+./lab start-ready --profile fast --provider official \
+  --network-backend modular-ns3ub --no-sync
 ./lab sync
 ./lab rma-regression experiments/rma-regression
 ```
@@ -68,6 +67,12 @@ for both architectural checkpoints, drains both UDMA processes, and stores the
 two device states beside the gem5 states.  Creating `post-rma-verified` took
 19 seconds.  A restored run validates the live `udma0 ACTIVE` state instead of
 depending on boot messages absent from a fresh UART log.
+
+Routine validation must use `./lab start-ready`. It resolves the requested
+machine and network manifest first, then restores the newest checkpoint whose
+complete manifest and per-node gem5/UDMA state match. It fails closed when no
+compatible checkpoint exists. Plain `./lab start` is only for intentionally
+testing boot, initialization, or creating a new checkpoint.
 
 Normal shutdown emits three boundary profiles:
 
