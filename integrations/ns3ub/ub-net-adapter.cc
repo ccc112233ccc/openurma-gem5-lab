@@ -6,14 +6,15 @@
 #include "ns3/enum.h"
 #include "ns3/node.h"
 #include "ns3/packet.h"
-#include "ns3/tag.h"
 #include "ns3/ub-datalink.h"
 #include "ns3/ub-controller.h"
 #include "ns3/ub-ctp.h"
 #include "ns3/ub-header.h"
 #include "ns3/ub-link.h"
 #include "ns3/ub-port.h"
+#include "ns3/ub-function.h"
 #include "ns3/ub-switch.h"
+#include "ns3/ub-transaction.h"
 #include "ns3/ub-utils.h"
 
 #include "protocol/ub_net/if.h"
@@ -28,9 +29,12 @@
 #include <deque>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -125,76 +129,6 @@ Options ParseOptions(int argc, char** argv)
     return options;
 }
 
-class FrameTag final : public Tag {
-  public:
-    static TypeId GetTypeId()
-    {
-        static TypeId id = TypeId("ns3::UbSimUbNetFrameTag")
-            .SetParent<Tag>().SetGroupName("UnifiedBus").AddConstructor<FrameTag>();
-        return id;
-    }
-    TypeId GetInstanceTypeId() const override { return GetTypeId(); }
-    std::uint32_t GetSerializedSize() const override { return 84; }
-    void Serialize(TagBuffer buffer) const override
-    {
-        buffer.WriteU64(sequence);
-        buffer.WriteU32(source_eid); buffer.WriteU32(destination_eid);
-        buffer.WriteU16(source_port); buffer.WriteU16(destination_port);
-        buffer.WriteU16(traffic_class); buffer.WriteU16(flags);
-        buffer.WriteU8(has_udma ? 1 : 0); buffer.WriteU8(operation);
-        buffer.WriteU16(wire_flags);
-        buffer.WriteU32(source_jetty); buffer.WriteU32(destination_jetty);
-        buffer.WriteU32(tpn); buffer.WriteU32(segment);
-        buffer.WriteU64(remote_address); buffer.WriteU64(immediate);
-        buffer.WriteU64(request_id); buffer.WriteU32(ta_ssn);
-        buffer.WriteU32(transfer_length); buffer.WriteU32(payload_length);
-        buffer.WriteU32(payload_offset);
-    }
-    void Deserialize(TagBuffer buffer) override
-    {
-        sequence = buffer.ReadU64();
-        source_eid = buffer.ReadU32(); destination_eid = buffer.ReadU32();
-        source_port = buffer.ReadU16(); destination_port = buffer.ReadU16();
-        traffic_class = buffer.ReadU16(); flags = buffer.ReadU16();
-        has_udma = buffer.ReadU8() != 0; operation = buffer.ReadU8();
-        wire_flags = buffer.ReadU16();
-        source_jetty = buffer.ReadU32(); destination_jetty = buffer.ReadU32();
-        tpn = buffer.ReadU32(); segment = buffer.ReadU32();
-        remote_address = buffer.ReadU64(); immediate = buffer.ReadU64();
-        request_id = buffer.ReadU64(); ta_ssn = buffer.ReadU32();
-        transfer_length = buffer.ReadU32(); payload_length = buffer.ReadU32();
-        payload_offset = buffer.ReadU32();
-    }
-    void Print(std::ostream& stream) const override
-    {
-        stream << "sequence=" << sequence << " source=" << source_eid
-               << " destination=" << destination_eid;
-    }
-    std::uint64_t sequence{};
-    std::uint32_t source_eid{};
-    std::uint32_t destination_eid{};
-    std::uint16_t source_port{};
-    std::uint16_t destination_port{};
-    std::uint16_t traffic_class{};
-    std::uint16_t flags{};
-    bool has_udma{};
-    std::uint8_t operation{};
-    std::uint16_t wire_flags{};
-    std::uint32_t source_jetty{};
-    std::uint32_t destination_jetty{};
-    std::uint32_t tpn{};
-    std::uint32_t segment{};
-    std::uint64_t remote_address{};
-    std::uint64_t immediate{};
-    std::uint64_t request_id{};
-    std::uint32_t ta_ssn{};
-    std::uint32_t transfer_length{};
-    std::uint32_t payload_length{};
-    std::uint32_t payload_offset{};
-};
-
-NS_OBJECT_ENSURE_REGISTERED(FrameTag);
-
 UbTransactionOpcode TransactionOpcode(std::uint8_t operation)
 {
     switch (static_cast<ubnet::UdmaOperation>(operation)) {
@@ -215,10 +149,44 @@ struct QueuedFrame {
     std::vector<std::uint8_t> payload;
 };
 
-struct PendingCtpRequest {
-    std::size_t source{};
+struct PartialWqe {
+    ubnet::Frame frame{};
+    ubnet::UdmaWireHeader wire{};
     std::vector<std::uint8_t> payload;
-    FrameTag tag;
+    std::uint32_t next_offset{};
+};
+
+struct NativeSegment {
+    std::uint32_t offset{};
+    std::uint32_t bytes{};
+    std::vector<std::uint8_t> read_payload;
+};
+
+struct NativeTask {
+    std::size_t source{};
+    std::size_t destination{};
+    std::uint64_t sequence{};
+    ubnet::UdmaWireHeader wire{};
+    std::uint32_t task_id{};
+    std::uint32_t next_offset{};
+    std::map<std::uint16_t, NativeSegment> segments;
+};
+
+struct TargetExecutionKey {
+    std::size_t source{};
+    std::uint64_t request_id{};
+    std::uint16_t ta_ssn{};
+    bool operator<(const TargetExecutionKey& other) const
+    {
+        return std::tie(source, request_id, ta_ssn) <
+               std::tie(other.source, other.request_id, other.ta_ssn);
+    }
+};
+
+struct PendingTargetExecution {
+    UbTargetCompletion completion;
+    std::uint32_t task_id{};
+    std::uint16_t ta_ssn{};
 };
 
 struct Endpoint {
@@ -258,9 +226,8 @@ class UbNetFabric {
     explicit UbNetFabric(const Options& options)
         : options_(options), endpoints_(options.endpoints.size()),
           endpoint_ports_(options.endpoints.size()),
-          pending_ctp_requests_(options.endpoints.size()),
-          request_tassn_last_(options.endpoints.size()),
-          request_tassn_seen_(options.endpoints.size(), false)
+          partial_wqes_(options.endpoints.size()),
+          last_native_tassn_(options.endpoints.size())
     {
         for (std::size_t i = 0; i < endpoints_.size(); ++i) {
             endpoints_[i].socket = options_.endpoints[i].socket;
@@ -435,6 +402,12 @@ class UbNetFabric {
                   << " ctp_native_completions=" << ctp_native_completions_
                   << " ctp_native_send_delivery_completions="
                   << ctp_native_send_delivery_completions_
+                  << " native_wqes_submitted=" << native_wqes_submitted_
+                  << " native_wqes_completed=" << native_wqes_completed_
+                  << " native_trace_size_mismatches="
+                  << native_trace_size_mismatches_
+                  << " ns3_runtime_drops="
+                  << utils::UbUtils::GetRuntimePacketDropCount()
                   << " ctp_tassn_discontinuities="
                   << ctp_tassn_discontinuities_ << '\n';
     }
@@ -480,8 +453,6 @@ class UbNetFabric {
     void BuildTopology()
     {
         const DataRate rate(std::to_string(options_.rate_gbps) + "Gbps");
-        ingress_available_.assign(options_.endpoints.size() * options_.ports,
-                                  PicoSeconds(0));
         for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
             Ptr<Node> node = CreateObject<Node>();
             // The external UDMA process is the host-facing half of a UB
@@ -503,19 +474,32 @@ class UbNetFabric {
                 endpoint_port->SetAddress(Mac48Address::Allocate());
                 endpoint_port->SetDataRate(rate);
                 node->AddDevice(endpoint_port);
-                endpoint_port->SetReceiveHandler(
-                    MakeCallback(&UbNetFabric::ReceiveAtEndpoint, this));
                 endpoint_ports_[endpoint].push_back(endpoint_port);
                 entity_ports.push_back(port);
             }
             controller->CreateCtpEntity(endpoints_[endpoint].eid, entity_ports);
             controller->FreezeCtpEntities();
+            endpoint_switch->Init();
+            Ptr<UbCtpTransportService> service = controller->GetCtpTransportService();
+            controller->GetUbTransaction()->SetTargetExecutor(
+                UbTargetExecutor(MakeCallback(&UbNetFabric::OnTargetExecute, this)
+                                     .Bind(endpoint)));
+            service->TraceConnectWithoutContext(
+                "FirstPacketSendsNotify",
+                MakeCallback(&UbNetFabric::OnNativeSegmentSent, this));
+            service->TraceConnectWithoutContext(
+                "LastPacketACKsNotify",
+                MakeCallback(&UbNetFabric::OnNativeSegmentComplete, this));
         }
         switch_node_ = CreateObject<Node>();
         switch_ = CreateObject<UbSwitch>();
         switch_node_->AggregateObject(switch_);
         switch_->SetNodeType(UB_SWITCH);
-        switch_->SetAttribute("FlowControl", EnumValue(FcType::NONE));
+        // Preserve ns-3-UB's lossless-fabric behavior.  Without flow control,
+        // a multi-segment WQE can overflow the small port staging queues
+        // before the 400-Gbit/s link serializes the burst.  CTP RM would then
+        // wait forever for a segment that never reached target execution.
+        switch_->SetAttribute("FlowControl", EnumValue(FcType::CBFC));
         switch_->SetAttribute("InPortProcessingDelay",
                               TimeValue(PicoSeconds(options_.switch_delay_ps)));
         for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
@@ -543,6 +527,29 @@ class UbNetFabric {
                 switch_->GetRoutingProcess()->AddShortestRoute(
                     utils::NodeIdToIp(endpoint_nodes_[endpoint]->GetId(), port).Get(),
                     {static_cast<std::uint16_t>(endpoint * options_.ports + port)});
+        }
+        // Native CTP performs source-Entity member selection on the endpoint
+        // switch before the packet reaches the central fabric.  Give every
+        // endpoint routes to every remote Entity member, with all local
+        // member ports as equal-cost outputs.  The CTP routing policy then
+        // selects the concrete source port rather than bypassing endpoint
+        // routing as the former manual injection path did.
+        for (std::size_t source = 0; source < endpoints_.size(); ++source) {
+            std::vector<std::uint16_t> local_ports;
+            for (std::uint32_t port = 0; port < options_.ports; ++port)
+                local_ports.push_back(static_cast<std::uint16_t>(port));
+            Ptr<UbRoutingProcess> routing =
+                endpoint_nodes_[source]->GetObject<UbSwitch>()->GetRoutingProcess();
+            for (std::size_t destination = 0; destination < endpoints_.size(); ++destination) {
+                if (destination == source) continue;
+                const std::uint32_t destination_node =
+                    endpoint_nodes_[destination]->GetId();
+                routing->AddShortestRoute(
+                    utils::NodeIdToIp(destination_node).Get(), local_ports);
+                for (std::uint32_t port = 0; port < options_.ports; ++port)
+                    routing->AddShortestRoute(
+                        utils::NodeIdToIp(destination_node, port).Get(), local_ports);
+            }
         }
     }
 
@@ -598,59 +605,19 @@ class UbNetFabric {
             const auto* bytes = reinterpret_cast<const volatile std::uint8_t*>(message) +
                                 sizeof(ubnet::Message);
             for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = bytes[i];
-            FrameTag tag;
-            tag.sequence = ingress.sequence;
-            tag.source_eid = ingress.source_eid;
-            tag.destination_eid = ingress.destination_eid;
-            tag.source_port = ingress.source_port;
-            tag.destination_port = ingress.destination_port;
-            tag.traffic_class = ingress.traffic_class;
-            tag.flags = ingress.flags;
-            if (payload.size() >= sizeof(ubnet::UdmaWireHeader)) {
-                ubnet::UdmaWireHeader wire{};
-                std::memcpy(&wire, payload.data(), sizeof(wire));
-                if (wire.magic == ubnet::kUdmaWireMagic) {
-                    if (wire.version != ubnet::kUdmaWireVersion ||
-                        !(wire.flags & ubnet::kUdmaWireCtpSegment) ||
-                        payload.size() != sizeof(wire) + wire.payload_length ||
-                        wire.payload_length > UB_MTU_BYTE)
-                        throw std::runtime_error(
-                            "invalid UDMA CTP transaction segment");
-                    tag.has_udma = true;
-                    tag.operation = wire.operation;
-                    tag.wire_flags = wire.flags;
-                    tag.source_jetty = wire.source_jetty;
-                    tag.destination_jetty = wire.destination_jetty;
-                    tag.tpn = wire.tpn;
-                    tag.segment = wire.segment;
-                    tag.remote_address = wire.remote_address;
-                    tag.immediate = wire.immediate;
-                    tag.request_id = wire.request_id;
-                    tag.ta_ssn = wire.ta_ssn;
-                    tag.transfer_length = wire.transfer_length;
-                    tag.payload_length = wire.payload_length;
-                    tag.payload_offset = wire.payload_offset;
-                    ctp_max_payload_ = std::max<std::uint64_t>(
-                        ctp_max_payload_, wire.payload_length);
-                    const auto operation = static_cast<ubnet::UdmaOperation>(
-                        wire.operation);
-                    if (operation == ubnet::UdmaOperation::WriteAck) {
-                        ++ctp_taacks_;
-                    } else if (operation == ubnet::UdmaOperation::ReadResponse) {
-                        ++ctp_read_responses_;
-                    } else {
-                        ++ctp_request_segments_;
-                    }
-                    payload.erase(payload.begin(), payload.begin() + sizeof(wire));
-                }
-            }
-            if (tag.has_udma && IsCtpRequest(tag.operation)) {
-                pending_ctp_requests_[source].push_back(
-                    PendingCtpRequest{source, std::move(payload), tag});
-                DrainCtpRequests(source);
-            } else {
-                Inject(source, std::move(payload), tag);
-            }
+            if (payload.size() < sizeof(ubnet::UdmaWireHeader))
+                throw std::runtime_error("native adapter requires a UDMA WQE envelope");
+            ubnet::UdmaWireHeader wire{};
+            std::memcpy(&wire, payload.data(), sizeof(wire));
+            if (wire.magic != ubnet::kUdmaWireMagic ||
+                wire.version != ubnet::kUdmaWireVersion ||
+                payload.size() != sizeof(wire) + wire.payload_length)
+                throw std::runtime_error("invalid UDMA WQE envelope");
+            payload.erase(payload.begin(), payload.begin() + sizeof(wire));
+            if (wire.flags & ubnet::kUdmaWireCtpSegment)
+                CompleteTargetExecution(source, ingress, wire, std::move(payload));
+            else
+                AcceptWqeChunk(source, ingress, wire, std::move(payload));
         } else if (type == ubnet::MessageType::Lifecycle &&
                    message->lifecycle.action == static_cast<std::uint8_t>(
                        ubnet::LifecycleAction::PrepareSync)) {
@@ -671,235 +638,332 @@ class UbNetFabric {
                value == ubnet::UdmaOperation::ReadRequest;
     }
 
-    UbCtpEntityKey RequestKey(std::size_t source, const FrameTag& tag) const
+    static bool IsTargetCompletion(std::uint8_t operation)
     {
-        const auto destination = route_.at(tag.destination_eid);
-        return {.srcEntityId = tag.source_eid,
-                .dstNodeId = endpoint_nodes_[destination]->GetId(),
-                .dstEntityId = tag.destination_eid,
-                .vl = static_cast<std::uint8_t>(tag.traffic_class)};
+        const auto value = static_cast<ubnet::UdmaOperation>(operation);
+        return value == ubnet::UdmaOperation::WriteAck ||
+               value == ubnet::UdmaOperation::ReadResponse;
     }
 
-    Ptr<UbCtpTransactionContext> CtpContext(std::size_t source,
-                                            const FrameTag& tag)
+    void AcceptWqeChunk(std::size_t source,
+                        const ubnet::Frame& frame,
+                        const ubnet::UdmaWireHeader& wire,
+                        std::vector<std::uint8_t> payload)
     {
-        Ptr<UbController> controller =
-            endpoint_nodes_.at(source)->GetObject<UbController>();
-        NS_ABORT_MSG_IF(controller == nullptr,
-                        "CTP endpoint has no native UB controller");
-        return controller->GetCtpTransportService()->
-            GetOrCreateTransactionContext(RequestKey(source, tag));
-    }
-
-    void DrainCtpRequests(std::size_t source)
-    {
-        auto& pending = pending_ctp_requests_.at(source);
-        while (!pending.empty()) {
-            PendingCtpRequest& request = pending.front();
-            Ptr<UbCtpTransactionContext> context = CtpContext(source, request.tag);
-            const std::uint32_t ta_ssn = context->GetSendNext();
-            if (!context->TryAdmit(ta_ssn)) {
-                ++ctp_native_window_blocked_;
-                return;
-            }
-            request.tag.ta_ssn = ta_ssn;
-            if (request_tassn_seen_[source] &&
-                ta_ssn != request_tassn_last_[source] + 1)
-                ++ctp_tassn_discontinuities_;
-            request_tassn_last_[source] = ta_ssn;
-            request_tassn_seen_[source] = true;
-            ++ctp_native_admitted_;
-            ctp_native_max_outstanding_ = std::max<std::uint64_t>(
-                ctp_native_max_outstanding_,
-                static_cast<std::uint64_t>(context->GetOutstandingCount()));
-            std::vector<std::uint8_t> payload = std::move(request.payload);
-            FrameTag tag = request.tag;
-            pending.pop_front();
-            Inject(source, std::move(payload), tag);
+        if (!IsCtpRequest(wire.operation) || IsTargetCompletion(wire.operation) ||
+            wire.payload_offset + wire.payload_length > wire.transfer_length)
+            throw std::runtime_error("invalid complete-WQE request chunk");
+        const bool read = static_cast<ubnet::UdmaOperation>(wire.operation) ==
+                          ubnet::UdmaOperation::ReadRequest;
+        if (read && (wire.payload_length != 0 || wire.payload_offset != 0))
+            throw std::runtime_error("READ WQE envelope unexpectedly carries payload");
+        auto& partials = partial_wqes_.at(source);
+        auto [it, inserted] = partials.try_emplace(frame.sequence);
+        PartialWqe& partial = it->second;
+        if (inserted) {
+            if (wire.payload_offset != 0)
+                throw std::runtime_error("first WQE IPC chunk has non-zero offset");
+            partial.frame = frame;
+            partial.wire = wire;
+            partial.payload.reserve(read ? 0 : wire.transfer_length);
+        } else if (wire.payload_offset != partial.next_offset ||
+                   wire.operation != partial.wire.operation ||
+                   wire.request_id != partial.wire.request_id ||
+                   wire.transfer_length != partial.wire.transfer_length) {
+            throw std::runtime_error("non-contiguous or mismatched WQE IPC chunks");
         }
+        partial.payload.insert(partial.payload.end(), payload.begin(), payload.end());
+        partial.next_offset += wire.payload_length;
+        if (!(wire.flags & ubnet::kUdmaWireLastFragment)) return;
+        const std::size_t expected = read ? 0 : wire.transfer_length;
+        if (partial.payload.size() != expected)
+            throw std::runtime_error("complete WQE payload length mismatch");
+        PartialWqe complete = std::move(partial);
+        partials.erase(it);
+        SubmitNativeWqe(source, std::move(complete));
     }
 
-    void CompleteCtpRequest(const FrameTag& response)
+    void SubmitNativeWqe(std::size_t source, PartialWqe complete)
     {
-        const auto source = route_.at(response.destination_eid);
+        const auto destination = route_.at(complete.frame.destination_eid);
         Ptr<UbController> controller =
             endpoint_nodes_.at(source)->GetObject<UbController>();
+        Ptr<UbFunction> function = controller->GetUbFunction();
         Ptr<UbCtpTransportService> service = controller->GetCtpTransportService();
-        const auto remote = route_.at(response.source_eid);
-        const UbCtpEntityKey key{
-            .srcEntityId = response.destination_eid,
-            .dstNodeId = endpoint_nodes_[remote]->GetId(),
-            .dstEntityId = response.source_eid,
-            .vl = static_cast<std::uint8_t>(response.traffic_class)};
-        Ptr<UbCtpTransactionContext> context =
-            service->GetOrCreateTransactionContext(key);
-        if (!context->MarkTaAckWire(static_cast<std::uint16_t>(response.ta_ssn)))
-            throw std::runtime_error("CTP response TASSN is outside the native window");
-        ++ctp_native_completions_;
-        DrainCtpRequests(source);
-    }
-
-    void CompleteCtpSendAtDelivery(const FrameTag& request)
-    {
-        const auto source = route_.at(request.source_eid);
-        Ptr<UbCtpTransactionContext> context = CtpContext(source, request);
-        if (!context->MarkTaAckWire(static_cast<std::uint16_t>(request.ta_ssn)))
-            throw std::runtime_error(
-                "delivered CTP SEND TASSN is outside the native window");
-        ++ctp_native_completions_;
-        ++ctp_native_send_delivery_completions_;
-        DrainCtpRequests(source);
-    }
-
-    void Inject(std::size_t source, std::vector<std::uint8_t> payload,
-                const FrameTag& tag)
-    {
-        Ptr<Packet> packet = Create<Packet>(payload.data(), payload.size());
-        packet->AddPacketTag(tag);
-        if (tag.has_udma) {
-            const UbTransactionOpcode opcode = TransactionOpcode(tag.operation);
-            NS_ABORT_MSG_IF(opcode == UbTransactionOpcode::MAX_OPCODE,
-                            "unsupported UDMA operation at CTP boundary");
-            if (opcode == UbTransactionOpcode::TAACK) {
-                UbCompactAckTransactionHeader ta;
-                ta.SetUbTransactionOpcode(opcode);
-                ta.SetIniTaSsn(static_cast<std::uint16_t>(tag.ta_ssn));
-                packet->AddHeader(ta);
-            } else {
-                UbCompactTransactionHeader ta;
-                ta.SetUbTransactionOpcode(opcode);
-                ta.SetIniTaSsn(static_cast<std::uint16_t>(tag.ta_ssn));
-                packet->AddHeader(ta);
-            }
-            UbCompactEidHeader eid;
-            eid.SetSourceEid(tag.source_eid);
-            eid.SetDestinationEid(tag.destination_eid);
-            packet->AddHeader(eid);
-            UbCompactUpiHeader upi;
-            upi.SetUpi(0);
-            packet->AddHeader(upi);
+        // This Jetty belongs to the modeled UB endpoint, not to the guest
+        // provider.  Keep one reusable native Jetty per endpoint/Entity path;
+        // guest Jetty ids remain metadata in NativeTask and may be created and
+        // destroyed independently by every perftest invocation.
+        constexpr std::uint32_t jetty_id = 1;
+        const UbCtpEntityKey key{.srcEntityId = complete.frame.source_eid,
+                                 .dstNodeId = endpoint_nodes_[destination]->GetId(),
+                                 .dstEntityId = complete.frame.destination_eid,
+                                 .vl = 1};
+        if (!function->IsJettyExists(jetty_id))
+            function->CreateJetty(endpoint_nodes_[source]->GetId(),
+                                  endpoint_nodes_[destination]->GetId(), jetty_id);
+        Ptr<UbJetty> jetty = function->GetJetty(jetty_id);
+        if (!service->HasJettyPreparation(jetty_id) && !service->PrepareJetty(jetty, key))
+            throw std::runtime_error("failed to prepare native CTP Jetty");
+        const std::uint32_t task_id = next_native_task_id_++;
+        const UbTransactionOpcode opcode = TransactionOpcode(complete.wire.operation);
+        Ptr<UbWqe> wqe = function->CreateWqe(endpoint_nodes_[source]->GetId(),
+                                              endpoint_nodes_[destination]->GetId(),
+                                              complete.wire.transfer_length,
+                                              task_id, opcode);
+        wqe->SetSrcEntityId(complete.frame.source_eid);
+        wqe->SetDstEntityId(complete.frame.destination_eid);
+        wqe->SetSport(CTP_WILDCARD_PORT);
+        wqe->SetDport(CTP_WILDCARD_PORT);
+        wqe->SetPriority(1);
+        wqe->SetOrderType(OrderType::ORDER_NO);
+        wqe->SetRemoteAddress(complete.wire.remote_address);
+        wqe->SetRemoteTokenId(complete.wire.segment);
+        if (!complete.payload.empty())
+            wqe->SetExplicitPayload(Create<Packet>(complete.payload.data(),
+                                                   complete.payload.size()));
+        if (opcode == UbTransactionOpcode::SEND_WITH_IMMEDIATE) {
+            UbTransactionFields fields;
+            fields.immediate = UbImmediateFields{complete.wire.immediate, 0,
+                                                 complete.wire.transfer_length};
+            wqe->SetTransactionFields(fields);
         }
-        UbCtpHeader ctp;
-        ctp.SetTPOpcode(CtpOpcode::CTP_DATA); ctp.SetPadding(0);
-        ctp.SetNlp(tag.has_udma ? UB_CTPH_NLP_UPI16_EID40_TAH : 0);
-        packet->AddHeader(ctp);
-        UbCna16NetworkHeader cna;
-        cna.SetScna(static_cast<std::uint16_t>(utils::NodeIdToCna16(
-            endpoint_nodes_[source]->GetId(), tag.source_port)));
-        const auto destination = route_.at(tag.destination_eid);
-        cna.SetDcna(static_cast<std::uint16_t>(utils::NodeIdToCna16(
-            endpoint_nodes_[destination]->GetId())));
-        cna.SetLb(static_cast<std::uint8_t>(tag.sequence));
-        cna.SetServiceLevel(static_cast<std::uint8_t>(tag.traffic_class));
-        cna.SetNlp(UB_CNA_NLP_CTPH);
-        packet->AddHeader(cna);
-        UbDataLink::AddPacketHeader(packet, false, false, 1, 1,
-            RoutingType::PER_FLOW_SHORTEST_PATHS,
-            UbDatalinkHeaderConfig::PACKET_CNA16);
+        native_tasks_.emplace(task_id, NativeTask{source, destination,
+            complete.frame.sequence, complete.wire, task_id, 0, {}});
         ++scheduled_packets_;
-        ++forwarded_;
-        payload_bytes_ += payload.size();
-        // Frames arrive from an external device process, rather than through
-        // an ns-3 UbPort.  Preserve the missing ingress-port serialization
-        // here: injecting a whole fragmented WQE at one timestamp can
-        // otherwise overflow a finite switch ingress buffer even though a
-        // physical 400-Gbit/s port would naturally pace those fragments.
-        const std::size_t ingress_index = source * options_.ports + tag.source_port;
-        const Time now = Simulator::Now();
-        const Time start = std::max(now, ingress_available_[ingress_index]);
-        const DataRate rate(std::to_string(options_.rate_gbps) + "Gbps");
-        const Time serialization = rate.CalculateBytesTxTime(packet->GetSize());
-        const Time arrival = start + serialization;
-        ingress_available_[ingress_index] = arrival;
-        Simulator::Schedule(arrival - now, &UbNetFabric::EnterSwitch, this,
-                            ingress_index, packet);
-    }
-
-    void EnterSwitch(std::size_t ingress_index, Ptr<Packet> packet)
-    {
-        switch_->SwitchHandlePacket(switch_ports_.at(ingress_index), packet);
-    }
-
-    void ReceiveAtEndpoint(Ptr<UbPort> port, Ptr<Packet> packet)
-    {
-        const auto endpoint_it = endpoint_by_node_.find(port->GetNode()->GetId());
-        NS_ABORT_MSG_IF(endpoint_it == endpoint_by_node_.end(),
-                        "packet reached an unknown UB-NET endpoint");
-        FrameTag tag;
-        NS_ABORT_MSG_IF(!packet->RemovePacketTag(tag), "UB-NET metadata was lost");
-        UbDatalinkPacketHeader data_link;
-        UbCna16NetworkHeader cna;
-        UbCtpHeader ctp;
-        packet->RemoveHeader(data_link); packet->RemoveHeader(cna);
-        packet->RemoveHeader(ctp);
-        if (tag.has_udma) {
-            UbCompactUpiHeader upi;
-            UbCompactEidHeader eid;
-            packet->RemoveHeader(upi); packet->RemoveHeader(eid);
-            if (TransactionOpcode(tag.operation) == UbTransactionOpcode::TAACK) {
-                UbCompactAckTransactionHeader ta;
-                packet->RemoveHeader(ta);
-                NS_ABORT_MSG_IF(ta.GetIniTaSsn() !=
-                                    static_cast<std::uint16_t>(tag.ta_ssn),
-                                "CTP TAACK TASSN changed in the fabric");
-            } else {
-                UbCompactTransactionHeader ta;
-                packet->RemoveHeader(ta);
-                NS_ABORT_MSG_IF(ta.GetIniTaSsn() !=
-                                    static_cast<std::uint16_t>(tag.ta_ssn),
-                                "CTP transaction TASSN changed in the fabric");
-            }
-            const auto operation = static_cast<ubnet::UdmaOperation>(tag.operation);
-            if (operation == ubnet::UdmaOperation::WriteAck ||
-                operation == ubnet::UdmaOperation::ReadResponse)
-                CompleteCtpRequest(tag);
-            else if (operation == ubnet::UdmaOperation::Send ||
-                     operation == ubnet::UdmaOperation::SendImmediate)
-                // The current external UDMA ABI reports SEND completion at
-                // target delivery and does not emit a TAACK frame.  Retire
-                // the native admission entry at the same delivery boundary
-                // so SENDs cannot leave permanent holes in completeUna.
-                CompleteCtpSendAtDelivery(tag);
+        ++native_wqes_submitted_;
+        if (!controller->SubmitUrmaWqe(
+                jetty_id, wqe,
+                MakeCallback(&UbNetFabric::OnNativeWqeComplete, this))) {
+            native_tasks_.erase(task_id);
+            --scheduled_packets_;
+            throw std::runtime_error("native CTP WQE submission was rejected");
         }
+        service->NotifyJettyWork(jetty_id);
+    }
+
+    void QueueUdma(std::size_t endpoint,
+                   const ubnet::Frame& header,
+                   const ubnet::UdmaWireHeader& wire,
+                   const std::vector<std::uint8_t>& payload)
+    {
         QueuedFrame frame;
-        frame.header.sequence = tag.sequence;
-        frame.header.source_eid = tag.source_eid;
-        frame.header.destination_eid = tag.destination_eid;
-        frame.header.source_port = tag.source_port;
-        frame.header.destination_port = port->GetIfIndex();
-        frame.header.traffic_class = tag.traffic_class;
-        frame.header.flags = tag.flags;
-        std::vector<std::uint8_t> transaction_payload(packet->GetSize());
-        packet->CopyData(transaction_payload.data(), transaction_payload.size());
-        if (tag.has_udma) {
-            ubnet::UdmaWireHeader wire{};
-            wire.magic = ubnet::kUdmaWireMagic;
-            wire.version = ubnet::kUdmaWireVersion;
-            wire.operation = tag.operation;
-            wire.flags = tag.wire_flags;
-            wire.source_jetty = tag.source_jetty;
-            wire.destination_jetty = tag.destination_jetty;
-            wire.tpn = tag.tpn;
-            wire.segment = tag.segment;
-            wire.remote_address = tag.remote_address;
-            wire.immediate = tag.immediate;
-            wire.request_id = tag.request_id;
-            wire.ta_ssn = tag.ta_ssn;
-            wire.transfer_length = tag.transfer_length;
-            wire.payload_length = static_cast<std::uint32_t>(
-                transaction_payload.size());
-            wire.payload_offset = tag.payload_offset;
-            const auto* begin = reinterpret_cast<const std::uint8_t*>(&wire);
-            frame.payload.assign(begin, begin + sizeof(wire));
-            frame.payload.insert(frame.payload.end(), transaction_payload.begin(),
-                                 transaction_payload.end());
-        } else {
-            frame.payload = std::move(transaction_payload);
-        }
+        frame.header = header;
+        const auto* begin = reinterpret_cast<const std::uint8_t*>(&wire);
+        frame.payload.assign(begin, begin + sizeof(wire));
+        frame.payload.insert(frame.payload.end(), payload.begin(), payload.end());
         frame.header.length = static_cast<std::uint32_t>(frame.payload.size());
-        endpoints_[endpoint_it->second].outgoing.push_back(std::move(frame));
-        --scheduled_packets_;
+        endpoints_.at(endpoint).outgoing.push_back(std::move(frame));
+    }
+
+    void OnNativeSegmentSent(std::uint32_t node_id, std::uint32_t task_id,
+                             std::uint32_t, std::uint32_t,
+                             std::uint32_t, std::uint32_t,
+                             std::uint32_t, std::uint32_t ta_ssn,
+                             std::uint32_t, std::uint32_t carrier_bytes,
+                             std::uint32_t)
+    {
+        auto task = native_tasks_.find(task_id);
+        if (task == native_tasks_.end() ||
+            endpoint_nodes_[task->second.source]->GetId() != node_id)
+            throw std::runtime_error("native CTP segment trace has no external WQE");
+        const std::uint16_t wire_ssn = static_cast<std::uint16_t>(ta_ssn);
+        // A CTP READ request carries only the encoded request carrier (one
+        // byte in the native model), while its logical segment describes up
+        // to one MTU of target memory and response payload.  Preserve that
+        // distinction at the process boundary: the native Jetty still owns
+        // segmentation, and this mapping only identifies the corresponding
+        // range in the guest WQE buffer.
+        const bool read = static_cast<ubnet::UdmaOperation>(
+                              task->second.wire.operation) ==
+                          ubnet::UdmaOperation::ReadRequest;
+        if (task->second.next_offset >= task->second.wire.transfer_length)
+            throw std::runtime_error("native CTP emitted excess external WQE segment");
+        const std::uint32_t remaining = task->second.wire.transfer_length -
+                                        task->second.next_offset;
+        const std::uint32_t logical_bytes = read
+            ? std::min<std::uint32_t>(UB_MTU_BYTE, remaining)
+            : carrier_bytes;
+        if (logical_bytes == 0 || logical_bytes > remaining)
+            throw std::runtime_error("native CTP segment exceeds external WQE");
+        task->second.segments.emplace(
+            wire_ssn, NativeSegment{task->second.next_offset, logical_bytes, {}});
+        task->second.next_offset += logical_bytes;
+        const std::size_t source = task->second.source;
+        if (last_native_tassn_[source] &&
+            ta_ssn != *last_native_tassn_[source] + 1)
+            ++ctp_tassn_discontinuities_;
+        last_native_tassn_[source] = ta_ssn;
+        ++ctp_request_segments_;
+        ++ctp_native_admitted_;
+        ++forwarded_;
+        payload_bytes_ += logical_bytes;
+        ctp_max_payload_ = std::max<std::uint64_t>(ctp_max_payload_, logical_bytes);
+        Ptr<UbCtpTransactionContext> context =
+            endpoint_nodes_[task->second.source]->GetObject<UbController>()
+                ->GetCtpTransportService()->GetOrCreateTransactionContext(
+                    {.srcEntityId = endpoints_[task->second.source].eid,
+                     .dstNodeId = endpoint_nodes_[task->second.destination]->GetId(),
+                     .dstEntityId = endpoints_[task->second.destination].eid,
+                     .vl = 1});
+        ctp_native_max_outstanding_ = std::max<std::uint64_t>(
+            ctp_native_max_outstanding_, context->GetOutstandingCount());
+    }
+
+    void OnTargetExecute(std::size_t target,
+                         Ptr<const UbWqeSegment> request,
+                         const UbTransactionRule&,
+                         UbTargetCompletion completion)
+    {
+        if (request == nullptr) return completion(UbWorkExecutionResult{});
+        const auto source_it = endpoint_by_node_.find(request->GetSrc());
+        auto task = native_tasks_.find(request->GetTaskId());
+        if (source_it == endpoint_by_node_.end() || task == native_tasks_.end())
+            throw std::runtime_error("target execution cannot resolve external WQE");
+        const std::size_t source = source_it->second;
+        const std::uint16_t ta_ssn = static_cast<std::uint16_t>(request->GetRequestTassn());
+        auto segment = task->second.segments.find(ta_ssn);
+        if (segment == task->second.segments.end())
+            throw std::runtime_error("target execution cannot resolve native segment");
+        ubnet::UdmaWireHeader wire{};
+        wire.magic = ubnet::kUdmaWireMagic;
+        wire.version = ubnet::kUdmaWireVersion;
+        wire.operation = task->second.wire.operation;
+        wire.flags = ubnet::kUdmaWireCtpSegment | ubnet::kUdmaWireLastFragment;
+        wire.source_jetty = task->second.wire.source_jetty;
+        wire.destination_jetty = task->second.wire.destination_jetty;
+        wire.tpn = task->second.wire.tpn;
+        wire.segment = task->second.wire.segment;
+        wire.remote_address = task->second.wire.remote_address + segment->second.offset;
+        wire.immediate = task->second.wire.immediate;
+        wire.request_id = task->second.wire.request_id;
+        wire.ta_ssn = ta_ssn;
+        wire.transfer_length = segment->second.bytes;
+        wire.payload_offset = segment->second.offset;
+        std::vector<std::uint8_t> payload;
+        if (request->HasExplicitPayload()) {
+            Ptr<const Packet> packet = request->GetExplicitPayload();
+            payload.resize(packet->GetSize());
+            packet->CopyData(payload.data(), payload.size());
+        }
+        wire.payload_length = static_cast<std::uint32_t>(payload.size());
+        ubnet::Frame frame{};
+        frame.sequence = task->second.sequence;
+        frame.source_eid = endpoints_[source].eid;
+        frame.destination_eid = endpoints_[target].eid;
+        frame.source_port = request->GetSport() < options_.ports ? request->GetSport() : 0;
+        frame.destination_port = request->GetDport() < options_.ports ? request->GetDport() : 0;
+        frame.traffic_class = static_cast<std::uint16_t>(request->GetPriority());
+        QueueUdma(target, frame, wire, payload);
         ++delivered_;
+        const auto operation = static_cast<ubnet::UdmaOperation>(wire.operation);
+        if (operation == ubnet::UdmaOperation::Send ||
+            operation == ubnet::UdmaOperation::SendImmediate) {
+            completion(UbWorkExecutionResult{});
+            return;
+        }
+        const TargetExecutionKey key{source, wire.request_id, ta_ssn};
+        if (!pending_target_executions_.emplace(
+                key, PendingTargetExecution{completion, request->GetTaskId(), ta_ssn}).second)
+            throw std::runtime_error("duplicate external target DMA execution");
+    }
+
+    void CompleteTargetExecution(std::size_t target,
+                                 const ubnet::Frame& frame,
+                                 const ubnet::UdmaWireHeader& wire,
+                                 std::vector<std::uint8_t> payload)
+    {
+        if (!IsTargetCompletion(wire.operation) ||
+            wire.payload_length > UB_MTU_BYTE ||
+            frame.destination_eid == endpoints_[target].eid)
+            throw std::runtime_error("invalid external target DMA completion");
+        const std::size_t source = route_.at(frame.destination_eid);
+        const TargetExecutionKey key{source, wire.request_id,
+                                     static_cast<std::uint16_t>(wire.ta_ssn)};
+        auto pending = pending_target_executions_.find(key);
+        if (pending == pending_target_executions_.end())
+            throw std::runtime_error("unmatched external target DMA completion");
+        auto task = native_tasks_.find(pending->second.task_id);
+        if (task == native_tasks_.end())
+            throw std::runtime_error("target DMA completion lost its native WQE");
+        auto segment = task->second.segments.find(pending->second.ta_ssn);
+        if (segment == task->second.segments.end())
+            throw std::runtime_error("target DMA completion lost its native segment");
+        if (static_cast<ubnet::UdmaOperation>(wire.operation) ==
+            ubnet::UdmaOperation::ReadResponse) {
+            if (payload.size() != segment->second.bytes)
+                throw std::runtime_error("target READ payload length mismatch");
+            segment->second.read_payload = std::move(payload);
+        }
+        UbTargetCompletion completion = pending->second.completion;
+        pending_target_executions_.erase(pending);
+        completion(UbWorkExecutionResult{});
+    }
+
+    void OnNativeSegmentComplete(std::uint32_t node_id, std::uint32_t task_id,
+                                 std::uint32_t, std::uint32_t,
+                                 std::uint32_t, std::uint32_t,
+                                 std::uint32_t, std::uint32_t ta_ssn,
+                                 std::uint32_t, std::uint32_t bytes,
+                                 std::uint32_t opcode_value)
+    {
+        auto task = native_tasks_.find(task_id);
+        if (task == native_tasks_.end() ||
+            endpoint_nodes_[task->second.source]->GetId() != node_id)
+            throw std::runtime_error("native completion trace has no external WQE");
+        const std::uint16_t wire_ssn = static_cast<std::uint16_t>(ta_ssn);
+        auto segment = task->second.segments.find(wire_ssn);
+        if (segment == task->second.segments.end())
+            throw std::runtime_error("native completion trace has no external segment");
+        if (segment->second.bytes != bytes)
+            ++native_trace_size_mismatches_;
+        const auto opcode = static_cast<UbTransactionOpcode>(opcode_value);
+        ++ctp_native_completions_;
+        ++forwarded_;
+        ++delivered_;
+        ubnet::UdmaWireHeader wire{};
+        wire.magic = ubnet::kUdmaWireMagic;
+        wire.version = ubnet::kUdmaWireVersion;
+        wire.flags = ubnet::kUdmaWireCtpSegment | ubnet::kUdmaWireLastFragment;
+        wire.source_jetty = task->second.wire.destination_jetty;
+        wire.destination_jetty = task->second.wire.source_jetty;
+        wire.tpn = task->second.wire.tpn;
+        wire.request_id = task->second.wire.request_id;
+        wire.ta_ssn = wire_ssn;
+        wire.transfer_length = segment->second.bytes;
+        wire.payload_offset = segment->second.offset;
+        std::vector<std::uint8_t> payload;
+        if (opcode == UbTransactionOpcode::WRITE) {
+            wire.operation = static_cast<std::uint8_t>(ubnet::UdmaOperation::WriteAck);
+            ++ctp_taacks_;
+        } else if (opcode == UbTransactionOpcode::READ) {
+            wire.operation = static_cast<std::uint8_t>(ubnet::UdmaOperation::ReadResponse);
+            payload = std::move(segment->second.read_payload);
+            wire.payload_length = static_cast<std::uint32_t>(payload.size());
+            payload_bytes_ += payload.size();
+            ++ctp_read_responses_;
+        } else {
+            ++ctp_native_send_delivery_completions_;
+            return;
+        }
+        ubnet::Frame frame{};
+        frame.sequence = task->second.sequence;
+        frame.source_eid = endpoints_[task->second.destination].eid;
+        frame.destination_eid = endpoints_[task->second.source].eid;
+        frame.source_port = 0;
+        frame.destination_port = 0;
+        QueueUdma(task->second.source, frame, wire, payload);
+    }
+
+    void OnNativeWqeComplete(std::uint32_t task_id, std::uint32_t)
+    {
+        auto task = native_tasks_.find(task_id);
+        if (task == native_tasks_.end())
+            throw std::runtime_error("native WQE completion has no external WQE");
+        native_tasks_.erase(task);
+        NS_ABORT_MSG_IF(scheduled_packets_ == 0, "native WQE work counter underflow");
+        --scheduled_packets_;
+        ++native_wqes_completed_;
     }
 
     bool Flush(Endpoint& endpoint, std::uint64_t now)
@@ -986,14 +1050,15 @@ class UbNetFabric {
     std::unordered_map<std::uint32_t, std::size_t> route_;
     std::vector<Ptr<Node>> endpoint_nodes_;
     std::vector<std::vector<Ptr<UbPort>>> endpoint_ports_;
-    std::vector<std::deque<PendingCtpRequest>> pending_ctp_requests_;
-    std::vector<std::uint32_t> request_tassn_last_;
-    std::vector<bool> request_tassn_seen_;
+    std::vector<std::unordered_map<std::uint64_t, PartialWqe>> partial_wqes_;
+    std::vector<std::optional<std::uint32_t>> last_native_tassn_;
+    std::unordered_map<std::uint32_t, NativeTask> native_tasks_;
+    std::map<TargetExecutionKey, PendingTargetExecution> pending_target_executions_;
+    std::uint32_t next_native_task_id_{1};
     std::unordered_map<std::uint32_t, std::size_t> endpoint_by_node_;
     Ptr<Node> switch_node_;
     Ptr<UbSwitch> switch_;
     std::vector<Ptr<UbPort>> switch_ports_;
-    std::vector<Time> ingress_available_;
     std::uint64_t scheduled_packets_{};
     std::uint64_t forwarded_{};
     std::uint64_t delivered_{};
@@ -1017,6 +1082,9 @@ class UbNetFabric {
     std::uint64_t ctp_native_completions_{};
     std::uint64_t ctp_native_send_delivery_completions_{};
     std::uint64_t ctp_tassn_discontinuities_{};
+    std::uint64_t native_wqes_submitted_{};
+    std::uint64_t native_wqes_completed_{};
+    std::uint64_t native_trace_size_mismatches_{};
     bool lifecycle_active_{false};
 };
 

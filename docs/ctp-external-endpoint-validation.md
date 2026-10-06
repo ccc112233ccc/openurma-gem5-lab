@@ -2,25 +2,31 @@
 
 ## Implemented boundary
 
-The standalone device endpoint splits WRITE and READ transactions at the
-4-KiB UB transport MTU. The ns-3 adapter now owns the endpoint transaction
-state: each endpoint instantiates the native `UbController`,
-`UbTransaction`, `UbCtpTransportService`, and one
-`UbCtpTransactionContext` per Entity path. The native context admits each
-segment, assigns its monotonically increasing TASSN, applies the 2,048-entry
-sliding window, and retires it when WRITE TAACK or READ response arrives. The
-adapter then encodes compact CTP, UPI, EID and TA headers; the switch resolves
-the destination EID through a two-member CTP Entity.
+The standalone device endpoint sends one complete WQE envelope over UB-NET
+wire ABI v3. Large WRITE/SEND payloads can span several IPC-ring messages, but
+that fragmentation is transport-neutral. The ns-3 adapter reassembles the WQE
+and submits it through a prepared native `UbJetty`; the external UDMA no
+longer performs WQE-to-MTU segmentation.
 
-The target UDMA performs DMA per segment.  WRITE TAACK and READ response packets
-carry the request TASSN and byte offset back to the initiator.  Duplicate TASSNs
-are rejected, completed bytes are accumulated, and one WQE CQE is produced only
-after the entire transaction has completed.  CTP SEND remains a single packet
-and is rejected above 4 KiB.
+Each endpoint instantiates a native `UbController`, `UbFunction`,
+`UbTransaction`, `UbCtpTransportService`, and `UbCtpTransactionContext`.
+Together they own 4-KiB segmentation, monotonically increasing TASSNs, the
+2,048-entry sliding window, ordering, CTP Entity member-port selection, compact
+CTP/UPI/EID/TA headers, and response processing. Native CBFC supplies
+network-owned backpressure for simultaneous multi-segment bursts.
+
+The adapter connects `UbTargetExecutor` to the standalone target UDMA, which
+performs the actual memory read or write for each native segment. WRITE TAACK
+and READ response packets carry the request TASSN and byte offset back to the
+initiator. READ request carrier size (one encoded byte) is kept distinct from
+its logical response length (up to 4 KiB). Duplicate TASSNs are rejected,
+completed bytes are accumulated, and one WQE CQE is produced only after the
+entire transaction has completed. CTP SEND remains a single packet and is
+rejected above 4 KiB.
 
 ## QEMU functional regression
 
-The dual-QEMU functional suite completed in 28.496 seconds on 2026-10-06. All
+The dual-QEMU functional suite completed in 29.248 seconds on 2026-10-06. All
 of the following cases returned zero:
 
 - 128-byte `send_lat` and `send_bw` with SQ wrap;
@@ -30,17 +36,19 @@ of the following cases returned zero:
 - 64-KiB and 1-MiB bidirectional WRITE and READ;
 - bidirectional WRITE scan from 2 bytes through 1 MiB.
 
-The run produced 1,478 and 1,646 completed SQ WQEs at the two endpoints with
+The run produced 2,768 and 2,936 completed SQ WQEs at the two endpoints with
 zero UDMA errors. The complete per-case UART output and machine-readable
-report were written to `/tmp/ubsim-native-ctp-context-regression-2` on the
+report were written to `/tmp/ubsim-native-jetty-regression-8` on the
 validation host; that directory is intentionally not a repository artifact.
 
-The fabric observed 73,440 admitted request segments and exactly 73,440
-native completions, with no TASSN discontinuity and no window block. Peak
-native outstanding depth was 256. Of the completions, 200 were SEND target
-deliveries; the rest were 70,032 WRITE TAACKs and 3,208 READ responses. This
-distinction is intentional: the existing external SEND ABI has no TAACK
-message, whereas WRITE and READ retain remote-completion semantics.
+The fabric submitted and completed exactly 5,704 native WQEs. It observed
+145,376 admitted native request segments and exactly 145,376 native
+completions, with no TASSN discontinuity, trace-size mismatch, ns-3 packet
+drop, or window block. Peak native outstanding depth was 256. Of the
+completions, 200 were SEND target deliveries; the rest were 139,408 WRITE
+TAACKs and 5,768 READ responses. This distinction is intentional: the
+external SEND boundary has no target-DMA completion message, whereas WRITE
+and READ retain remote-completion semantics.
 
 ## Focused 1-MiB proof
 
@@ -66,11 +74,11 @@ virtual-time bandwidth claim.
 
 ## Remaining work
 
-This stage uses native ns-3-UB wire headers, Entity routing, transaction
-contexts, admission and TAACK windows. The external UDMA process still owns
-WQE-to-4-KiB segmentation, so Jetty ordering and CNP behavior are not yet on
-the production path. The next stage is to carry one WQE descriptor across the
-device/adapter boundary, submit it through a prepared native Jetty, and attach
-the existing external DMA engine through `UbTargetExecutor`. That will let the
-native service own segmentation, NO/RO/SO ordering and response generation
-without moving actual host-memory access into the network model.
+The production path now uses the native Jetty and CTP transaction engine for
+segmentation, TASSN/window state, Entity routing and response generation,
+while target memory access remains in the standalone UDMA hardware model.
+The regression exercises the current NO path and proves lossless CBFC under
+the included large bidirectional bursts. Remaining protocol validation should
+add focused RO/SO ordering, CNP/congestion and injected-loss/retransmission
+cases; those behaviors are no longer blocked on the process boundary, but are
+not claimed by this functional matrix.

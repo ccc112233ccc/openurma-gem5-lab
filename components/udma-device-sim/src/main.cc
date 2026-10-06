@@ -426,7 +426,7 @@ class NetworkPort final : public device::NetworkInterface {
         const std::size_t ring_capacity = net_proto::UbNetOutMsgLen(&interface_) -
                                           sizeof(net_proto::Message) -
                                           sizeof(net_proto::UdmaWireHeader);
-        if (ring_capacity < kCtpMaxSegmentBytes)
+        if (ring_capacity == 0)
             return pending.completion(false);
         if ((frame.operation == device::Frame::Operation::Send ||
              frame.operation == device::Frame::Operation::SendImmediate) &&
@@ -435,54 +435,55 @@ class NetworkPort final : public device::NetworkInterface {
 
         const bool read_request =
             frame.operation == device::Frame::Operation::ReadRequest;
-        const bool write_ack =
-            frame.operation == device::Frame::Operation::WriteAck;
         const bool request = frame.operation == device::Frame::Operation::Write ||
             read_request || frame.operation == device::Frame::Operation::Send ||
             frame.operation == device::Frame::Operation::SendImmediate;
-        const std::size_t total = read_request ? frame.transfer_length
-                                               : frame.bytes.size();
+        const bool target_completion =
+            frame.operation == device::Frame::Operation::WriteAck ||
+            frame.operation == device::Frame::Operation::ReadResponse;
+        const std::size_t logical_total = read_request ? frame.transfer_length
+                                                       : frame.bytes.size();
+        const std::size_t payload_total = read_request ? 0 : frame.bytes.size();
+        if (!request && !target_completion)
+            return pending.completion(false);
         std::size_t offset = 0;
         do {
             net_proto::UdmaWireHeader header{};
             header.magic = net_proto::kUdmaWireMagic;
             header.version = net_proto::kUdmaWireVersion;
             header.operation = static_cast<std::uint8_t>(frame.operation);
-            header.flags = net_proto::kUdmaWireCtpSegment;
+            header.flags = target_completion ? net_proto::kUdmaWireCtpSegment : 0;
             header.source_jetty = frame.source_jetty;
             header.destination_jetty = frame.destination_jetty;
             header.tpn = frame.tpn;
             header.segment = frame.segment;
-            header.remote_address = frame.remote_address + offset;
+            header.remote_address = frame.remote_address;
             header.immediate = frame.immediate;
             header.request_id = frame.request_id;
-            // Request TASSNs are owned by the CTP endpoint transaction
-            // context in the ns-3 adapter.  Keep the field unset here; the
-            // adapter assigns it only after the native admission window has
-            // accepted this segment.  Responses echo the admitted request
-            // TASSN supplied by the receive path.
-            header.ta_ssn = request ? 0 : frame.ta_ssn;
-            const std::size_t chunk = std::min(kCtpMaxSegmentBytes,
-                                               total - offset);
-            header.transfer_length = write_ack ? frame.transfer_length :
-                static_cast<std::uint32_t>(chunk);
-            header.payload_length = read_request ? 0 :
-                static_cast<std::uint32_t>(chunk);
-            header.payload_offset = frame.transaction_offset +
-                static_cast<std::uint32_t>(offset);
-            if (total > kCtpMaxSegmentBytes)
+            header.ta_ssn = target_completion ? frame.ta_ssn : 0;
+            const std::size_t chunk = target_completion
+                ? payload_total
+                : std::min(ring_capacity, payload_total - offset);
+            header.transfer_length = request
+                ? static_cast<std::uint32_t>(logical_total)
+                : frame.transfer_length;
+            header.payload_length = static_cast<std::uint32_t>(chunk);
+            header.payload_offset = target_completion
+                ? frame.transaction_offset
+                : static_cast<std::uint32_t>(offset);
+            if (!target_completion && payload_total > ring_capacity)
                 header.flags |= net_proto::kUdmaWireFragmented;
-            if (offset + chunk == total)
+            if (target_completion || offset + chunk == payload_total)
                 header.flags |= net_proto::kUdmaWireLastFragment;
             const auto* first = reinterpret_cast<const std::uint8_t*>(&header);
             std::vector<std::uint8_t> wire(first, first + sizeof(header));
-            if (!read_request)
+            if (chunk != 0)
                 wire.insert(wire.end(), frame.bytes.begin() + offset,
                             frame.bytes.begin() + offset + chunk);
             pending.fragments.push_back(std::move(wire));
             ++fragments_queued_;
             offset += chunk;
-        } while (offset < total);
+        } while (offset < payload_total);
         pending.frame.bytes.clear();
         outgoing_.push_back(std::move(pending));
     }
