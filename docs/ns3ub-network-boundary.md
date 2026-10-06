@@ -26,9 +26,36 @@ exactly one side of the boundary.
 | Switch egress-port serialization | ns-3-UB |
 | Fabric routing, flow control, congestion and link faults | ns-3-UB |
 
-UB-NET transports a wire-visible frame plus forwarding metadata. The payload
-is opaque to the network process: WQEs, DMA requests and RMA state transitions
-never cross this boundary.
+UB-NET transports one wire-visible transaction segment plus forwarding
+metadata. WQEs, host DMA requests and WQE completion state never cross this
+boundary.  The adapter converts the simulator-neutral UDMA segment shim into
+the real ns-3-UB CTP/UPI/EID/TA header stack before the packet enters the
+fabric, and reverses that encoding at the destination endpoint.
+
+## CTP transaction segmentation
+
+The endpoint side of the standalone device owns CTP segmentation.  SEND is a
+single-packet operation and is rejected above the 4-KiB transport MTU.  WRITE
+and READ are split into at most 4-KiB transaction segments.  Every request
+segment receives a monotonically increasing TASSN; WRITE TAACK and READ
+response packets retain the request TASSN and transaction offset.
+
+The remote UDMA performs address translation and DMA independently for every
+segment.  The initiating UDMA de-duplicates returned TASSNs, accumulates the
+completed byte count, and emits the WQE CQE only after the complete byte range
+has finished.  IPC ring fragmentation is therefore no longer confused with a
+CTP transaction segment.
+
+Compact EIDs are registered as native ns-3-UB CTP Entities.  Both physical
+ports are Entity members, and the switch resolves a wildcard destination CNA
+through the Entity registry and load-balance field.  The switch does not
+segment WQEs, allocate TASSNs, access guest memory, or decide WQE completion.
+
+This is the first protocol-correct external-endpoint stage.  It uses native
+ns-3-UB wire headers and Entity routing, while admission state remains in the
+external endpoint.  Moving that admission state behind
+`UbCtpTransportService` is a later internal refactor, not a change to the
+UDMA/fabric process boundary.
 
 ## Process topology
 

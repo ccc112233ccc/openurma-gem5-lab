@@ -1385,7 +1385,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         pending_rma_[request_id] = PendingRma{
             jetty_id, producer, decoded_wqebbs, completed_index,
             wqe.opcode(), local.length,
-            0, wqe.completion(), jetty.payload_token, local.address};
+            0, wqe.completion(), jetty.payload_token, local.address, 0, {}};
         Frame frame{};
         frame.sequence = next_sequence_++;
         frame.source_eid = config_.endpoint_eid + jetty.eid_index * 0x10000U;
@@ -1478,7 +1478,7 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
         frame.transfer_length = count;
         pending_rma_[request_id] = PendingRma{
             jetty_id, producer, wqebbs, completed_index, wqe.opcode(), count,
-            wqe.immediate(), wqe.completion(), 0, 0};
+            wqe.immediate(), wqe.completion(), 0, 0, 0, {}};
     }
     network_.Send(std::move(frame),
         [this, jetty_id, producer, completed_index, opcode = wqe.opcode(),
@@ -2505,6 +2505,9 @@ UdmaModel::ReceiveWrite(Frame frame)
             ack.destination_jetty = reply_basis.source_jetty;
             ack.tpn = reply_basis.tpn;
             ack.request_id = reply_basis.request_id;
+            ack.ta_ssn = reply_basis.ta_ssn;
+            ack.transaction_offset = reply_basis.transaction_offset;
+            ack.transfer_length = reply_basis.transfer_length;
             network_.Send(std::move(ack), [this](bool sent) {
                 if (!sent) ++ubase_errors_;
             });
@@ -2545,6 +2548,8 @@ UdmaModel::ReceiveReadRequest(Frame frame)
             response.tpn = reply_basis.tpn;
             response.request_id = reply_basis.request_id;
             response.transfer_length = reply_basis.transfer_length;
+            response.ta_ssn = reply_basis.ta_ssn;
+            response.transaction_offset = reply_basis.transaction_offset;
             response.bytes = std::move(payload);
             network_.Send(std::move(response), [this](bool sent) {
                 if (!sent) ++ubase_errors_;
@@ -2560,7 +2565,17 @@ UdmaModel::ReceiveWriteAck(Frame frame)
         ++ubase_errors_;
         return;
     }
-    const PendingRma pending = found->second;
+    PendingRma& progress = found->second;
+    if (frame.transfer_length == 0 ||
+        progress.completed_tassns.count(frame.ta_ssn) != 0 ||
+        progress.completed_bytes + frame.transfer_length > progress.byte_count) {
+        ++ubase_errors_;
+        return;
+    }
+    progress.completed_tassns.emplace(frame.ta_ssn, true);
+    progress.completed_bytes += frame.transfer_length;
+    if (progress.completed_bytes != progress.byte_count) return;
+    const PendingRma pending = progress;
     pending_rma_.erase(found);
     CompleteSq(pending.jetty_id, pending.producer, pending.wqebbs,
                pending.completed_index, pending.opcode, pending.byte_count,
@@ -2572,21 +2587,43 @@ UdmaModel::ReceiveReadResponse(Frame frame)
 {
     auto found = pending_rma_.find(frame.request_id);
     if (found == pending_rma_.end() || found->second.opcode != 6 ||
-        frame.bytes.size() != found->second.byte_count) {
+        frame.bytes.size() != frame.transfer_length ||
+        frame.transfer_length == 0 ||
+        frame.transaction_offset + frame.transfer_length >
+            found->second.byte_count ||
+        found->second.completed_tassns.count(frame.ta_ssn) != 0) {
         ++ubase_errors_;
         return;
     }
-    const PendingRma pending = found->second;
-    pending_rma_.erase(found);
-    WriteToken(pending.local_token, pending.local_address,
+    const std::uint64_t request_id = frame.request_id;
+    const std::uint32_t ta_ssn = frame.ta_ssn;
+    const std::uint32_t transfer_length = frame.transfer_length;
+    WriteToken(found->second.local_token,
+               found->second.local_address + frame.transaction_offset,
                         std::move(frame.bytes),
-        [this, pending](bool ok) {
+        [this, request_id, ta_ssn, transfer_length](bool ok) {
+            auto current = pending_rma_.find(request_id);
+            if (current == pending_rma_.end()) {
+                ++ubase_errors_;
+                return;
+            }
             if (!ok) {
-                auto jetty = jetty_contexts_.find(pending.jetty_id);
+                auto jetty = jetty_contexts_.find(current->second.jetty_id);
                 if (jetty != jetty_contexts_.end()) jetty->second.busy = false;
                 ++ubase_errors_;
                 return;
             }
+            PendingRma& progress = current->second;
+            if (progress.completed_tassns.count(ta_ssn) != 0 ||
+                progress.completed_bytes + transfer_length > progress.byte_count) {
+                ++ubase_errors_;
+                return;
+            }
+            progress.completed_tassns.emplace(ta_ssn, true);
+            progress.completed_bytes += transfer_length;
+            if (progress.completed_bytes != progress.byte_count) return;
+            const PendingRma pending = progress;
+            pending_rma_.erase(current);
             CompleteSq(pending.jetty_id, pending.producer, pending.wqebbs,
                        pending.completed_index, pending.opcode,
                        pending.byte_count, pending.immediate,

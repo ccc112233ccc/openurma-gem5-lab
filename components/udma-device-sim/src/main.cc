@@ -382,6 +382,8 @@ class HostPort final : public device::HostInterface {
 
 class NetworkPort final : public device::NetworkInterface {
   public:
+    static constexpr std::size_t kCtpMaxSegmentBytes = 4 * 1024;
+
     NetworkPort(net_proto::Interface& interface, std::uint64_t& now)
         : interface_(interface), now_(now) {}
     void Attach(device::UdmaModel* model) { model_ = model; }
@@ -421,35 +423,57 @@ class NetworkPort final : public device::NetworkInterface {
             outgoing_.push_back(std::move(pending));
             return;
         }
-        const std::size_t capacity = net_proto::UbNetOutMsgLen(&interface_) -
-                                     sizeof(net_proto::Message) -
-                                     sizeof(net_proto::UdmaWireHeader);
-        if (capacity == 0) return pending.completion(false);
-        const std::size_t total = frame.bytes.size();
+        const std::size_t ring_capacity = net_proto::UbNetOutMsgLen(&interface_) -
+                                          sizeof(net_proto::Message) -
+                                          sizeof(net_proto::UdmaWireHeader);
+        if (ring_capacity < kCtpMaxSegmentBytes)
+            return pending.completion(false);
+        if ((frame.operation == device::Frame::Operation::Send ||
+             frame.operation == device::Frame::Operation::SendImmediate) &&
+            frame.bytes.size() > kCtpMaxSegmentBytes)
+            return pending.completion(false);
+
+        const bool read_request =
+            frame.operation == device::Frame::Operation::ReadRequest;
+        const bool write_ack =
+            frame.operation == device::Frame::Operation::WriteAck;
+        const bool request = frame.operation == device::Frame::Operation::Write ||
+            read_request || frame.operation == device::Frame::Operation::Send ||
+            frame.operation == device::Frame::Operation::SendImmediate;
+        const std::size_t total = read_request ? frame.transfer_length
+                                               : frame.bytes.size();
         std::size_t offset = 0;
         do {
             net_proto::UdmaWireHeader header{};
             header.magic = net_proto::kUdmaWireMagic;
-            header.version = 1;
+            header.version = net_proto::kUdmaWireVersion;
             header.operation = static_cast<std::uint8_t>(frame.operation);
+            header.flags = net_proto::kUdmaWireCtpSegment;
             header.source_jetty = frame.source_jetty;
             header.destination_jetty = frame.destination_jetty;
             header.tpn = frame.tpn;
             header.segment = frame.segment;
-            header.remote_address = frame.remote_address;
+            header.remote_address = frame.remote_address + offset;
             header.immediate = frame.immediate;
             header.request_id = frame.request_id;
-            header.transfer_length = frame.transfer_length;
-            const std::size_t chunk = std::min(capacity, total - offset);
-            header.payload_length = static_cast<std::uint32_t>(chunk);
-            header.payload_offset = static_cast<std::uint32_t>(offset);
-            if (total > capacity) header.flags |= net_proto::kUdmaWireFragmented;
+            header.ta_ssn = request ? next_tassn_++ : frame.ta_ssn;
+            const std::size_t chunk = std::min(kCtpMaxSegmentBytes,
+                                               total - offset);
+            header.transfer_length = write_ack ? frame.transfer_length :
+                static_cast<std::uint32_t>(chunk);
+            header.payload_length = read_request ? 0 :
+                static_cast<std::uint32_t>(chunk);
+            header.payload_offset = frame.transaction_offset +
+                static_cast<std::uint32_t>(offset);
+            if (total > kCtpMaxSegmentBytes)
+                header.flags |= net_proto::kUdmaWireFragmented;
             if (offset + chunk == total)
                 header.flags |= net_proto::kUdmaWireLastFragment;
             const auto* first = reinterpret_cast<const std::uint8_t*>(&header);
             std::vector<std::uint8_t> wire(first, first + sizeof(header));
-            wire.insert(wire.end(), frame.bytes.begin() + offset,
-                        frame.bytes.begin() + offset + chunk);
+            if (!read_request)
+                wire.insert(wire.end(), frame.bytes.begin() + offset,
+                            frame.bytes.begin() + offset + chunk);
             pending.fragments.push_back(std::move(wire));
             ++fragments_queued_;
             offset += chunk;
@@ -534,7 +558,7 @@ class NetworkPort final : public device::NetworkInterface {
                 net_proto::UdmaWireHeader header{};
                 std::memcpy(&header, frame.bytes.data(), sizeof(header));
                 if (header.magic == net_proto::kUdmaWireMagic &&
-                    header.version == 1 &&
+                    header.version == net_proto::kUdmaWireVersion &&
                     frame.bytes.size() == sizeof(header) + header.payload_length) {
                     frame.operation = static_cast<device::Frame::Operation>(
                         header.operation);
@@ -545,10 +569,13 @@ class NetworkPort final : public device::NetworkInterface {
                     frame.remote_address = header.remote_address;
                     frame.immediate = header.immediate;
                     frame.request_id = header.request_id;
+                    frame.ta_ssn = header.ta_ssn;
+                    frame.transaction_offset = header.payload_offset;
                     frame.transfer_length = header.transfer_length;
                     frame.bytes.erase(frame.bytes.begin(),
                                       frame.bytes.begin() + sizeof(header));
-                    if (header.flags & net_proto::kUdmaWireFragmented) {
+                    if ((header.flags & net_proto::kUdmaWireFragmented) &&
+                        !(header.flags & net_proto::kUdmaWireCtpSegment)) {
                         auto& partial = fragments_[frame.sequence];
                         if (header.payload_offset == 0) {
                             partial.frame = frame;
@@ -614,6 +641,7 @@ class NetworkPort final : public device::NetworkInterface {
     std::uint64_t fragments_queued_{};
     std::uint64_t fragments_sent_{};
     std::uint64_t send_backpressure_{};
+    std::uint32_t next_tassn_{};
     std::uint64_t async_timestamp_jumps_{};
     std::uint64_t async_timestamp_jump_ps_{};
 };

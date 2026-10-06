@@ -89,6 +89,11 @@ struct Frame {
     std::uint64_t remote_address{};
     std::uint64_t immediate{};
     std::uint64_t request_id{};
+    // CTP transaction-segment metadata.  The endpoint, not the UDMA core or
+    // the switch, assigns TASSN and offsets.  UDMA uses them only to execute
+    // the corresponding DMA slice and aggregate WQE completion.
+    std::uint32_t ta_ssn{};
+    std::uint32_t transaction_offset{};
     std::uint32_t transfer_length{};
     std::vector<std::uint8_t> bytes;
 };
@@ -469,6 +474,8 @@ class UdmaModel {
         bool completion{};
         std::uint32_t local_token{};
         std::uint64_t local_address{};
+        std::uint32_t completed_bytes{};
+        std::unordered_map<std::uint32_t, bool> completed_tassns;
     };
     std::unordered_map<std::uint64_t, PendingRma> pending_rma_;
 };

@@ -5,8 +5,12 @@ device processes through the simulator-neutral UB-NET v1 ABI and uses native
 ns-3-UB `UbSwitch`, `UbPort`, and `UbLink` objects for routing, serialization,
 queueing, and packet delivery. UB-NET boundary timestamps own propagation
 delay and conservative lookahead, so the internal links do not charge it a
-second time. UDMA frames remain opaque to the network process. The adapter
-supports both asynchronous execution and SimBricks-style synchronization.
+second time. The device endpoint supplies one MTU-sized transaction segment;
+the adapter encodes its TASSN and operation in native compact CTP/UPI/EID/TA
+headers before fabric injection. Compact EIDs are registered as multi-port CTP
+Entities, so wildcard destinations use ns-3-UB Entity member selection. The
+adapter supports both asynchronous execution and SimBricks-style
+synchronization.
 
 `ub-net-adapter.CMakeLists.txt` is installed as a self-contained ns-3 scratch
 subdirectory. It compiles the portable SimBricks transport in the same process

@@ -8,6 +8,7 @@
 #include "ns3/packet.h"
 #include "ns3/tag.h"
 #include "ns3/ub-datalink.h"
+#include "ns3/ub-controller.h"
 #include "ns3/ub-header.h"
 #include "ns3/ub-link.h"
 #include "ns3/ub-port.h"
@@ -15,6 +16,7 @@
 #include "ns3/ub-utils.h"
 
 #include "protocol/ub_net/if.h"
+#include "protocol/ub_net/udma_wire.h"
 
 #include <algorithm>
 #include <atomic>
@@ -131,14 +133,21 @@ class FrameTag final : public Tag {
         return id;
     }
     TypeId GetInstanceTypeId() const override { return GetTypeId(); }
-    std::uint32_t GetSerializedSize() const override { return 32; }
+    std::uint32_t GetSerializedSize() const override { return 84; }
     void Serialize(TagBuffer buffer) const override
     {
         buffer.WriteU64(sequence);
         buffer.WriteU32(source_eid); buffer.WriteU32(destination_eid);
         buffer.WriteU16(source_port); buffer.WriteU16(destination_port);
         buffer.WriteU16(traffic_class); buffer.WriteU16(flags);
-        buffer.WriteU32(0);
+        buffer.WriteU8(has_udma ? 1 : 0); buffer.WriteU8(operation);
+        buffer.WriteU16(wire_flags);
+        buffer.WriteU32(source_jetty); buffer.WriteU32(destination_jetty);
+        buffer.WriteU32(tpn); buffer.WriteU32(segment);
+        buffer.WriteU64(remote_address); buffer.WriteU64(immediate);
+        buffer.WriteU64(request_id); buffer.WriteU32(ta_ssn);
+        buffer.WriteU32(transfer_length); buffer.WriteU32(payload_length);
+        buffer.WriteU32(payload_offset);
     }
     void Deserialize(TagBuffer buffer) override
     {
@@ -146,7 +155,14 @@ class FrameTag final : public Tag {
         source_eid = buffer.ReadU32(); destination_eid = buffer.ReadU32();
         source_port = buffer.ReadU16(); destination_port = buffer.ReadU16();
         traffic_class = buffer.ReadU16(); flags = buffer.ReadU16();
-        (void)buffer.ReadU32();
+        has_udma = buffer.ReadU8() != 0; operation = buffer.ReadU8();
+        wire_flags = buffer.ReadU16();
+        source_jetty = buffer.ReadU32(); destination_jetty = buffer.ReadU32();
+        tpn = buffer.ReadU32(); segment = buffer.ReadU32();
+        remote_address = buffer.ReadU64(); immediate = buffer.ReadU64();
+        request_id = buffer.ReadU64(); ta_ssn = buffer.ReadU32();
+        transfer_length = buffer.ReadU32(); payload_length = buffer.ReadU32();
+        payload_offset = buffer.ReadU32();
     }
     void Print(std::ostream& stream) const override
     {
@@ -160,9 +176,38 @@ class FrameTag final : public Tag {
     std::uint16_t destination_port{};
     std::uint16_t traffic_class{};
     std::uint16_t flags{};
+    bool has_udma{};
+    std::uint8_t operation{};
+    std::uint16_t wire_flags{};
+    std::uint32_t source_jetty{};
+    std::uint32_t destination_jetty{};
+    std::uint32_t tpn{};
+    std::uint32_t segment{};
+    std::uint64_t remote_address{};
+    std::uint64_t immediate{};
+    std::uint64_t request_id{};
+    std::uint32_t ta_ssn{};
+    std::uint32_t transfer_length{};
+    std::uint32_t payload_length{};
+    std::uint32_t payload_offset{};
 };
 
 NS_OBJECT_ENSURE_REGISTERED(FrameTag);
+
+UbTransactionOpcode TransactionOpcode(std::uint8_t operation)
+{
+    switch (static_cast<ubnet::UdmaOperation>(operation)) {
+      case ubnet::UdmaOperation::Send: return UbTransactionOpcode::SEND;
+      case ubnet::UdmaOperation::SendImmediate:
+        return UbTransactionOpcode::SEND_WITH_IMMEDIATE;
+      case ubnet::UdmaOperation::Write: return UbTransactionOpcode::WRITE;
+      case ubnet::UdmaOperation::ReadRequest: return UbTransactionOpcode::READ;
+      case ubnet::UdmaOperation::WriteAck: return UbTransactionOpcode::TAACK;
+      case ubnet::UdmaOperation::ReadResponse:
+        return UbTransactionOpcode::READ_RESPONSE;
+    }
+    return UbTransactionOpcode::MAX_OPCODE;
+}
 
 struct QueuedFrame {
     ubnet::Frame header{};
@@ -205,7 +250,9 @@ class UbNetFabric {
   public:
     explicit UbNetFabric(const Options& options)
         : options_(options), endpoints_(options.endpoints.size()),
-          endpoint_ports_(options.endpoints.size())
+          endpoint_ports_(options.endpoints.size()),
+          request_tassn_last_(options.endpoints.size()),
+          request_tassn_seen_(options.endpoints.size(), false)
     {
         for (std::size_t i = 0; i < endpoints_.size(); ++i) {
             endpoints_[i].socket = options_.endpoints[i].socket;
@@ -369,7 +416,13 @@ class UbNetFabric {
                   << " sync_backpressure=" << sync_backpressure_
                   << " async_timestamp_jumps=" << async_timestamp_jumps_
                   << " async_timestamp_jump_ps=" << async_timestamp_jump_ps_
-                  << " output_backpressure=" << output_backpressure_ << '\n';
+                  << " output_backpressure=" << output_backpressure_
+                  << " ctp_request_segments=" << ctp_request_segments_
+                  << " ctp_taacks=" << ctp_taacks_
+                  << " ctp_read_responses=" << ctp_read_responses_
+                  << " ctp_max_payload=" << ctp_max_payload_
+                  << " ctp_tassn_discontinuities="
+                  << ctp_tassn_discontinuities_ << '\n';
     }
 
   private:
@@ -417,8 +470,18 @@ class UbNetFabric {
                                   PicoSeconds(0));
         for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
             Ptr<Node> node = CreateObject<Node>();
+            // The external UDMA process is the host-facing half of a UB
+            // device.  Model its ns-3 half as a UB_DEVICE as well so compact
+            // CTP Entity routing uses the same registry and member-port
+            // selection as native ns-3-UB endpoints.
+            Ptr<UbSwitch> endpoint_switch = CreateObject<UbSwitch>();
+            endpoint_switch->SetNodeType(UB_DEVICE);
+            node->AggregateObject(endpoint_switch);
+            Ptr<UbController> controller = CreateObject<UbController>();
+            node->AggregateObject(controller);
             endpoint_nodes_.push_back(node);
             endpoint_by_node_.emplace(node->GetId(), endpoint);
+            std::vector<std::uint32_t> entity_ports;
             for (std::uint32_t port = 0; port < options_.ports; ++port) {
                 Ptr<UbPort> endpoint_port = CreateObject<UbPort>();
                 endpoint_port->SetAddress(Mac48Address::Allocate());
@@ -427,7 +490,10 @@ class UbNetFabric {
                 endpoint_port->SetReceiveHandler(
                     MakeCallback(&UbNetFabric::ReceiveAtEndpoint, this));
                 endpoint_ports_[endpoint].push_back(endpoint_port);
+                entity_ports.push_back(port);
             }
+            controller->CreateCtpEntity(endpoints_[endpoint].eid, entity_ports);
+            controller->FreezeCtpEntities();
         }
         switch_node_ = CreateObject<Node>();
         switch_ = CreateObject<UbSwitch>();
@@ -457,6 +523,10 @@ class UbNetFabric {
                     endpoint * options_.ports + port));
             switch_->GetRoutingProcess()->AddShortestRoute(
                 utils::NodeIdToIp(endpoint_nodes_[endpoint]->GetId()).Get(), outputs);
+            for (std::uint32_t port = 0; port < options_.ports; ++port)
+                switch_->GetRoutingProcess()->AddShortestRoute(
+                    utils::NodeIdToIp(endpoint_nodes_[endpoint]->GetId(), port).Get(),
+                    {static_cast<std::uint16_t>(endpoint * options_.ports + port)});
         }
     }
 
@@ -520,6 +590,49 @@ class UbNetFabric {
             tag.destination_port = ingress.destination_port;
             tag.traffic_class = ingress.traffic_class;
             tag.flags = ingress.flags;
+            if (payload.size() >= sizeof(ubnet::UdmaWireHeader)) {
+                ubnet::UdmaWireHeader wire{};
+                std::memcpy(&wire, payload.data(), sizeof(wire));
+                if (wire.magic == ubnet::kUdmaWireMagic) {
+                    if (wire.version != ubnet::kUdmaWireVersion ||
+                        !(wire.flags & ubnet::kUdmaWireCtpSegment) ||
+                        payload.size() != sizeof(wire) + wire.payload_length ||
+                        wire.payload_length > UB_MTU_BYTE)
+                        throw std::runtime_error(
+                            "invalid UDMA CTP transaction segment");
+                    tag.has_udma = true;
+                    tag.operation = wire.operation;
+                    tag.wire_flags = wire.flags;
+                    tag.source_jetty = wire.source_jetty;
+                    tag.destination_jetty = wire.destination_jetty;
+                    tag.tpn = wire.tpn;
+                    tag.segment = wire.segment;
+                    tag.remote_address = wire.remote_address;
+                    tag.immediate = wire.immediate;
+                    tag.request_id = wire.request_id;
+                    tag.ta_ssn = wire.ta_ssn;
+                    tag.transfer_length = wire.transfer_length;
+                    tag.payload_length = wire.payload_length;
+                    tag.payload_offset = wire.payload_offset;
+                    ctp_max_payload_ = std::max<std::uint64_t>(
+                        ctp_max_payload_, wire.payload_length);
+                    const auto operation = static_cast<ubnet::UdmaOperation>(
+                        wire.operation);
+                    if (operation == ubnet::UdmaOperation::WriteAck) {
+                        ++ctp_taacks_;
+                    } else if (operation == ubnet::UdmaOperation::ReadResponse) {
+                        ++ctp_read_responses_;
+                    } else {
+                        ++ctp_request_segments_;
+                        if (request_tassn_seen_[source] &&
+                            wire.ta_ssn != request_tassn_last_[source] + 1)
+                            ++ctp_tassn_discontinuities_;
+                        request_tassn_last_[source] = wire.ta_ssn;
+                        request_tassn_seen_[source] = true;
+                    }
+                    payload.erase(payload.begin(), payload.begin() + sizeof(wire));
+                }
+            }
             Inject(source, std::move(payload), tag);
         } else if (type == ubnet::MessageType::Lifecycle &&
                    message->lifecycle.action == static_cast<std::uint8_t>(
@@ -537,8 +650,32 @@ class UbNetFabric {
     {
         Ptr<Packet> packet = Create<Packet>(payload.data(), payload.size());
         packet->AddPacketTag(tag);
+        if (tag.has_udma) {
+            const UbTransactionOpcode opcode = TransactionOpcode(tag.operation);
+            NS_ABORT_MSG_IF(opcode == UbTransactionOpcode::MAX_OPCODE,
+                            "unsupported UDMA operation at CTP boundary");
+            if (opcode == UbTransactionOpcode::TAACK) {
+                UbCompactAckTransactionHeader ta;
+                ta.SetUbTransactionOpcode(opcode);
+                ta.SetIniTaSsn(static_cast<std::uint16_t>(tag.ta_ssn));
+                packet->AddHeader(ta);
+            } else {
+                UbCompactTransactionHeader ta;
+                ta.SetUbTransactionOpcode(opcode);
+                ta.SetIniTaSsn(static_cast<std::uint16_t>(tag.ta_ssn));
+                packet->AddHeader(ta);
+            }
+            UbCompactEidHeader eid;
+            eid.SetSourceEid(tag.source_eid);
+            eid.SetDestinationEid(tag.destination_eid);
+            packet->AddHeader(eid);
+            UbCompactUpiHeader upi;
+            upi.SetUpi(0);
+            packet->AddHeader(upi);
+        }
         UbCtpHeader ctp;
-        ctp.SetTPOpcode(CtpOpcode::CTP_DATA); ctp.SetPadding(0); ctp.SetNlp(0);
+        ctp.SetTPOpcode(CtpOpcode::CTP_DATA); ctp.SetPadding(0);
+        ctp.SetNlp(tag.has_udma ? UB_CTPH_NLP_UPI16_EID40_TAH : 0);
         packet->AddHeader(ctp);
         UbCna16NetworkHeader cna;
         cna.SetScna(static_cast<std::uint16_t>(utils::NodeIdToCna16(
@@ -589,17 +726,60 @@ class UbNetFabric {
         UbCtpHeader ctp;
         packet->RemoveHeader(data_link); packet->RemoveHeader(cna);
         packet->RemoveHeader(ctp);
+        if (tag.has_udma) {
+            UbCompactUpiHeader upi;
+            UbCompactEidHeader eid;
+            packet->RemoveHeader(upi); packet->RemoveHeader(eid);
+            if (TransactionOpcode(tag.operation) == UbTransactionOpcode::TAACK) {
+                UbCompactAckTransactionHeader ta;
+                packet->RemoveHeader(ta);
+                NS_ABORT_MSG_IF(ta.GetIniTaSsn() !=
+                                    static_cast<std::uint16_t>(tag.ta_ssn),
+                                "CTP TAACK TASSN changed in the fabric");
+            } else {
+                UbCompactTransactionHeader ta;
+                packet->RemoveHeader(ta);
+                NS_ABORT_MSG_IF(ta.GetIniTaSsn() !=
+                                    static_cast<std::uint16_t>(tag.ta_ssn),
+                                "CTP transaction TASSN changed in the fabric");
+            }
+        }
         QueuedFrame frame;
         frame.header.sequence = tag.sequence;
-        frame.header.length = packet->GetSize();
         frame.header.source_eid = tag.source_eid;
         frame.header.destination_eid = tag.destination_eid;
         frame.header.source_port = tag.source_port;
         frame.header.destination_port = port->GetIfIndex();
         frame.header.traffic_class = tag.traffic_class;
         frame.header.flags = tag.flags;
-        frame.payload.resize(packet->GetSize());
-        packet->CopyData(frame.payload.data(), frame.payload.size());
+        std::vector<std::uint8_t> transaction_payload(packet->GetSize());
+        packet->CopyData(transaction_payload.data(), transaction_payload.size());
+        if (tag.has_udma) {
+            ubnet::UdmaWireHeader wire{};
+            wire.magic = ubnet::kUdmaWireMagic;
+            wire.version = ubnet::kUdmaWireVersion;
+            wire.operation = tag.operation;
+            wire.flags = tag.wire_flags;
+            wire.source_jetty = tag.source_jetty;
+            wire.destination_jetty = tag.destination_jetty;
+            wire.tpn = tag.tpn;
+            wire.segment = tag.segment;
+            wire.remote_address = tag.remote_address;
+            wire.immediate = tag.immediate;
+            wire.request_id = tag.request_id;
+            wire.ta_ssn = tag.ta_ssn;
+            wire.transfer_length = tag.transfer_length;
+            wire.payload_length = static_cast<std::uint32_t>(
+                transaction_payload.size());
+            wire.payload_offset = tag.payload_offset;
+            const auto* begin = reinterpret_cast<const std::uint8_t*>(&wire);
+            frame.payload.assign(begin, begin + sizeof(wire));
+            frame.payload.insert(frame.payload.end(), transaction_payload.begin(),
+                                 transaction_payload.end());
+        } else {
+            frame.payload = std::move(transaction_payload);
+        }
+        frame.header.length = static_cast<std::uint32_t>(frame.payload.size());
         endpoints_[endpoint_it->second].outgoing.push_back(std::move(frame));
         --scheduled_packets_;
         ++delivered_;
@@ -689,6 +869,8 @@ class UbNetFabric {
     std::unordered_map<std::uint32_t, std::size_t> route_;
     std::vector<Ptr<Node>> endpoint_nodes_;
     std::vector<std::vector<Ptr<UbPort>>> endpoint_ports_;
+    std::vector<std::uint32_t> request_tassn_last_;
+    std::vector<bool> request_tassn_seen_;
     std::unordered_map<std::uint32_t, std::size_t> endpoint_by_node_;
     Ptr<Node> switch_node_;
     Ptr<UbSwitch> switch_;
@@ -707,6 +889,11 @@ class UbNetFabric {
     std::uint64_t output_backpressure_{};
     std::uint64_t async_timestamp_jumps_{};
     std::uint64_t async_timestamp_jump_ps_{};
+    std::uint64_t ctp_request_segments_{};
+    std::uint64_t ctp_taacks_{};
+    std::uint64_t ctp_read_responses_{};
+    std::uint64_t ctp_max_payload_{};
+    std::uint64_t ctp_tassn_discontinuities_{};
     bool lifecycle_active_{false};
 };
 
