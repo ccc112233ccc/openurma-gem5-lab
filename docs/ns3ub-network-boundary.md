@@ -134,4 +134,9 @@ Native flow control is active for the validated lossless runs. Request loss
 and TAACK loss plus retry exhaustion now have focused recovery contracts.
 READ-response loss now also has a focused replay contract. Congestion feedback,
 larger-scale MTP profiling and optional MPI partitioning inside ns-3-UB remain
-future work.
+future work. The first congestion-feedback stage is present: a received CTP
+CNP halves the destination/EID/VL rate and gates later data fragments on
+virtual time without delaying ACK or CNP control traffic. Rate recovery and a
+full switch-generated CNP path remain to complete that feature. A focused
+process contract already injects one CNP at the native endpoint and proves a
+rate cut plus virtual-time spacing across later segments.

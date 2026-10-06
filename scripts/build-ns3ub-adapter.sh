@@ -31,6 +31,7 @@ ctp_retransmission_patch="$runtime_lab/integrations/ns3ub/patches/0001-ctp-timeo
 ctp_duplicate_patch="$runtime_lab/integrations/ns3ub/patches/0002-ctp-write-duplicate-suppression.patch"
 ctp_failure_patch="$runtime_lab/integrations/ns3ub/patches/0003-ctp-retry-exhaustion.patch"
 ctp_read_replay_patch="$runtime_lab/integrations/ns3ub/patches/0004-ctp-read-response-replay.patch"
+ctp_cnp_pacing_patch="$runtime_lab/integrations/ns3ub/patches/0005-ctp-cnp-pacing.patch"
 simbricks_base_source="$runtime_lab/components/udma-device-sim/simbricks_base_portable.c"
 expected_source_revision=d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b
 
@@ -67,6 +68,8 @@ ubsim_exec git -C "$source_root" apply --check "$ctp_failure_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_failure_patch"
 ubsim_exec git -C "$source_root" apply --check "$ctp_read_replay_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_read_replay_patch"
+ubsim_exec git -C "$source_root" apply --check "$ctp_cnp_pacing_patch"
+ubsim_exec git -C "$source_root" apply "$ctp_cnp_pacing_patch"
 ubsim_exec rm -f "$source_root/scratch/ub-gem5-adapter.cc" \
     "$source_root/src/unified-bus/model/ub-external-adapter-protocol.h"
 ubsim_exec mkdir -p "$source_root/scratch/ubsim-ub-net"
@@ -123,6 +126,9 @@ if [[ "$UBSIM_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
         bash "$lab_dir/integrations/ns3ub/tests/read_response_loss_contract.sh" \
             "$output_dir/scratch/ns3.44-ub-net-adapter" "$peer" \
             /tmp/ubsim-ns3ub-read-response-loss-contract
+        bash "$lab_dir/integrations/ns3ub/tests/cnp_pacing_contract.sh" \
+            "$output_dir/scratch/ns3.44-ub-net-adapter" "$peer" \
+            /tmp/ubsim-ns3ub-cnp-pacing-contract
     else
         echo "Skipping process contracts on macOS; build ub-switch-sim first to enable them."
     fi
@@ -166,5 +172,10 @@ else
         "$output_dir/scratch/ns3.44-ub-net-adapter" \
         "$switch_build/ub-net-contract-peer" \
         /tmp/ubsim-ns3ub-read-response-loss-contract
+    ubsim_exec timeout 20 bash \
+        "$runtime_lab/integrations/ns3ub/tests/cnp_pacing_contract.sh" \
+        "$output_dir/scratch/ns3.44-ub-net-adapter" \
+        "$switch_build/ub-net-contract-peer" \
+        /tmp/ubsim-ns3ub-cnp-pacing-contract
 fi
 echo "ns-3-UB UB-NET adapter built: $output_dir/scratch/ns3.44-ub-net-adapter"

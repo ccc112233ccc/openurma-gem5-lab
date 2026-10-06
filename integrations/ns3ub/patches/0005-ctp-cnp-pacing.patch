@@ -1,0 +1,199 @@
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -3,6 +3,7 @@
+ #define UB_CTP_H
+ 
+ #include "ns3/callback.h"
++#include "ns3/event-id.h"
+ #include "ns3/node.h"
+ #include "ns3/nstime.h"
+ #include "ns3/object.h"
+@@ -183,6 +184,10 @@
+                                        Ptr<UbWqeSegment> segment) const;
+     void CompleteFromTaAckForTest(const UbCtpEntityKey& key, uint32_t taSsn);
+     void RecordCnpForTest(const UbCtpEntityKey& key);
++    void SetCongestionLineRate(uint64_t bitsPerSecond);
++    void SetCongestionMinimumRate(uint64_t bitsPerSecond);
++    uint64_t GetCongestionRate(const UbCtpEntityKey& key) const;
++    uint64_t GetCongestionRateCutCount() const;
+     uint32_t GetQueueCount() const;
+     uint32_t GetCongestionStateCountForTest() const;
+     Ptr<UbCtpTxQueue> GetOrCreateQueue(const UbCtpEntityKey& key,
+@@ -263,6 +268,12 @@
+                                      uint32_t taSsn,
+                                      uint64_t token);
+     void TryRetireTransactionState(const UbCtpEntityKey& key);
++    UbCtpCongestionKey MakeCongestionKey(const UbCtpEntityKey& key) const;
++    bool IsCongestionPacingBlocked(const UbCtpEntityKey& entityKey,
++                                   const UbCtpEntityKey& packetKey);
++    void AdvanceCongestionPacing(const UbCtpEntityKey& packetKey, uint32_t bytes);
++    void HandleCongestionPacingWake(UbCtpEntityKey entityKey,
++                                    UbCtpCongestionKey congestionKey);
+     bool SendResponseSegment(Ptr<UbWqeSegment> response, UbCtpEntityState& state);
+     bool ReplayResponseSegment(Ptr<UbWqeSegment> response, UbCtpEntityState& state);
+     void CompleteFromTaAck(const UbCtpEntityKey& key,
+@@ -376,7 +387,17 @@
+     std::map<UbCtpEntityKey, UbCtpEntityState> m_entityStates;
+     std::map<QueueKey, Ptr<UbCtpTxQueue>> m_queues;
+     std::set<Ptr<UbCtpTxQueue>> m_registeredQueues;
+-    std::map<UbCtpCongestionKey, uint32_t> m_congestionSignals;
++    struct CongestionState
++    {
++        uint32_t signals{0};
++        uint64_t rateBitsPerSecond{0};
++        Time nextSend{Seconds(0)};
++        EventId wakeEvent;
++    };
++    std::map<UbCtpCongestionKey, CongestionState> m_congestionStates;
++    uint64_t m_congestionLineRateBitsPerSecond{400000000000ULL};
++    uint64_t m_congestionMinimumRateBitsPerSecond{1000000000ULL};
++    uint64_t m_congestionRateCutCount{0};
+     TracedCallback<uint32_t,
+                    uint32_t,
+                    uint32_t,
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -1269,6 +1269,7 @@
+                            progressBytes,
+                            segment->GetType());
+     segment->UpdateSentBytes(progressBytes);
++    AdvanceCongestionPacing(packetKey, progressBytes);
+     TraceWindowEvent(packetKey, "data-enqueued", taSsn, *transactionState.context, outPort);
+ 
+     Ptr<UbPort> port = DynamicCast<UbPort>(m_node->GetDevice(outPort));
+@@ -1464,6 +1465,10 @@
+         }
+ 
+         const UbCtpEntityKey packetKey = MakeTxKeyForSegment(key, segment);
++        if (IsCongestionPacingBlocked(entityKey, packetKey))
++        {
++            return;
++        }
+         Ptr<UbCtpTransactionContext> context = GetOrCreateTransactionContext(key);
+         const uint32_t taSsn = segment->GetTaSsn();
+         if (!context->TryAdmit(taSsn))
+@@ -2006,12 +2011,44 @@
+ void
+ UbCtpTransportService::RecordCnpForTest(const UbCtpEntityKey& key)
+ {
+-    UbCtpCongestionKey congestionKey{.dstNodeId = key.dstNodeId,
+-                                     .dstEntityId = key.dstEntityId,
+-                                     .vl = key.vl};
+-    ++m_congestionSignals[congestionKey];
++    auto& state = m_congestionStates[MakeCongestionKey(key)];
++    ++state.signals;
++    if (state.rateBitsPerSecond == 0)
++        state.rateBitsPerSecond = m_congestionLineRateBitsPerSecond;
++    state.rateBitsPerSecond = std::max(m_congestionMinimumRateBitsPerSecond,
++                                       state.rateBitsPerSecond / 2);
++    ++m_congestionRateCutCount;
++}
++
++void
++UbCtpTransportService::SetCongestionLineRate(uint64_t bitsPerSecond)
++{
++    NS_ABORT_MSG_IF(bitsPerSecond == 0, "CTP congestion line rate must be positive");
++    m_congestionLineRateBitsPerSecond = bitsPerSecond;
++}
++
++void
++UbCtpTransportService::SetCongestionMinimumRate(uint64_t bitsPerSecond)
++{
++    NS_ABORT_MSG_IF(bitsPerSecond == 0, "CTP congestion minimum rate must be positive");
++    m_congestionMinimumRateBitsPerSecond = bitsPerSecond;
++}
++
++uint64_t
++UbCtpTransportService::GetCongestionRate(const UbCtpEntityKey& key) const
++{
++    auto state = m_congestionStates.find(MakeCongestionKey(key));
++    return state == m_congestionStates.end() || state->second.rateBitsPerSecond == 0
++               ? m_congestionLineRateBitsPerSecond
++               : state->second.rateBitsPerSecond;
++}
++
++uint64_t
++UbCtpTransportService::GetCongestionRateCutCount() const
++{
++    return m_congestionRateCutCount;
+ }
+ 
+ uint32_t
+ UbCtpTransportService::GetQueueCount() const
+ {
+@@ -2021,9 +2058,60 @@
+ uint32_t
+ UbCtpTransportService::GetCongestionStateCountForTest() const
+ {
+-    return static_cast<uint32_t>(m_congestionSignals.size());
++    return static_cast<uint32_t>(m_congestionStates.size());
+ }
+ 
++UbCtpCongestionKey
++UbCtpTransportService::MakeCongestionKey(const UbCtpEntityKey& key) const
++{
++    return {.dstNodeId = key.dstNodeId, .dstEntityId = key.dstEntityId, .vl = key.vl};
++}
++
++bool
++UbCtpTransportService::IsCongestionPacingBlocked(const UbCtpEntityKey& entityKey,
++                                                 const UbCtpEntityKey& packetKey)
++{
++    const UbCtpCongestionKey congestionKey = MakeCongestionKey(packetKey);
++    auto state = m_congestionStates.find(congestionKey);
++    if (state == m_congestionStates.end() || state->second.nextSend <= Simulator::Now())
++        return false;
++    if (!state->second.wakeEvent.IsPending())
++    {
++        state->second.wakeEvent = Simulator::Schedule(
++            state->second.nextSend - Simulator::Now(),
++            &UbCtpTransportService::HandleCongestionPacingWake,
++            this,
++            entityKey,
++            congestionKey);
++    }
++    return true;
++}
++
++void
++UbCtpTransportService::AdvanceCongestionPacing(const UbCtpEntityKey& packetKey,
++                                               uint32_t bytes)
++{
++    auto state = m_congestionStates.find(MakeCongestionKey(packetKey));
++    if (state == m_congestionStates.end() || state->second.rateBitsPerSecond == 0)
++        return;
++    const uint64_t numerator = static_cast<uint64_t>(bytes) * 8ULL * 1000000000000ULL;
++    const uint64_t intervalPs =
++        (numerator + state->second.rateBitsPerSecond - 1) /
++        state->second.rateBitsPerSecond;
++    state->second.nextSend = std::max(state->second.nextSend, Simulator::Now()) +
++                             PicoSeconds(intervalPs);
++}
++
++void
++UbCtpTransportService::HandleCongestionPacingWake(UbCtpEntityKey entityKey,
++                                                  UbCtpCongestionKey congestionKey)
++{
++    auto state = m_congestionStates.find(congestionKey);
++    if (state != m_congestionStates.end())
++        state->second.wakeEvent = EventId();
++    TryContinueJettyTransmission(entityKey);
++}
++
+ const UbLifecycleResourceIdentity&
+ UbCtpTransportService::GetLifecycleOwnerForTest() const
+ {
+@@ -2459,6 +2547,13 @@
+     }
+     m_retransmissionRecords.clear();
+     m_receivedRmaRequests.clear();
++    for (auto& [key, state] : m_congestionStates)
++    {
++        (void)key;
++        if (state.wakeEvent.IsPending())
++            state.wakeEvent.Cancel();
++    }
++    m_congestionStates.clear();
+ 
+     Ptr<UbSwitch> sw = m_node == nullptr ? nullptr : m_node->GetObject<UbSwitch>();
+     for (const auto& [key, queue] : m_queues)

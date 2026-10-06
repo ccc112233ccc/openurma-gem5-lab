@@ -83,6 +83,7 @@ struct Options {
     bool drop_first_ctp_taack{false};
     bool drop_first_ctp_read_response{false};
     bool drop_all_ctp_requests{false};
+    bool inject_ctp_cnp_after_first_segment{false};
 };
 
 EndpointOption ParseEndpoint(const std::string& value)
@@ -143,6 +144,8 @@ Options ParseOptions(int argc, char** argv)
             options.drop_first_ctp_read_response = true;
         } else if (arg == "--drop-all-ctp-requests") {
             options.drop_all_ctp_requests = true;
+        } else if (arg == "--inject-ctp-cnp-after-first-segment") {
+            options.inject_ctp_cnp_after_first_segment = true;
         } else {
             throw std::runtime_error("unknown or incomplete option: " + arg);
         }
@@ -423,6 +426,7 @@ class UbNetFabric {
         std::uint64_t duplicate_read_suppressed = 0;
         std::uint64_t duplicate_read_response_replays = 0;
         std::uint64_t injected_read_response_drops = 0;
+        std::uint64_t ctp_congestion_rate_cuts = 0;
         std::uint64_t injected_ctp_request_drops = 0;
         for (const auto& node : endpoint_nodes_) {
             Ptr<UbController> controller = node->GetObject<UbController>();
@@ -437,6 +441,7 @@ class UbNetFabric {
                 service->GetDuplicateReadResponseReplayCount();
             injected_read_response_drops +=
                 service->GetInjectedReadResponseDropCount();
+            ctp_congestion_rate_cuts += service->GetCongestionRateCutCount();
             injected_ctp_request_drops += service->GetInjectedRequestDropCount();
         }
         std::cerr << "[NS3_UB_NET_STATS] forwarded=" << forwarded_
@@ -484,7 +489,12 @@ class UbNetFabric {
                   << " duplicate_read_response_replays="
                   << duplicate_read_response_replays
                   << " injected_read_response_drops="
-                  << injected_read_response_drops << '\n';
+                  << injected_read_response_drops
+                  << " ctp_congestion_rate_cuts="
+                  << ctp_congestion_rate_cuts
+                  << " ctp_native_segment_send_span_ps="
+                  << (last_native_segment_send_ps_ - first_native_segment_send_ps_)
+                  << '\n';
     }
 
   private:
@@ -559,6 +569,10 @@ class UbNetFabric {
             service->SetRetransmissionEnabled(options_.ctp_retransmission);
             service->SetRetransmissionTimeout(PicoSeconds(options_.ctp_rto_ps));
             service->SetMaxRetransmissionAttempts(options_.ctp_max_retransmissions);
+            const std::uint64_t line_rate_bps = options_.rate_gbps * 1000000000ULL;
+            service->SetCongestionLineRate(line_rate_bps);
+            service->SetCongestionMinimumRate(
+                std::max<std::uint64_t>(1, line_rate_bps / 1024));
             service->SetDropNextTaAckForTest(options_.drop_first_ctp_taack);
             service->SetDropNextReadResponseForTest(
                 options_.drop_first_ctp_read_response);
@@ -886,6 +900,11 @@ class UbNetFabric {
         last_native_tassn_[source] = ta_ssn;
         ++ctp_request_segments_;
         ++ctp_native_admitted_;
+        const std::uint64_t send_ps = static_cast<std::uint64_t>(
+            Simulator::Now().GetPicoSeconds());
+        if (ctp_request_segments_ == 1)
+            first_native_segment_send_ps_ = send_ps;
+        last_native_segment_send_ps_ = send_ps;
         ++forwarded_;
         payload_bytes_ += logical_bytes;
         ctp_max_payload_ = std::max<std::uint64_t>(ctp_max_payload_, logical_bytes);
@@ -898,6 +917,16 @@ class UbNetFabric {
                      .vl = 1});
         ctp_native_max_outstanding_ = std::max<std::uint64_t>(
             ctp_native_max_outstanding_, context->GetOutstandingCount());
+        if (options_.inject_ctp_cnp_after_first_segment && !ctp_cnp_injected_)
+        {
+            endpoint_nodes_[source]->GetObject<UbController>()
+                ->GetCtpTransportService()->RecordCnpForTest(
+                    {.srcEntityId = endpoints_[source].eid,
+                     .dstNodeId = endpoint_nodes_[task->second.destination]->GetId(),
+                     .dstEntityId = endpoints_[task->second.destination].eid,
+                     .vl = 1});
+            ctp_cnp_injected_ = true;
+        }
     }
 
     void OnTargetExecute(std::size_t target,
@@ -1187,6 +1216,9 @@ class UbNetFabric {
     std::uint64_t ctp_request_segments_{};
     std::uint64_t ctp_taacks_{};
     std::uint64_t ctp_read_responses_{};
+    std::uint64_t first_native_segment_send_ps_{};
+    std::uint64_t last_native_segment_send_ps_{};
+    bool ctp_cnp_injected_{};
     std::uint64_t ctp_max_payload_{};
     std::uint64_t ctp_native_admitted_{};
     std::uint64_t ctp_native_window_blocked_{};
@@ -1226,6 +1258,7 @@ int main(int argc, char** argv)
                      "[--ctp-max-retransmissions N] "
                      "[--drop-first-ctp-request] [--drop-first-ctp-taack] "
                      "[--drop-first-ctp-read-response] "
+                     "[--inject-ctp-cnp-after-first-segment] "
                      "[--drop-all-ctp-requests]\n";
         return 1;
     }

@@ -48,7 +48,8 @@ The upstream ns-3-UB checkout is a generated dependency under
 `patches/0001-ctp-timeout-retransmission.patch` and
 `patches/0002-ctp-write-duplicate-suppression.patch` followed by
 `patches/0003-ctp-retry-exhaustion.patch` and
-`patches/0004-ctp-read-response-replay.patch`, installs the checked-in
+`patches/0004-ctp-read-response-replay.patch` followed by
+`patches/0005-ctp-cnp-pacing.patch`, installs the checked-in
 adapter overlay, and builds it. It then runs UB-NET contracts with
 synchronization disabled and required, the native ordering contract, and a
 fault-injection contract that drops the first WRITE request and requires one
@@ -59,6 +60,17 @@ two-retry budget, and requires a failed native WQE plus an initiator-visible
 RMA error completion. A fourth contract drops the first READ response and
 requires one retransmission, one duplicate READ suppression, one cached
 response replay, and exactly one target-side READ execution.
+
+Native CTP CNP reception now changes data-plane behavior instead of only
+recording a counter. Congestion state is isolated by destination node, EID and
+VL; each CNP halves that context's current rate down to a minimum derived from
+the configured port rate. Subsequent CTP data fragments are released on that
+virtual-time pacing schedule, while CNP and ACK control traffic bypasses the
+data pacing gate. `cnp_pacing_contract.sh` injects one CNP after the first of
+three ordered native segments at a configured 2-Gbit/s port rate. It observes
+one rate cut and at least 256,000 ps between the first and last segment-send
+events, proving that the state changes the virtual-time data path rather than
+only telemetry. Rate recovery remains the next control-law step.
 
 Keeping the complete adapter here makes the integration reviewable from this
 repository. It also avoids depending on unpublished commits in a sibling
