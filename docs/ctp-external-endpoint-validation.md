@@ -121,6 +121,25 @@ The replay record is retained for the configured retry horizon and then
 removed, preventing an unbounded receive-side cache and avoiding collisions
 after TASSN reuse.
 
+READ uses the same retry identity but cannot repeat the target-side DMA when
+the response is lost. `read_response_loss_contract.sh` drops the first native
+READ response, lets the initiator retransmit the request, and checks that the
+receiver suppresses the duplicate and rebuilds the wire packet from its cached
+response. The 64-byte case is the minimum length represented by the compact
+CTP memory-access length field. Its evidence is:
+
+```text
+ctp_retransmissions=1
+duplicate_read_suppressed=1
+duplicate_read_response_replays=1
+injected_read_response_drops=1
+native_wqes_completed=1
+native_wqes_failed=0
+```
+
+The external target peer exits after servicing its single READ, so successful
+recovery also proves that no second target-memory operation was issued.
+
 RTO is meaningful only on a shared virtual-time axis. Accordingly,
 `UBSIM_CTP_RETRANSMISSION=auto` resolves to `on` for full conservative
 synchronization and `off` for asynchronous functional or lifecycle-only
@@ -168,6 +187,7 @@ The full-system performance matrix exercises the current NO path and proves
 lossless CBFC under the included large bidirectional bursts. Focused process
 coverage now validates NO/RO/SO propagation, the RO-before-SO constraint, and
 request-loss and lost-TAACK recovery for WRITE, plus an initiator-visible
-ACK-timeout completion after retry exhaustion. Remaining protocol validation
-should add READ-response replay and CNP/congestion behavior. Reliability
-recovery is not claimed by the asynchronous full-system functional matrix.
+ACK-timeout completion after retry exhaustion. READ-response loss now has the
+same focused duplicate-suppression and replay coverage. CNP/congestion behavior
+remains the next protocol validation stage. Reliability recovery is not
+claimed by the asynchronous full-system functional matrix.

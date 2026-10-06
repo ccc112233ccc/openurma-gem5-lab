@@ -1,0 +1,215 @@
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -144,9 +144,13 @@
+     uint64_t GetRetransmissionCount() const;
+     uint64_t GetRetransmissionExhaustedCount() const;
+     void SetDropNextTaAckForTest(bool enabled);
++    void SetDropNextReadResponseForTest(bool enabled);
+     uint64_t GetDuplicateWriteSuppressedCount() const;
+     uint64_t GetDuplicateTaAckReplayCount() const;
+     uint64_t GetInjectedTaAckDropCount() const;
++    uint64_t GetDuplicateReadSuppressedCount() const;
++    uint64_t GetDuplicateReadResponseReplayCount() const;
++    uint64_t GetInjectedReadResponseDropCount() const;
+     void SetDropNextRequestForTest(bool enabled);
+     void SetDropAllRequestsForTest(bool enabled);
+     uint64_t GetInjectedRequestDropCount() const;
+@@ -260,6 +264,7 @@
+                                      uint64_t token);
+     void TryRetireTransactionState(const UbCtpEntityKey& key);
+     bool SendResponseSegment(Ptr<UbWqeSegment> response, UbCtpEntityState& state);
++    bool ReplayResponseSegment(Ptr<UbWqeSegment> response, UbCtpEntityState& state);
+     void CompleteFromTaAck(const UbCtpEntityKey& key,
+                            uint32_t taSsn,
+                            Ptr<UbWqeSegment> response);
+@@ -348,17 +353,21 @@
+     uint64_t m_retransmissionExhaustedCount{0};
+     std::map<std::pair<UbCtpEntityKey, uint32_t>, RetransmissionRecord>
+         m_retransmissionRecords;
+-    struct ReceivedWriteRecord
++    struct ReceivedRmaRecord
+     {
+         Ptr<UbWqeSegment> response;
+         Time expires{Seconds(0)};
+     };
+-    std::map<std::pair<UbCtpEntityKey, uint32_t>, ReceivedWriteRecord>
+-        m_receivedWrites;
++    std::map<std::pair<UbCtpEntityKey, uint32_t>, ReceivedRmaRecord>
++        m_receivedRmaRequests;
+     bool m_dropNextTaAckForTest{false};
++    bool m_dropNextReadResponseForTest{false};
+     uint64_t m_duplicateWriteSuppressedCount{0};
+     uint64_t m_duplicateTaAckReplayCount{0};
+     uint64_t m_injectedTaAckDropCount{0};
++    uint64_t m_duplicateReadSuppressedCount{0};
++    uint64_t m_duplicateReadResponseReplayCount{0};
++    uint64_t m_injectedReadResponseDropCount{0};
+     bool m_dropNextRequestForTest{false};
+     bool m_dropAllRequestsForTest{false};
+     uint64_t m_injectedRequestDropCount{0};
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -655,6 +655,12 @@
+ UbCtpTransportService::SetDropNextTaAckForTest(bool enabled)
+ {
+     m_dropNextTaAckForTest = enabled;
++}
++
++void
++UbCtpTransportService::SetDropNextReadResponseForTest(bool enabled)
++{
++    m_dropNextReadResponseForTest = enabled;
+ }
+ 
+ uint64_t
+@@ -673,6 +679,24 @@
+ UbCtpTransportService::GetInjectedTaAckDropCount() const
+ {
+     return m_injectedTaAckDropCount;
++}
++
++uint64_t
++UbCtpTransportService::GetDuplicateReadSuppressedCount() const
++{
++    return m_duplicateReadSuppressedCount;
++}
++
++uint64_t
++UbCtpTransportService::GetDuplicateReadResponseReplayCount() const
++{
++    return m_duplicateReadResponseReplayCount;
++}
++
++uint64_t
++UbCtpTransportService::GetInjectedReadResponseDropCount() const
++{
++    return m_injectedReadResponseDropCount;
+ }
+ 
+ void
+@@ -1798,39 +1822,52 @@
+         controller == nullptr ? nullptr : controller->GetUbTransaction();
+     if (transaction == nullptr)
+         return false;
+-    for (auto record = m_receivedWrites.begin(); record != m_receivedWrites.end();)
++    for (auto record = m_receivedRmaRequests.begin();
++         record != m_receivedRmaRequests.end();)
+     {
+         if (record->second.response != nullptr &&
+             record->second.expires <= Simulator::Now())
+-            record = m_receivedWrites.erase(record);
++            record = m_receivedRmaRequests.erase(record);
+         else
+             ++record;
+     }
+     const bool reliableWrite = request->GetType() == UbTransactionOpcode::WRITE;
++    const bool reliableRead = request->GetType() == UbTransactionOpcode::READ;
++    const bool reliableRma = reliableWrite || reliableRead;
+     const auto receiveKey = std::make_pair(key, request->GetRequestTassn());
+-    if (reliableWrite)
++    if (reliableRma)
+     {
+-        auto [record, inserted] = m_receivedWrites.try_emplace(receiveKey);
++        auto [record, inserted] = m_receivedRmaRequests.try_emplace(receiveKey);
+         if (!inserted)
+         {
+-            ++m_duplicateWriteSuppressedCount;
++            if (reliableWrite)
++                ++m_duplicateWriteSuppressedCount;
++            else
++                ++m_duplicateReadSuppressedCount;
+             if (record->second.response != nullptr)
+             {
+-                ++m_duplicateTaAckReplayCount;
++                if (reliableWrite)
++                    ++m_duplicateTaAckReplayCount;
++                else
++                    ++m_duplicateReadResponseReplayCount;
+                 auto& state = GetOrCreateEntityState(key);
+-                SendResponseSegment(record->second.response, state);
++                ReplayResponseSegment(record->second.response, state);
+             }
+             return true;
+         }
+     }
+-    UbTransactionResponseSink sink([this, key, reliableWrite, receiveKey](Ptr<UbWqeSegment> response) {
++    UbTransactionResponseSink sink([this, key, reliableRma, reliableWrite, reliableRead,
++                                    receiveKey](Ptr<UbWqeSegment> response) {
+         if (response == nullptr)
+             return;
+         auto& state = GetOrCreateEntityState(key);
+         ++state.Rx().generatedResponses;
+-        if (reliableWrite && response->GetType() == UbTransactionOpcode::TAACK)
++        const bool cacheResponse =
++            (reliableWrite && response->GetType() == UbTransactionOpcode::TAACK) ||
++            (reliableRead && response->GetType() == UbTransactionOpcode::READ_RESPONSE);
++        if (reliableRma && cacheResponse)
+         {
+-            auto& record = m_receivedWrites[receiveKey];
++            auto& record = m_receivedRmaRequests[receiveKey];
+             record.response = response;
+             record.expires = Simulator::Now() +
+                 m_retransmissionTimeout * (m_maxRetransmissionAttempts + 1);
+@@ -1841,6 +1878,13 @@
+                 TryRetireTransactionState(key);
+                 return;
+             }
++            if (reliableRead && m_dropNextReadResponseForTest)
++            {
++                m_dropNextReadResponseForTest = false;
++                ++m_injectedReadResponseDropCount;
++                TryRetireTransactionState(key);
++                return;
++            }
+         }
+         SendResponseSegment(response, state);
+         TryRetireTransactionState(key);
+@@ -2166,6 +2210,39 @@
+         port->TriggerTransmit();
+         ++taSsn;
+     }
++    return true;
++}
++
++bool
++UbCtpTransportService::ReplayResponseSegment(Ptr<UbWqeSegment> response,
++                                             UbCtpEntityState& state)
++{
++    NS_ABORT_MSG_IF(response == nullptr, "CTP response replay requires WQE segment");
++    if (response->GetType() == UbTransactionOpcode::TAACK)
++        return SendResponseSegment(response, state);
++    if (response->GetType() != UbTransactionOpcode::READ_RESPONSE)
++        return false;
++
++    const UbCtpEntityKey& key = state.GetKey();
++    const uint32_t payloadBytes = response->GetPayloadBytes();
++    if (payloadBytes == 0 || payloadBytes > GetTransactionConstraints().maxSegmentBytes)
++        return false;
++    const uint16_t lbSalt = NextLoadBalanceSalt(state, key);
++    const uint32_t outPort = SelectOutPort(response, state, key, lbSalt);
++    response->ResetSentBytes();
++    Ptr<Packet> packet = BuildDataPacketWithTaSsn(response,
++                                                  state,
++                                                  key,
++                                                  response->GetRequestTassn(),
++                                                  payloadBytes,
++                                                  static_cast<uint8_t>(lbSalt & 0xff));
++    response->UpdateSentBytes(payloadBytes);
++    Ptr<UbCtpTxQueue> queue = GetOrCreateQueue(key, outPort, key.vl);
++    RegisterQueueIfNeeded(queue, outPort, key.vl);
++    queue->EnqueueData(packet);
++    Ptr<UbPort> port = DynamicCast<UbPort>(m_node->GetDevice(outPort));
++    NS_ABORT_MSG_IF(port == nullptr, "CTP response replay requires valid out port");
++    port->TriggerTransmit();
+     return true;
+ }
+ 
+@@ -2381,7 +2458,7 @@
+         m_retransmissionEvents.Clear();
+     }
+     m_retransmissionRecords.clear();
+-    m_receivedWrites.clear();
++    m_receivedRmaRequests.clear();
+ 
+     Ptr<UbSwitch> sw = m_node == nullptr ? nullptr : m_node->GetObject<UbSwitch>();
+     for (const auto& [key, queue] : m_queues)

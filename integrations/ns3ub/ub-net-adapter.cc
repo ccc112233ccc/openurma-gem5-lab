@@ -81,6 +81,7 @@ struct Options {
     std::uint32_t ctp_max_retransmissions{7};
     bool drop_first_ctp_request{false};
     bool drop_first_ctp_taack{false};
+    bool drop_first_ctp_read_response{false};
     bool drop_all_ctp_requests{false};
 };
 
@@ -138,6 +139,8 @@ Options ParseOptions(int argc, char** argv)
             options.drop_first_ctp_request = true;
         } else if (arg == "--drop-first-ctp-taack") {
             options.drop_first_ctp_taack = true;
+        } else if (arg == "--drop-first-ctp-read-response") {
+            options.drop_first_ctp_read_response = true;
         } else if (arg == "--drop-all-ctp-requests") {
             options.drop_all_ctp_requests = true;
         } else {
@@ -417,6 +420,9 @@ class UbNetFabric {
         std::uint64_t duplicate_write_suppressed = 0;
         std::uint64_t duplicate_taack_replays = 0;
         std::uint64_t injected_taack_drops = 0;
+        std::uint64_t duplicate_read_suppressed = 0;
+        std::uint64_t duplicate_read_response_replays = 0;
+        std::uint64_t injected_read_response_drops = 0;
         std::uint64_t injected_ctp_request_drops = 0;
         for (const auto& node : endpoint_nodes_) {
             Ptr<UbController> controller = node->GetObject<UbController>();
@@ -426,6 +432,11 @@ class UbNetFabric {
             duplicate_write_suppressed += service->GetDuplicateWriteSuppressedCount();
             duplicate_taack_replays += service->GetDuplicateTaAckReplayCount();
             injected_taack_drops += service->GetInjectedTaAckDropCount();
+            duplicate_read_suppressed += service->GetDuplicateReadSuppressedCount();
+            duplicate_read_response_replays +=
+                service->GetDuplicateReadResponseReplayCount();
+            injected_read_response_drops +=
+                service->GetInjectedReadResponseDropCount();
             injected_ctp_request_drops += service->GetInjectedRequestDropCount();
         }
         std::cerr << "[NS3_UB_NET_STATS] forwarded=" << forwarded_
@@ -468,7 +479,12 @@ class UbNetFabric {
                   << injected_ctp_request_drops
                   << " duplicate_write_suppressed=" << duplicate_write_suppressed
                   << " duplicate_taack_replays=" << duplicate_taack_replays
-                  << " injected_taack_drops=" << injected_taack_drops << '\n';
+                  << " injected_taack_drops=" << injected_taack_drops
+                  << " duplicate_read_suppressed=" << duplicate_read_suppressed
+                  << " duplicate_read_response_replays="
+                  << duplicate_read_response_replays
+                  << " injected_read_response_drops="
+                  << injected_read_response_drops << '\n';
     }
 
   private:
@@ -544,6 +560,8 @@ class UbNetFabric {
             service->SetRetransmissionTimeout(PicoSeconds(options_.ctp_rto_ps));
             service->SetMaxRetransmissionAttempts(options_.ctp_max_retransmissions);
             service->SetDropNextTaAckForTest(options_.drop_first_ctp_taack);
+            service->SetDropNextReadResponseForTest(
+                options_.drop_first_ctp_read_response);
             service->SetDropNextRequestForTest(options_.drop_first_ctp_request);
             service->SetDropAllRequestsForTest(options_.drop_all_ctp_requests);
             controller->GetUbTransaction()->SetTargetExecutor(
@@ -1207,6 +1225,7 @@ int main(int argc, char** argv)
                      "[--ctp-retransmission on|off] [--ctp-rto-ps N] "
                      "[--ctp-max-retransmissions N] "
                      "[--drop-first-ctp-request] [--drop-first-ctp-taack] "
+                     "[--drop-first-ctp-read-response] "
                      "[--drop-all-ctp-requests]\n";
         return 1;
     }
