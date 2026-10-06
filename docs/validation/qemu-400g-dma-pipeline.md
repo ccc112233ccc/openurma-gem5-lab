@@ -41,6 +41,13 @@ bounded modeled IOTLB raised the warm bidirectional aggregate to 38.90 GB/s.
 A 256-request window, enough to cover all 4-KiB pages in one 1-MiB WQE, raised
 it to 63.36 GB/s aggregate.
 
+A controlled run with `dma_max_outstanding=512` produced 63,432.93 MB/s
+aggregate (about 31.72 GB/s per direction), only 0.11% above the 256-request
+run. This is expected: one 1-MiB WQE contains exactly 256 4-KiB pages, so this
+page-DMA window has no additional work to expose above 256. A hardware queue
+depth of 512 instead describes WQEs or SQ entries; modeling that requires
+multiple WQEs in flight and is a separate device-engine limit.
+
 This is not fitted to a measured board value. The remaining gap reflects the
 current modeled protocol fragmentation, host DMA granularity, WQE/ACK work,
 and endpoint/switch serialization. Most importantly, the current jetty engine
