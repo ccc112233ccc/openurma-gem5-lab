@@ -456,7 +456,12 @@ class NetworkPort final : public device::NetworkInterface {
             header.remote_address = frame.remote_address + offset;
             header.immediate = frame.immediate;
             header.request_id = frame.request_id;
-            header.ta_ssn = request ? next_tassn_++ : frame.ta_ssn;
+            // Request TASSNs are owned by the CTP endpoint transaction
+            // context in the ns-3 adapter.  Keep the field unset here; the
+            // adapter assigns it only after the native admission window has
+            // accepted this segment.  Responses echo the admitted request
+            // TASSN supplied by the receive path.
+            header.ta_ssn = request ? 0 : frame.ta_ssn;
             const std::size_t chunk = std::min(kCtpMaxSegmentBytes,
                                                total - offset);
             header.transfer_length = write_ack ? frame.transfer_length :
@@ -641,7 +646,6 @@ class NetworkPort final : public device::NetworkInterface {
     std::uint64_t fragments_queued_{};
     std::uint64_t fragments_sent_{};
     std::uint64_t send_backpressure_{};
-    std::uint32_t next_tassn_{};
     std::uint64_t async_timestamp_jumps_{};
     std::uint64_t async_timestamp_jump_ps_{};
 };

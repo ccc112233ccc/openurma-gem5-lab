@@ -9,6 +9,7 @@
 #include "ns3/tag.h"
 #include "ns3/ub-datalink.h"
 #include "ns3/ub-controller.h"
+#include "ns3/ub-ctp.h"
 #include "ns3/ub-header.h"
 #include "ns3/ub-link.h"
 #include "ns3/ub-port.h"
@@ -214,6 +215,12 @@ struct QueuedFrame {
     std::vector<std::uint8_t> payload;
 };
 
+struct PendingCtpRequest {
+    std::size_t source{};
+    std::vector<std::uint8_t> payload;
+    FrameTag tag;
+};
+
 struct Endpoint {
     ubnet::Interface interface{};
     SimbricksBaseIfParams params{};
@@ -251,6 +258,7 @@ class UbNetFabric {
     explicit UbNetFabric(const Options& options)
         : options_(options), endpoints_(options.endpoints.size()),
           endpoint_ports_(options.endpoints.size()),
+          pending_ctp_requests_(options.endpoints.size()),
           request_tassn_last_(options.endpoints.size()),
           request_tassn_seen_(options.endpoints.size(), false)
     {
@@ -421,6 +429,12 @@ class UbNetFabric {
                   << " ctp_taacks=" << ctp_taacks_
                   << " ctp_read_responses=" << ctp_read_responses_
                   << " ctp_max_payload=" << ctp_max_payload_
+                  << " ctp_native_admitted=" << ctp_native_admitted_
+                  << " ctp_native_window_blocked=" << ctp_native_window_blocked_
+                  << " ctp_native_max_outstanding=" << ctp_native_max_outstanding_
+                  << " ctp_native_completions=" << ctp_native_completions_
+                  << " ctp_native_send_delivery_completions="
+                  << ctp_native_send_delivery_completions_
                   << " ctp_tassn_discontinuities="
                   << ctp_tassn_discontinuities_ << '\n';
     }
@@ -479,6 +493,8 @@ class UbNetFabric {
             node->AggregateObject(endpoint_switch);
             Ptr<UbController> controller = CreateObject<UbController>();
             node->AggregateObject(controller);
+            controller->CreateUbFunction();
+            controller->CreateUbTransaction();
             endpoint_nodes_.push_back(node);
             endpoint_by_node_.emplace(node->GetId(), endpoint);
             std::vector<std::uint32_t> entity_ports;
@@ -624,16 +640,17 @@ class UbNetFabric {
                         ++ctp_read_responses_;
                     } else {
                         ++ctp_request_segments_;
-                        if (request_tassn_seen_[source] &&
-                            wire.ta_ssn != request_tassn_last_[source] + 1)
-                            ++ctp_tassn_discontinuities_;
-                        request_tassn_last_[source] = wire.ta_ssn;
-                        request_tassn_seen_[source] = true;
                     }
                     payload.erase(payload.begin(), payload.begin() + sizeof(wire));
                 }
             }
-            Inject(source, std::move(payload), tag);
+            if (tag.has_udma && IsCtpRequest(tag.operation)) {
+                pending_ctp_requests_[source].push_back(
+                    PendingCtpRequest{source, std::move(payload), tag});
+                DrainCtpRequests(source);
+            } else {
+                Inject(source, std::move(payload), tag);
+            }
         } else if (type == ubnet::MessageType::Lifecycle &&
                    message->lifecycle.action == static_cast<std::uint8_t>(
                        ubnet::LifecycleAction::PrepareSync)) {
@@ -643,6 +660,95 @@ class UbNetFabric {
         }
         ubnet::UbNetInDone(&endpoint.interface, message);
         return true;
+    }
+
+    static bool IsCtpRequest(std::uint8_t operation)
+    {
+        const auto value = static_cast<ubnet::UdmaOperation>(operation);
+        return value == ubnet::UdmaOperation::Send ||
+               value == ubnet::UdmaOperation::SendImmediate ||
+               value == ubnet::UdmaOperation::Write ||
+               value == ubnet::UdmaOperation::ReadRequest;
+    }
+
+    UbCtpEntityKey RequestKey(std::size_t source, const FrameTag& tag) const
+    {
+        const auto destination = route_.at(tag.destination_eid);
+        return {.srcEntityId = tag.source_eid,
+                .dstNodeId = endpoint_nodes_[destination]->GetId(),
+                .dstEntityId = tag.destination_eid,
+                .vl = static_cast<std::uint8_t>(tag.traffic_class)};
+    }
+
+    Ptr<UbCtpTransactionContext> CtpContext(std::size_t source,
+                                            const FrameTag& tag)
+    {
+        Ptr<UbController> controller =
+            endpoint_nodes_.at(source)->GetObject<UbController>();
+        NS_ABORT_MSG_IF(controller == nullptr,
+                        "CTP endpoint has no native UB controller");
+        return controller->GetCtpTransportService()->
+            GetOrCreateTransactionContext(RequestKey(source, tag));
+    }
+
+    void DrainCtpRequests(std::size_t source)
+    {
+        auto& pending = pending_ctp_requests_.at(source);
+        while (!pending.empty()) {
+            PendingCtpRequest& request = pending.front();
+            Ptr<UbCtpTransactionContext> context = CtpContext(source, request.tag);
+            const std::uint32_t ta_ssn = context->GetSendNext();
+            if (!context->TryAdmit(ta_ssn)) {
+                ++ctp_native_window_blocked_;
+                return;
+            }
+            request.tag.ta_ssn = ta_ssn;
+            if (request_tassn_seen_[source] &&
+                ta_ssn != request_tassn_last_[source] + 1)
+                ++ctp_tassn_discontinuities_;
+            request_tassn_last_[source] = ta_ssn;
+            request_tassn_seen_[source] = true;
+            ++ctp_native_admitted_;
+            ctp_native_max_outstanding_ = std::max<std::uint64_t>(
+                ctp_native_max_outstanding_,
+                static_cast<std::uint64_t>(context->GetOutstandingCount()));
+            std::vector<std::uint8_t> payload = std::move(request.payload);
+            FrameTag tag = request.tag;
+            pending.pop_front();
+            Inject(source, std::move(payload), tag);
+        }
+    }
+
+    void CompleteCtpRequest(const FrameTag& response)
+    {
+        const auto source = route_.at(response.destination_eid);
+        Ptr<UbController> controller =
+            endpoint_nodes_.at(source)->GetObject<UbController>();
+        Ptr<UbCtpTransportService> service = controller->GetCtpTransportService();
+        const auto remote = route_.at(response.source_eid);
+        const UbCtpEntityKey key{
+            .srcEntityId = response.destination_eid,
+            .dstNodeId = endpoint_nodes_[remote]->GetId(),
+            .dstEntityId = response.source_eid,
+            .vl = static_cast<std::uint8_t>(response.traffic_class)};
+        Ptr<UbCtpTransactionContext> context =
+            service->GetOrCreateTransactionContext(key);
+        if (!context->MarkTaAckWire(static_cast<std::uint16_t>(response.ta_ssn)))
+            throw std::runtime_error("CTP response TASSN is outside the native window");
+        ++ctp_native_completions_;
+        DrainCtpRequests(source);
+    }
+
+    void CompleteCtpSendAtDelivery(const FrameTag& request)
+    {
+        const auto source = route_.at(request.source_eid);
+        Ptr<UbCtpTransactionContext> context = CtpContext(source, request);
+        if (!context->MarkTaAckWire(static_cast<std::uint16_t>(request.ta_ssn)))
+            throw std::runtime_error(
+                "delivered CTP SEND TASSN is outside the native window");
+        ++ctp_native_completions_;
+        ++ctp_native_send_delivery_completions_;
+        DrainCtpRequests(source);
     }
 
     void Inject(std::size_t source, std::vector<std::uint8_t> payload,
@@ -743,6 +849,17 @@ class UbNetFabric {
                                     static_cast<std::uint16_t>(tag.ta_ssn),
                                 "CTP transaction TASSN changed in the fabric");
             }
+            const auto operation = static_cast<ubnet::UdmaOperation>(tag.operation);
+            if (operation == ubnet::UdmaOperation::WriteAck ||
+                operation == ubnet::UdmaOperation::ReadResponse)
+                CompleteCtpRequest(tag);
+            else if (operation == ubnet::UdmaOperation::Send ||
+                     operation == ubnet::UdmaOperation::SendImmediate)
+                // The current external UDMA ABI reports SEND completion at
+                // target delivery and does not emit a TAACK frame.  Retire
+                // the native admission entry at the same delivery boundary
+                // so SENDs cannot leave permanent holes in completeUna.
+                CompleteCtpSendAtDelivery(tag);
         }
         QueuedFrame frame;
         frame.header.sequence = tag.sequence;
@@ -869,6 +986,7 @@ class UbNetFabric {
     std::unordered_map<std::uint32_t, std::size_t> route_;
     std::vector<Ptr<Node>> endpoint_nodes_;
     std::vector<std::vector<Ptr<UbPort>>> endpoint_ports_;
+    std::vector<std::deque<PendingCtpRequest>> pending_ctp_requests_;
     std::vector<std::uint32_t> request_tassn_last_;
     std::vector<bool> request_tassn_seen_;
     std::unordered_map<std::uint32_t, std::size_t> endpoint_by_node_;
@@ -893,6 +1011,11 @@ class UbNetFabric {
     std::uint64_t ctp_taacks_{};
     std::uint64_t ctp_read_responses_{};
     std::uint64_t ctp_max_payload_{};
+    std::uint64_t ctp_native_admitted_{};
+    std::uint64_t ctp_native_window_blocked_{};
+    std::uint64_t ctp_native_max_outstanding_{};
+    std::uint64_t ctp_native_completions_{};
+    std::uint64_t ctp_native_send_delivery_completions_{};
     std::uint64_t ctp_tassn_discontinuities_{};
     bool lifecycle_active_{false};
 };
