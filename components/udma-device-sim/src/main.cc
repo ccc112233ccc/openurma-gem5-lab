@@ -452,7 +452,8 @@ class NetworkPort final : public device::NetworkInterface {
             header.magic = net_proto::kUdmaWireMagic;
             header.version = net_proto::kUdmaWireVersion;
             header.operation = static_cast<std::uint8_t>(frame.operation);
-            header.flags = target_completion ? net_proto::kUdmaWireCtpSegment : 0;
+            header.flags = (target_completion ? net_proto::kUdmaWireCtpSegment : 0) |
+                           net_proto::UdmaWireOrder(frame.order_type);
             header.source_jetty = frame.source_jetty;
             header.destination_jetty = frame.destination_jetty;
             header.tpn = frame.tpn;
@@ -568,6 +569,7 @@ class NetworkPort final : public device::NetworkInterface {
                     frame.bytes.size() == sizeof(header) + header.payload_length) {
                     frame.operation = static_cast<device::Frame::Operation>(
                         header.operation);
+                    frame.order_type = net_proto::UdmaWireOrder(header.flags);
                     frame.source_jetty = header.source_jetty;
                     frame.destination_jetty = header.destination_jetty;
                     frame.tpn = header.tpn;
@@ -734,8 +736,14 @@ int Run(const Options& options)
     bool net_sync_primed = false;
     std::uint64_t epoch_origin_ps = 0;
 
-    while (running.load() && !SimbricksBaseIfInTerminated(&host_if.base) &&
-           !SimbricksBaseIfInTerminated(&net_if.base)) {
+    // A peer may close immediately after consuming its final message.  Do not
+    // let termination of one boundary cancel work already accepted from it:
+    // the model may still owe DMA/CQE/IRQ traffic on the other boundary.
+    // The process exits naturally once both peers have terminated; the
+    // orchestrator can still stop a half-open production run via SIGTERM.
+    while (running.load() &&
+           !(SimbricksBaseIfInTerminated(&host_if.base) &&
+             SimbricksBaseIfInTerminated(&net_if.base))) {
         ++loop_iterations;
         model.AdvanceTime(now);
         bool progress = false;

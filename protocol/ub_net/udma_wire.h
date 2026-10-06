@@ -10,6 +10,17 @@ inline constexpr std::uint8_t kUdmaWireVersion = 3;
 inline constexpr std::uint16_t kUdmaWireFragmented = 1U << 0;
 inline constexpr std::uint16_t kUdmaWireLastFragment = 1U << 1;
 inline constexpr std::uint16_t kUdmaWireCtpSegment = 1U << 2;
+inline constexpr std::uint16_t kUdmaWireOrderShift = 8;
+inline constexpr std::uint16_t kUdmaWireOrderMask = 0x3U << kUdmaWireOrderShift;
+inline constexpr std::uint16_t UdmaWireOrder(std::uint8_t order)
+{
+    return static_cast<std::uint16_t>(order & 0x3U) << kUdmaWireOrderShift;
+}
+inline constexpr std::uint8_t UdmaWireOrder(std::uint16_t flags)
+{
+    return static_cast<std::uint8_t>((flags & kUdmaWireOrderMask) >>
+                                     kUdmaWireOrderShift);
+}
 // A request without kUdmaWireCtpSegment is a complete WQE submission.  It may
 // be split into IPC chunks using Fragmented/LastFragment, but those chunks are
 // not transport packets.  A message with kUdmaWireCtpSegment is an individual

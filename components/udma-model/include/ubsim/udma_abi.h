@@ -48,6 +48,7 @@ class SqWqe {
         : bytes_(raw) {}
     std::uint16_t index() const { return Load32(bytes_.data()) & 0xffffU; }
     std::uint8_t flags() const { return (Load32(bytes_.data()) >> 16) & 0x7fU; }
+    std::uint8_t place_order() const { return flags() & 0x3U; }
     bool completion() const { return flags() & (1U << 5); }
     bool inline_payload() const { return flags() & (1U << 6); }
     bool owner() const { return Load32(bytes_.data()) >> 31; }

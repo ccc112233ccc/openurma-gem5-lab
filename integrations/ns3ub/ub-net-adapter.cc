@@ -404,6 +404,9 @@ class UbNetFabric {
                   << ctp_native_send_delivery_completions_
                   << " native_wqes_submitted=" << native_wqes_submitted_
                   << " native_wqes_completed=" << native_wqes_completed_
+                  << " native_order_no=" << native_order_no_
+                  << " native_order_relax=" << native_order_relax_
+                  << " native_order_strong=" << native_order_strong_
                   << " native_trace_size_mismatches="
                   << native_trace_size_mismatches_
                   << " ns3_runtime_drops="
@@ -651,7 +654,9 @@ class UbNetFabric {
                         std::vector<std::uint8_t> payload)
     {
         if (!IsCtpRequest(wire.operation) || IsTargetCompletion(wire.operation) ||
-            wire.payload_offset + wire.payload_length > wire.transfer_length)
+            wire.payload_offset + wire.payload_length > wire.transfer_length ||
+            ubnet::UdmaWireOrder(wire.flags) >
+                static_cast<std::uint8_t>(OrderType::ORDER_STRONG))
             throw std::runtime_error("invalid complete-WQE request chunk");
         const bool read = static_cast<ubnet::UdmaOperation>(wire.operation) ==
                           ubnet::UdmaOperation::ReadRequest;
@@ -716,7 +721,12 @@ class UbNetFabric {
         wqe->SetSport(CTP_WILDCARD_PORT);
         wqe->SetDport(CTP_WILDCARD_PORT);
         wqe->SetPriority(1);
-        wqe->SetOrderType(OrderType::ORDER_NO);
+        const auto order = static_cast<OrderType>(
+            ubnet::UdmaWireOrder(complete.wire.flags));
+        wqe->SetOrderType(order);
+        if (order == OrderType::ORDER_NO) ++native_order_no_;
+        else if (order == OrderType::ORDER_RELAX) ++native_order_relax_;
+        else if (order == OrderType::ORDER_STRONG) ++native_order_strong_;
         wqe->SetRemoteAddress(complete.wire.remote_address);
         wqe->SetRemoteTokenId(complete.wire.segment);
         if (!complete.payload.empty())
@@ -829,7 +839,9 @@ class UbNetFabric {
         wire.magic = ubnet::kUdmaWireMagic;
         wire.version = ubnet::kUdmaWireVersion;
         wire.operation = task->second.wire.operation;
-        wire.flags = ubnet::kUdmaWireCtpSegment | ubnet::kUdmaWireLastFragment;
+        wire.flags = ubnet::kUdmaWireCtpSegment |
+                     ubnet::kUdmaWireLastFragment |
+                     (task->second.wire.flags & ubnet::kUdmaWireOrderMask);
         wire.source_jetty = task->second.wire.source_jetty;
         wire.destination_jetty = task->second.wire.destination_jetty;
         wire.tpn = task->second.wire.tpn;
@@ -924,7 +936,9 @@ class UbNetFabric {
         ubnet::UdmaWireHeader wire{};
         wire.magic = ubnet::kUdmaWireMagic;
         wire.version = ubnet::kUdmaWireVersion;
-        wire.flags = ubnet::kUdmaWireCtpSegment | ubnet::kUdmaWireLastFragment;
+        wire.flags = ubnet::kUdmaWireCtpSegment |
+                     ubnet::kUdmaWireLastFragment |
+                     (task->second.wire.flags & ubnet::kUdmaWireOrderMask);
         wire.source_jetty = task->second.wire.destination_jetty;
         wire.destination_jetty = task->second.wire.source_jetty;
         wire.tpn = task->second.wire.tpn;
@@ -1084,6 +1098,9 @@ class UbNetFabric {
     std::uint64_t ctp_tassn_discontinuities_{};
     std::uint64_t native_wqes_submitted_{};
     std::uint64_t native_wqes_completed_{};
+    std::uint64_t native_order_no_{};
+    std::uint64_t native_order_relax_{};
+    std::uint64_t native_order_strong_{};
     std::uint64_t native_trace_size_mismatches_{};
     bool lifecycle_active_{false};
 };

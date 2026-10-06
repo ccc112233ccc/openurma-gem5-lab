@@ -90,7 +90,16 @@ ubsim_exec cmake --build "$cache_dir" \
 ubsim_exec test -x "$output_dir/scratch/ns3.44-ub-net-adapter"
 
 if [[ "$UBSIM_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
-    echo "Skipping Linux-only UB switch process contracts on macOS; the native adapter binary was linked and checked."
+    # The UB-NET contract peer is portable too.  Reuse the checked-in Darwin
+    # build when available so the native CTP order path is exercised on macOS.
+    peer="$lab_dir/artifacts/ub-switch-sim-build/ub-net-contract-peer"
+    if [[ -x "$peer" ]]; then
+        bash "$lab_dir/integrations/ns3ub/tests/order_contract.sh" \
+            "$output_dir/scratch/ns3.44-ub-net-adapter" "$peer" \
+            /tmp/ubsim-ns3ub-order-contract
+    else
+        echo "Skipping process contracts on macOS; build ub-switch-sim first to enable them."
+    fi
 else
     # Build the protocol peer from the same pinned SimBricks tree and exercise
     # asynchronous and conservative-synchronization contracts end to end.
@@ -106,5 +115,10 @@ else
             "$switch_build/ub-net-contract-peer" \
             "/tmp/ubsim-ns3ub-contract-$sync_mode" "$sync_mode"
     done
+    ubsim_exec timeout 20 bash \
+        "$runtime_lab/integrations/ns3ub/tests/order_contract.sh" \
+        "$output_dir/scratch/ns3.44-ub-net-adapter" \
+        "$switch_build/ub-net-contract-peer" \
+        /tmp/ubsim-ns3ub-order-contract
 fi
 echo "ns-3-UB UB-NET adapter built: $output_dir/scratch/ns3.44-ub-net-adapter"

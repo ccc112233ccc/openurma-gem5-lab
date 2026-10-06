@@ -22,6 +22,13 @@ selection. Native CBFC protects multi-segment bursts from switch-queue loss.
 The adapter supports both asynchronous execution and SimBricks-style
 synchronization.
 
+Official UDMA SQE `place_odr` values are carried through UB-NET flags and map
+directly to native NO, RO and SO WQEs. The build runs a focused independent-
+process contract that submits one WQE of each type, checks three native
+submissions/completions with no packet drop, and verifies that SO does not
+overtake the previously submitted RO. This supplements the stock
+`urma_perftest` matrix, whose per-WQE placement order remains NO.
+
 `ub-net-adapter.CMakeLists.txt` is installed as a self-contained ns-3 scratch
 subdirectory. It compiles the portable SimBricks transport in the same process
 without introducing a dependency on gem5.
@@ -30,7 +37,7 @@ The upstream ns-3-UB checkout is a generated dependency under
 `sources/ns-3-ub` at the revision recorded in `SOURCE_REVISIONS.md`. During
 `./lab build ns3ub`, the checked-in overlays are installed into that checkout
 and the UB-NET adapter is built. The build then runs UB-NET process contracts
-with synchronization disabled and required.
+with synchronization disabled and required plus the native ordering contract.
 
 Keeping the complete adapter here makes the integration reviewable from this
 repository. It also avoids depending on unpublished commits in a sibling

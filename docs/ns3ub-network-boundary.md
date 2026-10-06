@@ -18,7 +18,9 @@ exactly one side of the boundary.
 | Doorbells, SQ/RQ/CQ, WQE decoding and CQE generation | standalone UDMA device |
 | DMA, address translation, token checks and IOTLB | standalone UDMA device |
 | TP activation and TP-to-physical-port selection | standalone UDMA device |
-| Endpoint packetization/reassembly and RMA completion semantics | standalone UDMA device |
+| SQE decoding and complete-WQE UB-NET envelopes | standalone UDMA device |
+| CTP segmentation, TASSN/window and WQE ordering | native ns-3-UB endpoint/Jetty |
+| Target DMA and initiator CQE generation | standalone UDMA device |
 | Host NIC egress queue and port selection | standalone UDMA device |
 | Endpoint-to-fabric propagation and lookahead | UB-NET boundary configured by fabric adapter |
 | Switch ingress processing and VOQ admission | ns-3-UB |
@@ -26,24 +28,24 @@ exactly one side of the boundary.
 | Switch egress-port serialization | ns-3-UB |
 | Fabric routing, flow control, congestion and link faults | ns-3-UB |
 
-UB-NET transports one wire-visible transaction segment plus forwarding
-metadata. WQEs, host DMA requests and WQE completion state never cross this
-boundary.  The adapter converts the simulator-neutral UDMA segment shim into
-the real ns-3-UB CTP/UPI/EID/TA header stack before the packet enters the
-fabric, and reverses that encoding at the destination endpoint.
+UB-NET transports one complete WQE envelope from UDMA to the native ns-3-UB
+endpoint. Large envelopes may be split into IPC-ring chunks, but those chunks
+are not transport segments. Host DMA requests and WQE completion state never
+cross this boundary. The native Jetty creates the real CTP/UPI/EID/TA packet
+stream; the adapter invokes the target UDMA for each resulting DMA operation.
 
 ## CTP transaction segmentation
 
-The endpoint side of the standalone device owns CTP segmentation.  SEND is a
-single-packet operation and is rejected above the 4-KiB transport MTU.  WRITE
-and READ are split into at most 4-KiB transaction segments.  Every request
-segment receives a monotonically increasing TASSN; WRITE TAACK and READ
-response packets retain the request TASSN and transaction offset.
+The native ns-3-UB endpoint owns CTP segmentation. SEND is a single-packet
+operation and is rejected above the 4-KiB transport MTU. WRITE and READ are
+split into at most 4-KiB transaction segments. Every request segment receives
+a monotonically increasing TASSN; WRITE TAACK and READ response packets retain
+the request TASSN and transaction offset.
 
 The remote UDMA performs address translation and DMA independently for every
-segment.  The initiating UDMA de-duplicates returned TASSNs, accumulates the
-completed byte count, and emits the WQE CQE only after the complete byte range
-has finished.  IPC ring fragmentation is therefore no longer confused with a
+segment. The native CTP transaction context retires TASSNs and completes the
+WQE only after the complete byte range has finished; the initiating UDMA then
+emits the CQE. IPC ring fragmentation is therefore no longer confused with a
 CTP transaction segment.
 
 Compact EIDs are registered as native ns-3-UB CTP Entities.  Both physical
@@ -51,11 +53,10 @@ ports are Entity members, and the switch resolves a wildcard destination CNA
 through the Entity registry and load-balance field.  The switch does not
 segment WQEs, allocate TASSNs, access guest memory, or decide WQE completion.
 
-This is the first protocol-correct external-endpoint stage.  It uses native
-ns-3-UB wire headers and Entity routing, while admission state remains in the
-external endpoint.  Moving that admission state behind
-`UbCtpTransportService` is a later internal refactor, not a change to the
-UDMA/fabric process boundary.
+Official UDMA SQE `place_odr` values propagate unchanged as NO, RO or SO into
+the native WQE. Native `UbCtpTransportService` owns their admission and
+ordering state. A focused process contract checks all three values and ensures
+an SO WQE cannot overtake a previously submitted RO WQE.
 
 ## Process topology
 
@@ -112,8 +113,8 @@ start at different times without creating pair-specific epochs or barriers.
 ## Current and future coverage
 
 The native fabric and full-system launcher cutover are complete. Contract
-tests cover synchronized and asynchronous execution, while full-system runs
-cover multiple endpoints and physical ports. Native flow control, congestion
-feedback, link faults, larger-scale MTP profiling and optional MPI
-partitioning inside ns-3-UB remain future work. Transaction-layer ownership
-stays in the UDMA device model.
+tests cover synchronized and asynchronous execution plus NO/RO/SO WQE order
+propagation, while full-system runs cover multiple endpoints and physical
+ports. Native flow control is active for the validated lossless runs.
+Congestion feedback, injected link faults/retransmission, larger-scale MTP
+profiling and optional MPI partitioning inside ns-3-UB remain future work.

@@ -4,6 +4,7 @@
 #include "protocol/ub_host/proto.h"
 #include "protocol/ub_net/if.h"
 #include "protocol/ub_net/proto.h"
+#include "protocol/ub_net/udma_wire.h"
 
 #include <cassert>
 #include <cstring>
@@ -150,6 +151,8 @@ int main()
     static_assert(sizeof(ubsim::proto::host::H2DMessage) == 64);
     static_assert(sizeof(ubsim::proto::host::D2HMessage) == 64);
     static_assert(sizeof(ubsim::proto::net::Message) == 64);
+    static_assert(ubsim::proto::net::UdmaWireOrder(
+                      ubsim::proto::net::UdmaWireOrder(std::uint8_t{2})) == 2);
     static_assert(sizeof(ubsim::proto::host::Interface) ==
                   sizeof(SimbricksBaseIf));
     static_assert(sizeof(ubsim::proto::net::Interface) ==
@@ -621,7 +624,7 @@ int main()
     host.Store(write_source, std::vector<std::uint8_t>({'r','m','a','!'}));
     std::array<std::uint8_t, 64> write_wqe{};
     const std::uint32_t write_flags =
-        2U | (0x20U << 16) | (1U << 31); // PI=2, CQE, owner=1
+        2U | (0x21U << 16) | (1U << 31); // PI=2, RO + CQE, owner=1
     std::memcpy(write_wqe.data(), &write_flags, 4);
     const std::uint32_t write_command = 3U << 8;
     std::memcpy(write_wqe.data() + 4, &write_command, 4);
@@ -641,6 +644,7 @@ int main()
     }
     const device::Frame write_frame = network.frames.back();
     assert(write_frame.operation == device::Frame::Operation::Write);
+    assert(write_frame.order_type == 1); // official SQE place_odr=RO
     official_model.Receive(write_frame);
     assert(host.Load(write_target) == std::vector<std::uint8_t>({'r','m','a','!'}));
     const device::Frame write_ack = network.frames.back();
@@ -650,7 +654,8 @@ int main()
 
     constexpr std::uint64_t read_target = 0x180000;
     std::array<std::uint8_t, 64> read_wqe{};
-    const std::uint32_t read_flags = 3U | (0x20U << 16) | (1U << 31);
+    const std::uint32_t read_flags =
+        3U | (0x22U << 16) | (1U << 31); // PI=3, SO + CQE, owner=1
     std::memcpy(read_wqe.data(), &read_flags, 4);
     const std::uint32_t read_command = 6U << 8;
     std::memcpy(read_wqe.data() + 4, &read_command, 4);
@@ -667,6 +672,7 @@ int main()
     }
     const device::Frame read_request = network.frames.back();
     assert(read_request.operation == device::Frame::Operation::ReadRequest);
+    assert(read_request.order_type == 2); // official SQE place_odr=SO
     official_model.Receive(read_request);
     const device::Frame read_response = network.frames.back();
     assert(read_response.operation == device::Frame::Operation::ReadResponse);

@@ -82,6 +82,8 @@ struct Frame {
     std::uint16_t source_port{};
     std::uint16_t destination_port{};
     Operation operation{Operation::Raw};
+    // Official UDMA SQE place_odr encoding: 0=NO, 1=RO, 2=SO.
+    std::uint8_t order_type{};
     std::uint32_t source_jetty{};
     std::uint32_t destination_jetty{};
     std::uint32_t tpn{};

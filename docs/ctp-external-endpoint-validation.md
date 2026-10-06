@@ -50,6 +50,34 @@ TAACKs and 5,768 READ responses. This distinction is intentional: the
 external SEND boundary has no target-DMA completion message, whereas WRITE
 and READ retain remote-completion semantics.
 
+## Official placement-order propagation
+
+The official UDMA provider writes `urma_jfs_wr_t.flag.bs.place_order` into the
+two-bit `place_odr` field in every hardware SQE. The standalone UDMA decodes
+that field without changing the provider or kernel driver and carries its
+numeric value through UB-NET wire flags. The values map directly onto native
+ns-3-UB `OrderType`: NO=0, RO=1 and SO=2. The adapter validates the range,
+sets the native WQE order, and preserves it on target-DMA and completion
+messages.
+
+The stock `urma_perftest` cases currently leave per-WQE `place_order` at its
+zero-initialized NO value; its `--order_type` option configures Jetty transport
+ordering and is not this SQE field. Coverage therefore has two complementary
+layers rather than a private UMDK patch:
+
+- `udma_model_test` feeds official-layout WRITE and READ SQEs with RO and SO
+  bits and checks the emitted UDMA frames;
+- `order_contract.sh` submits three complete UB-NET WQEs with NO, RO and SO to
+  the independent adapter process. The native Jetty submits and completes all
+  three, the target observes all three order values, and SO is not allowed to
+  overtake the previously submitted RO.
+
+The contract reports `native_order_no=1`, `native_order_relax=1`,
+`native_order_strong=1`, three submitted/completed native WQEs, and zero ns-3
+runtime drops. This test also caught and fixed an adapter repackaging error
+that had preserved the decoded value in the wrong flag bits on target-bound
+segments.
+
 ## Focused 1-MiB proof
 
 One bidirectional `write_bw`, five iterations per endpoint at 1 MiB, produced:
@@ -77,8 +105,9 @@ virtual-time bandwidth claim.
 The production path now uses the native Jetty and CTP transaction engine for
 segmentation, TASSN/window state, Entity routing and response generation,
 while target memory access remains in the standalone UDMA hardware model.
-The regression exercises the current NO path and proves lossless CBFC under
-the included large bidirectional bursts. Remaining protocol validation should
-add focused RO/SO ordering, CNP/congestion and injected-loss/retransmission
-cases; those behaviors are no longer blocked on the process boundary, but are
-not claimed by this functional matrix.
+The full-system performance matrix exercises the current NO path and proves
+lossless CBFC under the included large bidirectional bursts. Focused process
+coverage now validates NO/RO/SO propagation and the RO-before-SO constraint.
+Remaining protocol validation should add CNP/congestion and injected-loss/
+retransmission cases; those behaviors are no longer blocked on the process
+boundary, but are not claimed by this functional matrix.

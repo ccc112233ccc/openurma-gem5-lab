@@ -1393,6 +1393,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         frame.source_port = static_cast<std::uint16_t>(route->second.port);
         frame.destination_port = UINT16_MAX;
         frame.operation = Frame::Operation::ReadRequest;
+        frame.order_type = wqe.place_order();
         frame.source_jetty = jetty_id;
         frame.destination_jetty = wqe.remote_jetty();
         frame.tpn = wqe.tpn();
@@ -1458,6 +1459,7 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
     frame.operation = wqe.opcode() == 0 ? Frame::Operation::Send :
         (wqe.opcode() == 1 ? Frame::Operation::SendImmediate :
                              Frame::Operation::Write);
+    frame.order_type = wqe.place_order();
     frame.source_jetty = jetty_id;
     frame.destination_jetty = wqe.remote_jetty();
     frame.tpn = wqe.tpn();
