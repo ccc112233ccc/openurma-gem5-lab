@@ -40,6 +40,8 @@ struct Options {
     std::uint64_t net_sync_interval_ps{100000};
     std::uint64_t endpoint_eid{0x100};
     std::uint64_t port_count{2};
+    std::uint64_t dma_max_outstanding{32};
+    std::uint64_t iotlb_entries{4096};
     SimbricksBaseIfSyncMode sync_mode{kSimbricksBaseIfSyncOptional};
     bool lifecycle_sync{false};
     bool extraction_test_abi{false};
@@ -91,6 +93,12 @@ bool ParseOptions(int argc, char** argv, Options& options)
         } else if (arg == "--ports" && i + 1 < argc) {
             if (!ParseUnsigned(argv[++i], options.port_count) ||
                 options.port_count > 255) return false;
+        } else if (arg == "--dma-max-outstanding" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.dma_max_outstanding) ||
+                options.dma_max_outstanding > 4096) return false;
+        } else if (arg == "--iotlb-entries" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.iotlb_entries) ||
+                options.iotlb_entries > (1U << 20)) return false;
         } else if (arg == "--test-abi") {
             options.extraction_test_abi = true;
         } else if (arg == "--lifecycle-sync") {
@@ -663,6 +671,9 @@ int Run(const Options& options)
     model_config.mmio_base = host_intro.mmio_base;
     model_config.port_count = device_intro.port_count;
     model_config.endpoint_eid = static_cast<std::uint32_t>(options.endpoint_eid);
+    model_config.dma_max_outstanding =
+        static_cast<std::uint32_t>(options.dma_max_outstanding);
+    model_config.iotlb_entries = static_cast<std::uint32_t>(options.iotlb_entries);
     model_config.extraction_test_abi = options.extraction_test_abi;
     device::UdmaModel model(host, network, model_config);
     if (!options.state_in.empty()) {

@@ -279,6 +279,10 @@ UdmaModel::WriteMmio(std::uint64_t offset, std::uint32_t length,
     if (offset >= kUmmuOffset && offset + length <= kUmmuOffset + kUmmuBytes) {
         const std::uint32_t reg = static_cast<std::uint32_t>(offset - kUmmuOffset);
         write_bytes(ummu_registers_.data() + reg);
+        // UMMU programming and command-queue doorbells may change token or
+        // page-table mappings. A real device invalidates matching IOTLB
+        // entries; clearing this compact model is conservative and correct.
+        iotlb_.clear();
         // RELEASE_PERMQ is a command/status register.  The modeled queue is
         // drained synchronously, so acknowledge completion by clearing the
         // command bit exactly as hardware does before the driver's poll.
@@ -1427,7 +1431,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
             }
             SubmitSqPayload(jetty_id, producer, std::move(raw),
                             std::move(payload));
-        });
+        }, config_.dma_max_outstanding);
 }
 
 void
@@ -1686,6 +1690,12 @@ void
 UdmaModel::TranslateToken(std::uint32_t token, std::uint64_t address, bool write,
                           TranslateCompletion completion)
 {
+    const std::uint64_t cache_key =
+        (write ? (std::uint64_t{1} << 63) : 0) |
+        (std::uint64_t(token) << 52) | (address >> 12);
+    const auto cached = iotlb_.find(cache_key);
+    if (cached != iotlb_.end())
+        return completion(true, cached->second | (address & 0xfffU));
     constexpr std::uint64_t AddressMask = 0x0000fffffffff000ULL;
     constexpr std::uint32_t Entries = 1024;
     if (token >= Entries) return completion(false, 0);
@@ -1703,18 +1713,32 @@ UdmaModel::TranslateToken(std::uint32_t token, std::uint64_t address, bool write
                 LoadLe<std::uint64_t>(entry.data() + 8) & AddressMask;
             if (!tct) return completion(false, 0);
             host_.DmaRead(tct + std::uint64_t(token) * 64, 64,
-                [this, address, write, completion = std::move(completion)]
+                [this, token, address, write, completion = std::move(completion)]
                 (bool tct_ok, std::vector<std::uint8_t> context) mutable {
                     if (!tct_ok || context.size() != 64 ||
                         !(LoadLe<std::uint64_t>(context.data()) & 1U))
                         return completion(false, 0);
                     CheckMapt(std::move(context), address, write,
-                        [this, address, completion = std::move(completion)]
+                        [this, token, address, write,
+                         completion = std::move(completion)]
                         (bool permitted, std::uint64_t root) mutable {
                             if (!permitted || !root)
                                 return completion(false, 0);
                             WalkTokenPageTable(root, address, 0,
-                                               std::move(completion));
+                                [this, token, address, write,
+                                 completion = std::move(completion)]
+                                (bool ok, std::uint64_t physical) mutable {
+                                    if (ok && config_.iotlb_entries) {
+                                        if (iotlb_.size() >= config_.iotlb_entries)
+                                            iotlb_.clear();
+                                        const std::uint64_t key =
+                                            (write ? (std::uint64_t{1} << 63) : 0) |
+                                            (std::uint64_t(token) << 52) |
+                                            (address >> 12);
+                                        iotlb_[key] = physical & ~std::uint64_t{0xfff};
+                                    }
+                                    completion(ok, physical);
+                                });
                         });
                 });
         });
@@ -2004,12 +2028,14 @@ UdmaModel::WalkTokenPageTable(std::uint64_t table, std::uint64_t address,
 
 void
 UdmaModel::ReadToken(std::uint32_t token, std::uint64_t address,
-                     std::size_t length, ReadCompletion completion)
+                     std::size_t length, ReadCompletion completion,
+                     std::size_t max_outstanding)
 {
     auto state = std::make_shared<TokenReadState>();
     state->token = token;
     state->address = address;
     state->length = length;
+    state->max_outstanding = std::max<std::size_t>(1, max_outstanding);
     state->bytes.resize(length);
     state->completion = std::move(completion);
     ContinueTokenRead(std::move(state));
@@ -2018,36 +2044,56 @@ UdmaModel::ReadToken(std::uint32_t token, std::uint64_t address,
 void
 UdmaModel::ContinueTokenRead(std::shared_ptr<TokenReadState> state)
 {
-    if (state->offset == state->length)
+    if (state->done) return;
+    if (state->completed_bytes == state->length) {
+        state->done = true;
         return state->completion(true, std::move(state->bytes));
-    const std::uint64_t current = state->address + state->offset;
-    const std::size_t chunk = std::min<std::size_t>(
-        state->length - state->offset, 4096 - (current & 0xfffU));
-    TranslateToken(state->token, current, false,
-        [this, state = std::move(state), chunk]
-        (bool ok, std::uint64_t physical) mutable {
-            if (!ok || !physical) return state->completion(false, {});
-            host_.DmaRead(physical, chunk,
-                [this, state = std::move(state), chunk]
-                (bool read_ok, std::vector<std::uint8_t> bytes) mutable {
-                    if (!read_ok || bytes.size() != chunk)
-                        return state->completion(false, {});
-                    std::copy(bytes.begin(), bytes.end(),
-                              state->bytes.begin() + state->offset);
-                    state->offset += chunk;
-                    ContinueTokenRead(std::move(state));
-                });
-        });
+    }
+    const std::size_t limit = state->max_outstanding;
+    while (!state->done && state->in_flight < limit &&
+           state->next_offset < state->length) {
+        const std::size_t offset = state->next_offset;
+        const std::uint64_t current = state->address + offset;
+        const std::size_t chunk = std::min<std::size_t>(
+            state->length - offset, 4096 - (current & 0xfffU));
+        state->next_offset += chunk;
+        ++state->in_flight;
+        TranslateToken(state->token, current, false,
+            [this, state, offset, chunk]
+            (bool ok, std::uint64_t physical) mutable {
+                if (state->done) return;
+                if (!ok || !physical) {
+                    state->done = true;
+                    return state->completion(false, {});
+                }
+                host_.DmaRead(physical, chunk,
+                    [this, state, offset, chunk]
+                    (bool read_ok, std::vector<std::uint8_t> bytes) mutable {
+                        if (state->done) return;
+                        if (!read_ok || bytes.size() != chunk) {
+                            state->done = true;
+                            return state->completion(false, {});
+                        }
+                        std::copy(bytes.begin(), bytes.end(),
+                                  state->bytes.begin() + offset);
+                        --state->in_flight;
+                        state->completed_bytes += chunk;
+                        ContinueTokenRead(std::move(state));
+                    });
+            });
+    }
 }
 
 void
 UdmaModel::WriteToken(std::uint32_t token, std::uint64_t address,
-                      std::vector<std::uint8_t> data, Completion completion)
+                      std::vector<std::uint8_t> data, Completion completion,
+                      std::size_t max_outstanding)
 {
     auto state = std::make_shared<TokenWriteState>();
     state->token = token;
     state->address = address;
     state->bytes = std::move(data);
+    state->max_outstanding = std::max<std::size_t>(1, max_outstanding);
     state->completion = std::move(completion);
     ContinueTokenWrite(std::move(state));
 }
@@ -2055,24 +2101,44 @@ UdmaModel::WriteToken(std::uint32_t token, std::uint64_t address,
 void
 UdmaModel::ContinueTokenWrite(std::shared_ptr<TokenWriteState> state)
 {
-    if (state->offset == state->bytes.size()) return state->completion(true);
-    const std::uint64_t current = state->address + state->offset;
-    const std::size_t chunk = std::min<std::size_t>(
-        state->bytes.size() - state->offset, 4096 - (current & 0xfffU));
-    TranslateToken(state->token, current, true,
-        [this, state = std::move(state), chunk]
-        (bool ok, std::uint64_t physical) mutable {
-            if (!ok || !physical) return state->completion(false);
-            std::vector<std::uint8_t> bytes(
-                state->bytes.begin() + state->offset,
-                state->bytes.begin() + state->offset + chunk);
-            host_.DmaWrite(physical, std::move(bytes),
-                [this, state = std::move(state), chunk](bool write_ok) mutable {
-                    if (!write_ok) return state->completion(false);
-                    state->offset += chunk;
-                    ContinueTokenWrite(std::move(state));
-                });
-        });
+    if (state->done) return;
+    if (state->completed_bytes == state->bytes.size()) {
+        state->done = true;
+        return state->completion(true);
+    }
+    const std::size_t limit = state->max_outstanding;
+    while (!state->done && state->in_flight < limit &&
+           state->next_offset < state->bytes.size()) {
+        const std::size_t offset = state->next_offset;
+        const std::uint64_t current = state->address + offset;
+        const std::size_t chunk = std::min<std::size_t>(
+            state->bytes.size() - offset, 4096 - (current & 0xfffU));
+        state->next_offset += chunk;
+        ++state->in_flight;
+        TranslateToken(state->token, current, true,
+            [this, state, offset, chunk]
+            (bool ok, std::uint64_t physical) mutable {
+                if (state->done) return;
+                if (!ok || !physical) {
+                    state->done = true;
+                    return state->completion(false);
+                }
+                std::vector<std::uint8_t> bytes(
+                    state->bytes.begin() + offset,
+                    state->bytes.begin() + offset + chunk);
+                host_.DmaWrite(physical, std::move(bytes),
+                    [this, state, chunk](bool write_ok) mutable {
+                        if (state->done) return;
+                        if (!write_ok) {
+                            state->done = true;
+                            return state->completion(false);
+                        }
+                        --state->in_flight;
+                        state->completed_bytes += chunk;
+                        ContinueTokenWrite(std::move(state));
+                    });
+            });
+    }
 }
 
 void
@@ -2387,6 +2453,9 @@ UdmaModel::LoadState(std::istream& input)
         return false;
     generic_iova_token_ = has_token ? std::optional<std::uint32_t>(token)
                                     : std::nullopt;
+    // Translation caches are microarchitectural state and are deliberately
+    // refilled after restore rather than serialized in checkpoints.
+    iotlb_.clear();
     std::uint64_t links{};
     if (!ReadPod(input, links) || links != config_.port_count) return false;
     link_up_.assign(links, false);
@@ -2439,7 +2508,7 @@ UdmaModel::ReceiveWrite(Frame frame)
             network_.Send(std::move(ack), [this](bool sent) {
                 if (!sent) ++ubase_errors_;
             });
-        });
+        }, config_.dma_max_outstanding);
 }
 
 void
@@ -2480,7 +2549,7 @@ UdmaModel::ReceiveReadRequest(Frame frame)
             network_.Send(std::move(response), [this](bool sent) {
                 if (!sent) ++ubase_errors_;
             });
-        });
+        }, config_.dma_max_outstanding);
 }
 
 void
@@ -2522,7 +2591,7 @@ UdmaModel::ReceiveReadResponse(Frame frame)
                        pending.completed_index, pending.opcode,
                        pending.byte_count, pending.immediate,
                        pending.completion);
-        });
+        }, config_.dma_max_outstanding);
 }
 
 void
@@ -2632,7 +2701,7 @@ UdmaModel::ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
                     }
                     ReceiveSge(std::move(frame), jfr_id, rqe_index,
                                sge_index + 1, copied + chunk);
-                });
+                }, config_.dma_max_outstanding);
         });
 }
 

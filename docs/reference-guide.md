@@ -79,6 +79,21 @@ automatically. In the synchronized gem5 path, `ubsim-net-up` configures the
 OOB Ethernet used by `urma_perftest` for its control handshake; it never
 carries UB payload traffic.
 
+Use `./lab start-qemu-dual --timing` when the benchmark must observe QEMU TCG
+virtual time and the timestamped UDMA/ns-3 fabric. The QEMU data path models a
+400-Gb/s port by default. Its host-side DMA engine pipelines page-sized
+transfers and caches UMMU translations, as hardware does. The main sensitivity
+knobs are:
+
+- `UBSIM_PEER_LINK_RATE_GBPS` (default `400`): ns-3 UB port line rate;
+- `UBSIM_QEMU_DMA_MAX_OUTSTANDING` (default `32`): data DMA requests per WQE;
+- `UBSIM_QEMU_IOTLB_ENTRIES` (default `4096`): modeled translation-cache size;
+- `UBSIM_QEMU_HOST_LATENCY_NS` (default `500`): QEMU-to-UDMA adapter latency.
+
+Resolved values are recorded in `run-qemu-dual/run-manifest.txt`. Metadata and
+control-plane DMA remain ordered; only payload movement uses the configurable
+parallel window.
+
 The supported backend/provider selections are intentionally singular:
 
 - `--network-backend modular-ns3ub`

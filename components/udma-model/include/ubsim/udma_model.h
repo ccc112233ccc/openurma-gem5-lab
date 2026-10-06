@@ -127,6 +127,14 @@ class UdmaModel {
         std::uint64_t mmio_base{};
         std::uint32_t port_count{2};
         std::uint32_t endpoint_eid{0x100};
+        // Maximum number of page-sized host DMA operations that one WQE may
+        // keep in flight. Real UDMA engines pipeline translations and DMA;
+        // serializing every 4-KiB page makes adapter latency an artificial
+        // bandwidth limit.
+        std::uint32_t dma_max_outstanding{32};
+        // Number of 4-KiB token translations cached by the modeled IOTLB.
+        // Zero disables caching for validation experiments.
+        std::uint32_t iotlb_entries{4096};
         // Temporary descriptor ABI used only by the extraction contract test.
         // Production device processes leave this false.
         bool extraction_test_abi{false};
@@ -310,21 +318,31 @@ class UdmaModel {
                             std::uint32_t level,
                             TranslateCompletion completion);
     void ReadToken(std::uint32_t token, std::uint64_t address,
-                   std::size_t length, ReadCompletion completion);
+                   std::size_t length, ReadCompletion completion,
+                   std::size_t max_outstanding = 1);
     void WriteToken(std::uint32_t token, std::uint64_t address,
-                    std::vector<std::uint8_t> data, Completion completion);
+                    std::vector<std::uint8_t> data, Completion completion,
+                    std::size_t max_outstanding = 1);
     struct TokenReadState {
         std::uint32_t token{};
         std::uint64_t address{};
         std::size_t length{};
-        std::size_t offset{};
+        std::size_t next_offset{};
+        std::size_t completed_bytes{};
+        std::size_t in_flight{};
+        std::size_t max_outstanding{1};
+        bool done{};
         std::vector<std::uint8_t> bytes;
         ReadCompletion completion;
     };
     struct TokenWriteState {
         std::uint32_t token{};
         std::uint64_t address{};
-        std::size_t offset{};
+        std::size_t next_offset{};
+        std::size_t completed_bytes{};
+        std::size_t in_flight{};
+        std::size_t max_outstanding{1};
+        bool done{};
         std::vector<std::uint8_t> bytes;
         Completion completion;
     };
@@ -346,6 +364,7 @@ class UdmaModel {
     NetworkInterface& network_;
     Config config_;
     std::array<std::uint8_t, 0x5000> ummu_registers_{};
+    std::unordered_map<std::uint64_t, std::uint64_t> iotlb_;
     std::optional<std::uint32_t> generic_iova_token_;
     std::array<std::uint32_t, 0x120 / sizeof(std::uint32_t)>
         ubios_message_queue_registers_{};

@@ -22,6 +22,8 @@ rate_gbps="${UBSIM_PEER_LINK_RATE_GBPS:-400}"
 link_delay_ns="${UBSIM_PEER_LATENCY_NS:-100}"
 switch_delay_ns="${UBSIM_QEMU_SWITCH_DELAY_NS:-50}"
 host_link_delay_ns="${UBSIM_QEMU_HOST_LATENCY_NS:-500}"
+dma_max_outstanding="${UBSIM_QEMU_DMA_MAX_OUTSTANDING:-32}"
+iotlb_entries="${UBSIM_QEMU_IOTLB_ENTRIES:-4096}"
 icount_shift="${UBSIM_QEMU_ICOUNT_SHIFT:-0}"
 mode=functional
 sync_mode=off
@@ -56,12 +58,14 @@ esac
 for path in "$qemu" "$kernel" "$initrd" "$udma" "$ns3" "$lab/tools/run-background.sh"; do
     [[ -x "$path" || -r "$path" ]] || die "missing required artifact: $path"
 done
-for value in "$uart0" "$uart1" "$oob_port" "$ssh0" "$ssh1" "$rate_gbps" "$link_delay_ns" "$switch_delay_ns" "$host_link_delay_ns"; do
+for value in "$uart0" "$uart1" "$oob_port" "$ssh0" "$ssh1" "$rate_gbps" "$link_delay_ns" "$switch_delay_ns" "$host_link_delay_ns" "$dma_max_outstanding" "$iotlb_entries"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "ports, rates and delays must be decimal integers"
 done
 [[ "$icount_shift" =~ ^[0-9]+$ ]] || die "UBSIM_QEMU_ICOUNT_SHIFT must be a non-negative integer"
 (( uart0 > 1023 && uart1 > 1023 && oob_port > 1023 )) || die "ports must exceed 1023"
 (( uart0 != uart1 && ssh0 != ssh1 && rate_gbps > 0 && link_delay_ns > 0 )) || die "invalid UART, SSH port, rate or delay"
+(( dma_max_outstanding > 0 && dma_max_outstanding <= 4096 )) || die "invalid DMA outstanding limit"
+(( iotlb_entries > 0 && iotlb_entries <= 1048576 )) || die "invalid IOTLB entry count"
 
 pid_live() {
     local file=$1 pid command
@@ -127,6 +131,8 @@ for node in 0 1; do
         --host-sync-interval-ps "$((host_link_delay_ns * 1000))" \
         --net-sync-interval-ps "$((link_delay_ns * 1000))" \
         --eid "$((0x100 + node))" --ports 2 \
+        --dma-max-outstanding "$dma_max_outstanding" \
+        --iotlb-entries "$iotlb_entries" \
         --state-out "$run_dir/udma-node$node/state.bin"
 done
 for socket_path in "$host0" "$host1" "$net0" "$net1"; do
@@ -186,6 +192,8 @@ ssh0_port=$ssh0
 ssh1_port=$ssh1
 peer_link_rate_gbps=$rate_gbps
 host_link_latency_ns=$host_link_delay_ns
+dma_max_outstanding=$dma_max_outstanding
+iotlb_entries=$iotlb_entries
 peer_latency_ns=$link_delay_ns
 switch_delay_ns=$switch_delay_ns
 icount_shift=$icount_shift
