@@ -131,7 +131,7 @@ class UdmaModel {
         // keep in flight. Real UDMA engines pipeline translations and DMA;
         // serializing every 4-KiB page makes adapter latency an artificial
         // bandwidth limit.
-        std::uint32_t dma_max_outstanding{32};
+        std::uint32_t dma_max_outstanding{256};
         // Number of 4-KiB token translations cached by the modeled IOTLB.
         // Zero disables caching for validation experiments.
         std::uint32_t iotlb_entries{4096};

@@ -86,7 +86,7 @@ transfers and caches UMMU translations, as hardware does. The main sensitivity
 knobs are:
 
 - `UBSIM_PEER_LINK_RATE_GBPS` (default `400`): ns-3 UB port line rate;
-- `UBSIM_QEMU_DMA_MAX_OUTSTANDING` (default `32`): data DMA requests per WQE;
+- `UBSIM_QEMU_DMA_MAX_OUTSTANDING` (default `256`): data DMA requests per WQE;
 - `UBSIM_QEMU_IOTLB_ENTRIES` (default `4096`): modeled translation-cache size;
 - `UBSIM_QEMU_HOST_LATENCY_NS` (default `500`): QEMU-to-UDMA adapter latency.
 

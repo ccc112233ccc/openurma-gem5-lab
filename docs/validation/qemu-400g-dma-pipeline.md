@@ -11,7 +11,7 @@ peer_link_rate_gbps=400
 host_link_latency_ns=500
 peer_latency_ns=100
 switch_delay_ns=50
-dma_max_outstanding=32
+dma_max_outstanding=256
 iotlb_entries=4096
 ```
 
@@ -26,16 +26,24 @@ Observed on both endpoints:
 
 ```text
 bytes    iterations  BW peak[MB/sec]  BW average[MB/sec]  MsgRate[Mpps]
-1048576  16          38907.20         38902.21            0.038902
+1048576  16          63375.79         63364.70            0.063365
 ```
+
+The `-B` report is the sum of local and remote bandwidth; this is explicit in
+`print_bi_bw_report()` in the official `urma_perftest` source. The measured
+63.36 GB/s aggregate therefore corresponds to about 31.68 GB/s (253.4 Gb/s)
+per direction, or 63.4% of one 400-Gb/s port.
 
 The earlier serialized implementation reached about 553 MB/s because every
 4-KiB payload page paid a complete token-translation and adapter round trip
-before the next page could start. Pipelined payload DMA raised the result to
-about 11.78 GB/s. Adding a bounded modeled IOTLB raised the warm steady state
-to 38.90 GB/s, about 77.8% of the 50-GB/s raw one-port limit.
+before the next page could start. A 32-request payload-DMA window plus a
+bounded modeled IOTLB raised the warm bidirectional aggregate to 38.90 GB/s.
+A 256-request window, enough to cover all 4-KiB pages in one 1-MiB WQE, raised
+it to 63.36 GB/s aggregate.
 
 This is not fitted to a measured board value. The remaining gap reflects the
 current modeled protocol fragmentation, host DMA granularity, WQE/ACK work,
-and endpoint/switch serialization. Control and metadata DMA remain ordered;
-only payload movement uses the configurable outstanding window.
+and endpoint/switch serialization. Most importantly, the current jetty engine
+retires one WQE before fetching the next, so the wire pipeline drains at WQE
+boundaries. Control and metadata DMA remain ordered; only payload movement
+uses the configurable outstanding window.
