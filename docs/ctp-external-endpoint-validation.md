@@ -78,6 +78,40 @@ runtime drops. This test also caught and fixed an adapter repackaging error
 that had preserved the decoded value in the wrong flag bits on target-bound
 segments.
 
+## Virtual-time timeout retransmission
+
+The pinned ns-3-UB CTP service now retains each encoded WRITE or READ request
+segment, keyed by Entity state and TASSN. If its TAACK or READ response has not
+arrived after the configured virtual-time RTO, the service requeues a copy on
+the original native queue and physical port. Completion removes the retained
+record. SEND is deliberately excluded because the current external SEND path
+has no TAACK.
+
+`retransmission_contract.sh` drops the first target-bound WRITE request in the
+adapter. With a 1-us virtual RTO it proves this exact chain:
+
+```text
+native_wqes_submitted=1
+native_wqes_completed=1
+ctp_retransmissions=1
+ctp_retransmission_exhausted=0
+injected_ctp_request_drops=1
+ns3_runtime_drops=0
+```
+
+The receiver executes the retransmitted WRITE and the initiator completes the
+WQE exactly once. The checked-in patch is reapplied to a clean pinned ns-3-UB
+source tree on every adapter build, so the behavior does not depend on an
+unrecorded edit inside `sources/`.
+
+RTO is meaningful only on a shared virtual-time axis. Accordingly,
+`UBSIM_CTP_RETRANSMISSION=auto` resolves to `on` for full conservative
+synchronization and `off` for asynchronous functional or lifecycle-only
+runs. `UBSIM_CTP_RTO_PS` defaults to 25,600,000 ps and
+`UBSIM_CTP_MAX_RETRANSMISSIONS` defaults to seven. An explicit `on` is used by
+the focused process contract; it is not evidence that unsynchronized
+full-system latency is valid.
+
 ## Focused 1-MiB proof
 
 One bidirectional `write_bw`, five iterations per endpoint at 1 MiB, produced:
@@ -107,7 +141,8 @@ segmentation, TASSN/window state, Entity routing and response generation,
 while target memory access remains in the standalone UDMA hardware model.
 The full-system performance matrix exercises the current NO path and proves
 lossless CBFC under the included large bidirectional bursts. Focused process
-coverage now validates NO/RO/SO propagation and the RO-before-SO constraint.
-Remaining protocol validation should add CNP/congestion and injected-loss/
-retransmission cases; those behaviors are no longer blocked on the process
-boundary, but are not claimed by this functional matrix.
+coverage now validates NO/RO/SO propagation, the RO-before-SO constraint, and
+one request-loss retransmission. Remaining protocol validation should add
+CNP/congestion, lost-ACK duplicate suppression, and an initiator-visible
+failure completion when the retry budget is exhausted. Request-loss recovery
+is not claimed by the asynchronous full-system functional matrix.

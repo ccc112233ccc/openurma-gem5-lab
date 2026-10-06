@@ -19,7 +19,7 @@ exactly one side of the boundary.
 | DMA, address translation, token checks and IOTLB | standalone UDMA device |
 | TP activation and TP-to-physical-port selection | standalone UDMA device |
 | SQE decoding and complete-WQE UB-NET envelopes | standalone UDMA device |
-| CTP segmentation, TASSN/window and WQE ordering | native ns-3-UB endpoint/Jetty |
+| CTP segmentation, TASSN/window, WQE ordering and request retransmission | native ns-3-UB endpoint/Jetty |
 | Target DMA and initiator CQE generation | standalone UDMA device |
 | Host NIC egress queue and port selection | standalone UDMA device |
 | Endpoint-to-fabric propagation and lookahead | UB-NET boundary configured by fabric adapter |
@@ -57,6 +57,15 @@ Official UDMA SQE `place_odr` values propagate unchanged as NO, RO or SO into
 the native WQE. Native `UbCtpTransportService` owns their admission and
 ordering state. A focused process contract checks all three values and ensures
 an SO WQE cannot overtake a previously submitted RO WQE.
+
+For WRITE and READ, the same native service retains the encoded request
+segment until its TAACK or READ response arrives. A virtual-time RTO requeues
+that exact packet through the original native queue and physical port;
+completion removes the retained segment. The fabric therefore owns timeout
+and retransmission, while the target UDMA still owns the physical memory
+action. The first closed-loop contract covers loss of one request segment.
+Duplicate suppression for a lost acknowledgement and an initiator-visible
+error after retry exhaustion are not yet implemented.
 
 ## Process topology
 
@@ -113,8 +122,10 @@ start at different times without creating pair-specific epochs or barriers.
 ## Current and future coverage
 
 The native fabric and full-system launcher cutover are complete. Contract
-tests cover synchronized and asynchronous execution plus NO/RO/SO WQE order
-propagation, while full-system runs cover multiple endpoints and physical
-ports. Native flow control is active for the validated lossless runs.
-Congestion feedback, injected link faults/retransmission, larger-scale MTP
-profiling and optional MPI partitioning inside ns-3-UB remain future work.
+tests cover synchronized and asynchronous execution, NO/RO/SO WQE order
+propagation, and one injected WRITE-request loss followed by virtual-time RTO
+retransmission. Full-system runs cover multiple endpoints and physical ports.
+Native flow control is active for the validated lossless runs. Lost-ACK
+duplicate suppression, retry-exhaustion completion, congestion feedback,
+larger-scale MTP profiling and optional MPI partitioning inside ns-3-UB remain
+future work.

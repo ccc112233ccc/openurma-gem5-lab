@@ -27,6 +27,7 @@ cache_dir="${UBSIM_NS3UB_CACHE:-$source_root/cmake-cache-$build_suffix}"
 output_dir="${UBSIM_NS3UB_OUTPUT:-$source_root/build-$build_suffix}"
 ubnet_adapter_source="$runtime_lab/integrations/ns3ub/ub-net-adapter.cc"
 ubnet_adapter_cmake="$runtime_lab/integrations/ns3ub/ub-net-adapter.CMakeLists.txt"
+ctp_retransmission_patch="$runtime_lab/integrations/ns3ub/patches/0001-ctp-timeout-retransmission.patch"
 simbricks_base_source="$runtime_lab/components/udma-device-sim/simbricks_base_portable.c"
 expected_source_revision=d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b
 
@@ -52,7 +53,11 @@ actual_source_revision="$(ubsim_exec git -C "$source_root" rev-parse HEAD)"
 # generated and pinned, so restoring this one upstream build file is safe and
 # keeps repeated builds independent of the removed compatibility path.
 ubsim_exec git -C "$source_root" restore --source "$expected_source_revision" -- \
-    src/unified-bus/CMakeLists.txt
+    src/unified-bus/CMakeLists.txt \
+    src/unified-bus/model/protocol/ub-ctp.cc \
+    src/unified-bus/model/protocol/ub-ctp.h
+ubsim_exec git -C "$source_root" apply --check "$ctp_retransmission_patch"
+ubsim_exec git -C "$source_root" apply "$ctp_retransmission_patch"
 ubsim_exec rm -f "$source_root/scratch/ub-gem5-adapter.cc" \
     "$source_root/src/unified-bus/model/ub-external-adapter-protocol.h"
 ubsim_exec mkdir -p "$source_root/scratch/ubsim-ub-net"
@@ -97,6 +102,9 @@ if [[ "$UBSIM_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
         bash "$lab_dir/integrations/ns3ub/tests/order_contract.sh" \
             "$output_dir/scratch/ns3.44-ub-net-adapter" "$peer" \
             /tmp/ubsim-ns3ub-order-contract
+        bash "$lab_dir/integrations/ns3ub/tests/retransmission_contract.sh" \
+            "$output_dir/scratch/ns3.44-ub-net-adapter" "$peer" \
+            /tmp/ubsim-ns3ub-retrans-contract
     else
         echo "Skipping process contracts on macOS; build ub-switch-sim first to enable them."
     fi
@@ -120,5 +128,10 @@ else
         "$output_dir/scratch/ns3.44-ub-net-adapter" \
         "$switch_build/ub-net-contract-peer" \
         /tmp/ubsim-ns3ub-order-contract
+    ubsim_exec timeout 20 bash \
+        "$runtime_lab/integrations/ns3ub/tests/retransmission_contract.sh" \
+        "$output_dir/scratch/ns3.44-ub-net-adapter" \
+        "$switch_build/ub-net-contract-peer" \
+        /tmp/ubsim-ns3ub-retrans-contract
 fi
 echo "ns-3-UB UB-NET adapter built: $output_dir/scratch/ns3.44-ub-net-adapter"

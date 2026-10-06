@@ -25,6 +25,9 @@ host_link_delay_ns="${UBSIM_QEMU_HOST_LATENCY_NS:-500}"
 dma_max_outstanding="${UBSIM_QEMU_DMA_MAX_OUTSTANDING:-256}"
 iotlb_entries="${UBSIM_QEMU_IOTLB_ENTRIES:-4096}"
 icount_shift="${UBSIM_QEMU_ICOUNT_SHIFT:-0}"
+ctp_retransmission="${UBSIM_CTP_RETRANSMISSION:-auto}"
+ctp_rto_ps="${UBSIM_CTP_RTO_PS:-25600000}"
+ctp_max_retransmissions="${UBSIM_CTP_MAX_RETRANSMISSIONS:-7}"
 mode=functional
 sync_mode=off
 
@@ -62,6 +65,15 @@ for value in "$uart0" "$uart1" "$oob_port" "$ssh0" "$ssh1" "$rate_gbps" "$link_d
     [[ "$value" =~ ^[0-9]+$ ]] || die "ports, rates and delays must be decimal integers"
 done
 [[ "$icount_shift" =~ ^[0-9]+$ ]] || die "UBSIM_QEMU_ICOUNT_SHIFT must be a non-negative integer"
+[[ "$ctp_rto_ps" =~ ^[0-9]+$ ]] && (( ctp_rto_ps > 0 )) ||
+    die "UBSIM_CTP_RTO_PS must be a positive integer"
+[[ "$ctp_max_retransmissions" =~ ^[0-9]+$ ]] && (( ctp_max_retransmissions > 0 )) ||
+    die "UBSIM_CTP_MAX_RETRANSMISSIONS must be a positive integer"
+case "$ctp_retransmission" in
+    auto) [[ "$sync_mode" == required ]] && ctp_retransmission=on || ctp_retransmission=off ;;
+    on|off) ;;
+    *) die "UBSIM_CTP_RETRANSMISSION must be auto, on, or off" ;;
+esac
 (( uart0 > 1023 && uart1 > 1023 && oob_port > 1023 )) || die "ports must exceed 1023"
 (( uart0 != uart1 && ssh0 != ssh1 && rate_gbps > 0 && link_delay_ns > 0 )) || die "invalid UART, SSH port, rate or delay"
 (( dma_max_outstanding > 0 && dma_max_outstanding <= 4096 )) || die "invalid DMA outstanding limit"
@@ -147,6 +159,8 @@ start_bg "$run_dir/ub-fabric/ns3.pid" "$run_dir/ub-fabric/ns3.log" \
     "$ns3" --ports 2 --link-delay-ps "$((link_delay_ns * 1000))" \
     --switch-delay-ps "$((switch_delay_ns * 1000))" --rate-gbps "$rate_gbps" \
     --sync "$sync_mode" --sync-interval-ps "$((link_delay_ns * 1000))" \
+    --ctp-retransmission "$ctp_retransmission" --ctp-rto-ps "$ctp_rto_ps" \
+    --ctp-max-retransmissions "$ctp_max_retransmissions" \
     --endpoint "$net0,256" --endpoint "$net1,257"
 
 launch_qemu() {
@@ -197,6 +211,9 @@ iotlb_entries=$iotlb_entries
 peer_latency_ns=$link_delay_ns
 switch_delay_ns=$switch_delay_ns
 icount_shift=$icount_shift
+ctp_retransmission=$ctp_retransmission
+ctp_rto_ps=$ctp_rto_ps
+ctp_max_retransmissions=$ctp_max_retransmissions
 EOF
 start_complete=1
 

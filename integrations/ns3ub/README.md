@@ -12,7 +12,8 @@ and submits the WQE to a prepared native `UbJetty`.
 
 `UbCtpTransportService` then owns 4-KiB transaction segmentation, per-Entity
 TASSN allocation, the sliding completion window, ordering, member-port
-selection, compact CTP/UPI/EID/TA headers, and response processing. The
+selection, compact CTP/UPI/EID/TA headers, response processing, and the
+virtual-time timeout/retransmission state for WRITE and READ requests. The
 adapter's `UbTargetExecutor` calls the external target UDMA for the physical
 DMA action of each native segment. WRITE TAACKs and READ responses retire the
 native window entry; actual READ bytes remain outside ns-3 and return to the
@@ -29,15 +30,26 @@ submissions/completions with no packet drop, and verifies that SO does not
 overtake the previously submitted RO. This supplements the stock
 `urma_perftest` matrix, whose per-WQE placement order remains NO.
 
+The adapter itself defaults retransmission to off. The QEMU and gem5 launchers
+resolve `UBSIM_CTP_RETRANSMISSION=auto`: it is enabled only with conservative
+synchronization required from virtual time zero, and disabled in asynchronous
+functional or lifecycle-only runs. This prevents host scheduling delay at an
+external UDMA process from masquerading as a simulated CTP timeout.
+`UBSIM_CTP_RTO_PS` and `UBSIM_CTP_MAX_RETRANSMISSIONS` configure the
+virtual-time policy; explicit `on` and `off` overrides remain available.
+
 `ub-net-adapter.CMakeLists.txt` is installed as a self-contained ns-3 scratch
 subdirectory. It compiles the portable SimBricks transport in the same process
 without introducing a dependency on gem5.
 
 The upstream ns-3-UB checkout is a generated dependency under
 `sources/ns-3-ub` at the revision recorded in `SOURCE_REVISIONS.md`. During
-`./lab build ns3ub`, the checked-in overlays are installed into that checkout
-and the UB-NET adapter is built. The build then runs UB-NET process contracts
-with synchronization disabled and required plus the native ordering contract.
+`./lab build ns3ub`, the script restores the pinned CTP sources, applies
+`patches/0001-ctp-timeout-retransmission.patch`, installs the checked-in
+adapter overlay, and builds it. It then runs UB-NET contracts with
+synchronization disabled and required, the native ordering contract, and a
+fault-injection contract that drops the first WRITE request and requires one
+timeout retransmission followed by exactly one WQE completion.
 
 Keeping the complete adapter here makes the integration reviewable from this
 repository. It also avoids depending on unpublished commits in a sibling

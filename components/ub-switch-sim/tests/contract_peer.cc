@@ -60,7 +60,8 @@ int Run(const std::string& role, const std::string& socket,
         return 4;
 
     const bool ctp_order = profile == "ctp-order";
-    if (!ctp_order && profile != "raw") return 2;
+    const bool ctp_retrans = profile == "ctp-retrans";
+    if (!ctp_order && !ctp_retrans && profile != "raw") return 2;
     const std::vector<std::uint8_t> request{'u', 'b', '-', 'n', 'e', 't'};
     const std::vector<std::uint8_t> response{'o', 'k'};
     bool link_up = false;
@@ -107,6 +108,38 @@ int Run(const std::string& role, const std::string& socket,
                         static_cast<std::uint8_t>(net::MessageType::Frame));
                 }
                 sent = next_order == 3;
+            } else if (ctp_retrans) {
+                auto* output = net::UbNetOutAlloc(&interface, send_time);
+                if (output != nullptr) {
+                    ZeroVolatile(output->frame);
+                    output->frame.sequence = 200;
+                    output->frame.source_eid = local_eid;
+                    output->frame.destination_eid = remote_eid;
+                    output->frame.source_port = 1;
+                    output->frame.length = sizeof(net::UdmaWireHeader) + 32;
+                    net::UdmaWireHeader wire{};
+                    wire.magic = net::kUdmaWireMagic;
+                    wire.version = net::kUdmaWireVersion;
+                    wire.operation = static_cast<std::uint8_t>(net::UdmaOperation::Write);
+                    wire.flags = net::kUdmaWireLastFragment;
+                    wire.source_jetty = 7;
+                    wire.destination_jetty = 9;
+                    wire.segment = 11;
+                    wire.remote_address = 0x10000;
+                    wire.request_id = 2000;
+                    wire.transfer_length = 32;
+                    wire.payload_length = 32;
+                    auto* payload = reinterpret_cast<volatile std::uint8_t*>(output) +
+                                    sizeof(net::Message);
+                    const auto* wire_bytes = reinterpret_cast<const std::uint8_t*>(&wire);
+                    for (std::size_t i = 0; i < sizeof(wire); ++i)
+                        payload[i] = wire_bytes[i];
+                    for (std::size_t i = 0; i < 32; ++i)
+                        payload[sizeof(wire) + i] = 0x5a;
+                    net::UbNetOutSend(&interface, output,
+                        static_cast<std::uint8_t>(net::MessageType::Frame));
+                    sent = true;
+                }
             } else {
                 auto* output = net::UbNetOutAlloc(&interface, send_time);
                 if (output != nullptr) {
@@ -150,6 +183,76 @@ int Run(const std::string& role, const std::string& socket,
             std::cerr << role << ": link state "
                       << (link_up ? "up" : "down") << '\n';
         } else if (type == net::MessageType::Frame) {
+            if (ctp_retrans) {
+                bool valid = link_up &&
+                             input->frame.source_eid == remote_eid &&
+                             input->frame.destination_eid == local_eid &&
+                             input->frame.length >= sizeof(net::UdmaWireHeader);
+                net::UdmaWireHeader wire{};
+                const auto* payload = reinterpret_cast<const volatile std::uint8_t*>(input) +
+                                      sizeof(net::Message);
+                auto* wire_bytes = reinterpret_cast<std::uint8_t*>(&wire);
+                for (std::size_t i = 0; valid && i < sizeof(wire); ++i)
+                    wire_bytes[i] = payload[i];
+                valid = valid && wire.magic == net::kUdmaWireMagic &&
+                        wire.version == net::kUdmaWireVersion &&
+                        (wire.flags & net::kUdmaWireCtpSegment) &&
+                        wire.request_id == 2000;
+                if (sender) {
+                    valid = valid && wire.operation ==
+                        static_cast<std::uint8_t>(net::UdmaOperation::WriteAck) &&
+                        wire.payload_length == 0;
+                    net::UbNetInDone(&interface, input);
+                    if (!valid) return 8;
+                    std::cout << "sender: CTP WRITE completed after injected loss PASS\n";
+                    SimbricksBaseIfClose(&interface.base);
+                    SimbricksBaseIfSHMPoolUnmap(&pool);
+                    SimbricksBaseIfSHMPoolUnlink(&pool);
+                    return 0;
+                }
+                valid = valid && wire.operation ==
+                    static_cast<std::uint8_t>(net::UdmaOperation::Write) &&
+                    wire.payload_length == 32 &&
+                    input->frame.length == sizeof(net::UdmaWireHeader) + 32;
+                for (std::size_t i = 0; valid && i < 32; ++i)
+                    valid = payload[sizeof(wire) + i] == 0x5a;
+                net::UbNetInDone(&interface, input);
+                if (!valid) return 8;
+                for (;;) {
+                    auto* output = net::UbNetOutAlloc(&interface, now);
+                    if (output == nullptr) {
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    ZeroVolatile(output->frame);
+                    output->frame.sequence = 200;
+                    output->frame.source_eid = local_eid;
+                    output->frame.destination_eid = remote_eid;
+                    output->frame.length = sizeof(net::UdmaWireHeader);
+                    std::swap(wire.source_jetty, wire.destination_jetty);
+                    wire.operation =
+                        static_cast<std::uint8_t>(net::UdmaOperation::WriteAck);
+                    wire.flags = net::kUdmaWireCtpSegment |
+                                 net::kUdmaWireLastFragment;
+                    wire.payload_length = 0;
+                    auto* output_payload =
+                        reinterpret_cast<volatile std::uint8_t*>(output) +
+                        sizeof(net::Message);
+                    const auto* response_bytes =
+                        reinterpret_cast<const std::uint8_t*>(&wire);
+                    for (std::size_t i = 0; i < sizeof(wire); ++i)
+                        output_payload[i] = response_bytes[i];
+                    net::UbNetOutSend(&interface, output,
+                        static_cast<std::uint8_t>(net::MessageType::Frame));
+                    std::cout << "receiver: executed one retransmitted CTP WRITE PASS\n";
+                    for (std::uint64_t delay = 0; delay < 100000; ++delay)
+                        std::this_thread::yield();
+                    SimbricksBaseIfClose(&interface.base);
+                    SimbricksBaseIfSHMPoolUnmap(&pool);
+                    SimbricksBaseIfSHMPoolUnlink(&pool);
+                    return 0;
+                }
+            }
             if (ctp_order) {
                 bool valid = !sender && link_up &&
                              input->frame.source_eid == remote_eid &&
@@ -259,7 +362,7 @@ int main(int argc, char** argv)
 {
     if (argc != 5 && argc != 6) {
         std::cerr << "usage: ub-net-contract-peer sender|receiver SOCKET SHM "
-                     "off|required [raw|ctp-order]\n";
+                     "off|required [raw|ctp-order|ctp-retrans]\n";
         return 2;
     }
     return Run(argv[1], argv[2], argv[3], argv[4],

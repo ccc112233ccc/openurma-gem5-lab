@@ -1,0 +1,267 @@
+diff --git a/src/unified-bus/model/protocol/ub-ctp.cc b/src/unified-bus/model/protocol/ub-ctp.cc
+index 85b93e1..16cd4ea 100644
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -550,6 +550,24 @@ UbCtpTransportService::GetTypeId(void)
+                           TimeValue(NanoSeconds(0)),
+                           MakeTimeAccessor(&UbCtpTransportService::m_delayTaAckTime),
+                           MakeTimeChecker())
++            .AddAttribute("EnableRetransmission",
++                          "Enable CTP transaction-segment timeout retransmission.",
++                          BooleanValue(false),
++                          MakeBooleanAccessor(
++                              &UbCtpTransportService::m_retransmissionEnabled),
++                          MakeBooleanChecker())
++            .AddAttribute("RetransmissionTimeout",
++                          "Timeout before an unacknowledged CTP transaction segment is resent.",
++                          TimeValue(NanoSeconds(25600)),
++                          MakeTimeAccessor(
++                              &UbCtpTransportService::m_retransmissionTimeout),
++                          MakeTimeChecker())
++            .AddAttribute("MaxRetransmissionAttempts",
++                          "Maximum number of CTP segment retransmissions.",
++                          UintegerValue(7),
++                          MakeUintegerAccessor(
++                              &UbCtpTransportService::m_maxRetransmissionAttempts),
++                          MakeUintegerChecker<uint32_t>(1))
+             .AddTraceSource(
+                 "FirstPacketSendsNotify",
+                 "Fires when the first packet of a CTP TA unit is enqueued.",
+@@ -591,6 +609,7 @@ UbCtpTransportService::SetNode(Ptr<Node> node)
+     Ptr<UbLifecycleCoordinator> coordinator = UbLifecycleCoordinator::GetOrCreate(node);
+     m_lifecycleOwner = coordinator->OpenResource(UbLifecycleResourceKind::CTP_SERVICE, 0);
+     m_delayedTaAckEvents.Init(coordinator);
++    m_retransmissionEvents.Init(coordinator);
+ }
+ 
+ Ptr<Node>
+@@ -599,6 +618,39 @@ UbCtpTransportService::GetNode() const
+     return m_node;
+ }
+ 
++void
++UbCtpTransportService::SetRetransmissionEnabled(bool enabled)
++{
++    m_retransmissionEnabled = enabled;
++}
++
++void
++UbCtpTransportService::SetRetransmissionTimeout(Time timeout)
++{
++    NS_ABORT_MSG_IF(timeout.IsZero() || timeout.IsNegative(),
++                    "CTP retransmission timeout must be positive");
++    m_retransmissionTimeout = timeout;
++}
++
++void
++UbCtpTransportService::SetMaxRetransmissionAttempts(uint32_t attempts)
++{
++    NS_ABORT_MSG_IF(attempts == 0, "CTP retransmission attempts must be positive");
++    m_maxRetransmissionAttempts = attempts;
++}
++
++uint64_t
++UbCtpTransportService::GetRetransmissionCount() const
++{
++    return m_retransmissionCount;
++}
++
++uint64_t
++UbCtpTransportService::GetRetransmissionExhaustedCount() const
++{
++    return m_retransmissionExhaustedCount;
++}
++
+ void
+ UbCtpTransportService::SetRoutingType(RoutingType routingType)
+ {
+@@ -1119,6 +1171,16 @@ UbCtpTransportService::SendAdmittedFragment(Ptr<UbWqeSegment> segment,
+     Ptr<UbCtpTxQueue> queue = GetOrCreateQueue(packetKey, outPort, packetKey.vl);
+     RegisterQueueIfNeeded(queue, outPort, packetKey.vl);
+     queue->EnqueueData(packet);
++    if (segment->GetType() == UbTransactionOpcode::WRITE ||
++        segment->GetType() == UbTransactionOpcode::READ)
++    {
++        ArmRetransmission(state.GetKey(),
++                          packetKey,
++                          taSsn,
++                          outPort,
++                          packetKey.vl,
++                          packet);
++    }
+     FirstPacketSendsNotify(segment->GetTaskId(),
+                            packetKey,
+                            taSsn,
+@@ -1134,6 +1196,84 @@ UbCtpTransportService::SendAdmittedFragment(Ptr<UbWqeSegment> segment,
+     return true;
+ }
+ 
++void
++UbCtpTransportService::ArmRetransmission(const UbCtpEntityKey& stateKey,
++                                         const UbCtpEntityKey& packetKey,
++                                         uint32_t taSsn,
++                                         uint32_t outPort,
++                                         uint32_t priority,
++                                         Ptr<Packet> packet)
++{
++    if (!m_retransmissionEnabled)
++    {
++        return;
++    }
++    const auto key = std::make_pair(stateKey, taSsn);
++    auto [record, inserted] = m_retransmissionRecords.try_emplace(key);
++    if (inserted)
++    {
++        record->second.packetKey = packetKey;
++        record->second.outPort = outPort;
++        record->second.priority = priority;
++        record->second.packet = packet->Copy();
++    }
++    const uint64_t token = m_retransmissionEvents.Track(m_lifecycleOwner);
++    EventId event = Simulator::Schedule(m_retransmissionTimeout,
++                                        &UbCtpTransportService::HandleRetransmissionTimeout,
++                                        this,
++                                        stateKey,
++                                        taSsn,
++                                        token);
++    m_retransmissionEvents.Attach(m_lifecycleOwner, token, event, {});
++}
++
++void
++UbCtpTransportService::HandleRetransmissionTimeout(UbCtpEntityKey stateKey,
++                                                   uint32_t taSsn,
++                                                   uint64_t token)
++{
++    if (!m_retransmissionEvents.Begin(m_lifecycleOwner, token))
++    {
++        return;
++    }
++    const auto key = std::make_pair(stateKey, taSsn);
++    auto record = m_retransmissionRecords.find(key);
++    if (record == m_retransmissionRecords.end())
++    {
++        m_retransmissionEvents.Resolve(m_lifecycleOwner, token);
++        return;
++    }
++    if (record->second.attempts >= m_maxRetransmissionAttempts)
++    {
++        ++m_retransmissionExhaustedCount;
++        m_retransmissionRecords.erase(record);
++        m_retransmissionEvents.Resolve(m_lifecycleOwner, token);
++        return;
++    }
++
++    Ptr<UbCtpTxQueue> queue = GetOrCreateQueue(record->second.packetKey,
++                                               record->second.outPort,
++                                               record->second.priority);
++    RegisterQueueIfNeeded(queue, record->second.outPort, record->second.priority);
++    queue->EnqueueData(record->second.packet->Copy());
++    ++record->second.attempts;
++    ++m_retransmissionCount;
++    Ptr<UbPort> port = DynamicCast<UbPort>(m_node->GetDevice(record->second.outPort));
++    NS_ABORT_MSG_IF(port == nullptr, "CTP retransmission selected a non-UB source port");
++    port->TriggerTransmit();
++    const UbCtpEntityKey packetKey = record->second.packetKey;
++    const uint32_t outPort = record->second.outPort;
++    const uint32_t priority = record->second.priority;
++    Ptr<Packet> packet = record->second.packet;
++    m_retransmissionEvents.Resolve(m_lifecycleOwner, token);
++    ArmRetransmission(stateKey,
++                      packetKey,
++                      taSsn,
++                      outPort,
++                      priority,
++                      packet);
++}
++
+ bool
+ UbCtpTransportService::AdmitSegmentForTest(Ptr<UbWqeSegment> segment,
+                                            const UbCtpEntityKey& key,
+@@ -2052,6 +2192,7 @@ UbCtpTransportService::CompleteFromTaAckNow(const UbCtpEntityKey& key,
+     }
+ 
+     context->MarkTaAck(taSsn);
++    m_retransmissionRecords.erase(std::make_pair(state->GetKey(), taSsn));
+     Ptr<UbWqeSegment> completedSegment = outstandingIt->second;
+     LastPacketACKsNotify(completedSegment->GetTaskId(),
+                          state->GetKey(),
+@@ -2111,11 +2252,17 @@ UbCtpTransportService::DoDispose()
+         {
+             cleanup();
+         }
++        m_retransmissionEvents.CancelPending(m_lifecycleOwner);
+     }
+     if (m_delayedTaAckEvents.IsEmpty())
+     {
+         m_delayedTaAckEvents.Clear();
+     }
++    if (m_retransmissionEvents.IsEmpty())
++    {
++        m_retransmissionEvents.Clear();
++    }
++    m_retransmissionRecords.clear();
+ 
+     Ptr<UbSwitch> sw = m_node == nullptr ? nullptr : m_node->GetObject<UbSwitch>();
+     for (const auto& [key, queue] : m_queues)
+diff --git a/src/unified-bus/model/protocol/ub-ctp.h b/src/unified-bus/model/protocol/ub-ctp.h
+index d932046..b775883 100644
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -138,6 +138,11 @@ class UbCtpTransportService : public Object
+     void SetRoutingType(RoutingType routingType);
+     void SetBoundOutPortCountForTest(uint32_t boundOutPortCount);
+     void SetExperimentTaAckPacketBytesForTest(uint32_t packetBytes);
++    void SetRetransmissionEnabled(bool enabled);
++    void SetRetransmissionTimeout(Time timeout);
++    void SetMaxRetransmissionAttempts(uint32_t attempts);
++    uint64_t GetRetransmissionCount() const;
++    uint64_t GetRetransmissionExhaustedCount() const;
+     UbCtpTransportConstraints GetTransactionConstraints() const;
+ 
+     UbCtpEntityState& GetOrCreateEntityState(const UbCtpEntityKey& key);
+@@ -235,6 +240,15 @@ class UbCtpTransportService : public Object
+                                      Ptr<UbWqeSegment> response,
+                                      uint64_t token);
+     void CancelTrackedCompleteFromTaAck(UbCtpEntityKey key);
++    void ArmRetransmission(const UbCtpEntityKey& stateKey,
++                           const UbCtpEntityKey& packetKey,
++                           uint32_t taSsn,
++                           uint32_t outPort,
++                           uint32_t priority,
++                           Ptr<Packet> packet);
++    void HandleRetransmissionTimeout(UbCtpEntityKey stateKey,
++                                     uint32_t taSsn,
++                                     uint64_t token);
+     void TryRetireTransactionState(const UbCtpEntityKey& key);
+     bool SendResponseSegment(Ptr<UbWqeSegment> response, UbCtpEntityState& state);
+     void CompleteFromTaAck(const UbCtpEntityKey& key,
+@@ -294,6 +308,7 @@ class UbCtpTransportService : public Object
+     Ptr<Node> m_node;
+     UbLifecycleResourceIdentity m_lifecycleOwner;
+     UbTrackedEventSet m_delayedTaAckEvents;
++    UbTrackedEventSet m_retransmissionEvents;
+     UbCtpRoutingPolicy m_defaultRoutingPolicy;
+     bool m_pktTraceEnabled{false};
+     uint32_t m_boundOutPortCount{0};
+@@ -307,6 +322,21 @@ class UbCtpTransportService : public Object
+     uint32_t m_delayTaAckModulo{0};
+     uint32_t m_delayTaAckRemainder{0};
+     Time m_delayTaAckTime{NanoSeconds(0)};
++    struct RetransmissionRecord
++    {
++        UbCtpEntityKey packetKey;
++        uint32_t outPort{0};
++        uint32_t priority{0};
++        uint32_t attempts{0};
++        Ptr<Packet> packet;
++    };
++    bool m_retransmissionEnabled{false};
++    Time m_retransmissionTimeout{NanoSeconds(25600)};
++    uint32_t m_maxRetransmissionAttempts{7};
++    uint64_t m_retransmissionCount{0};
++    uint64_t m_retransmissionExhaustedCount{0};
++    std::map<std::pair<UbCtpEntityKey, uint32_t>, RetransmissionRecord>
++        m_retransmissionRecords;
+     std::map<UbCtpEntityKey, std::vector<Ptr<UbJetty>>> m_keyJettys;
+     std::map<UbCtpEntityKey, uint32_t> m_keyJettyRrIndex;
+     std::map<UbCtpEntityKey, UbCtpEntityState> m_entityStates;

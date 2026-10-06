@@ -76,6 +76,10 @@ struct Options {
     std::uint64_t sync_interval_ps{100000};
     SimbricksBaseIfSyncMode sync_mode{kSimbricksBaseIfSyncOptional};
     bool lifecycle_sync{false};
+    bool ctp_retransmission{false};
+    std::uint64_t ctp_rto_ps{25600000};
+    std::uint32_t ctp_max_retransmissions{7};
+    bool drop_first_ctp_request{false};
 };
 
 EndpointOption ParseEndpoint(const std::string& value)
@@ -114,6 +118,22 @@ Options ParseOptions(int argc, char** argv)
             else throw std::runtime_error("sync must be off, optional, or required");
         } else if (arg == "--lifecycle-sync") {
             options.lifecycle_sync = true;
+        } else if (arg == "--ctp-retransmission" && i + 1 < argc) {
+            const std::string value(argv[++i]);
+            if (value == "on") options.ctp_retransmission = true;
+            else if (value == "off") options.ctp_retransmission = false;
+            else throw std::runtime_error("CTP retransmission must be on or off");
+        } else if (arg == "--ctp-rto-ps" && i + 1 < argc) {
+            options.ctp_rto_ps = ParseUnsigned(argv[++i], "CTP RTO");
+        } else if (arg == "--ctp-max-retransmissions" && i + 1 < argc) {
+            const auto value = ParseUnsigned(argv[++i],
+                                             "CTP max retransmissions");
+            if (value > std::numeric_limits<std::uint32_t>::max())
+                throw std::runtime_error(
+                    "CTP max retransmissions exceeds uint32 range");
+            options.ctp_max_retransmissions = static_cast<std::uint32_t>(value);
+        } else if (arg == "--drop-first-ctp-request") {
+            options.drop_first_ctp_request = true;
         } else {
             throw std::runtime_error("unknown or incomplete option: " + arg);
         }
@@ -257,6 +277,9 @@ class UbNetFabric {
                   << " UB-NET endpoints"
                   << " ports=" << options_.ports
                   << " rate_gbps=" << options_.rate_gbps
+                  << " ctp_retransmission="
+                  << (options_.ctp_retransmission ? "on" : "off")
+                  << " ctp_rto_ps=" << options_.ctp_rto_ps
                   << " boundary=ub-net-v1\n";
         while (running.load()) {
             ++loop_iterations_;
@@ -381,6 +404,14 @@ class UbNetFabric {
         }
         const auto wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - wall_started).count();
+        std::uint64_t ctp_retransmissions = 0;
+        std::uint64_t ctp_retransmission_exhausted = 0;
+        for (const auto& node : endpoint_nodes_) {
+            Ptr<UbController> controller = node->GetObject<UbController>();
+            Ptr<UbCtpTransportService> service = controller->GetCtpTransportService();
+            ctp_retransmissions += service->GetRetransmissionCount();
+            ctp_retransmission_exhausted += service->GetRetransmissionExhaustedCount();
+        }
         std::cerr << "[NS3_UB_NET_STATS] forwarded=" << forwarded_
                   << " delivered=" << delivered_ << " payload_bytes="
                   << payload_bytes_ << " virtual_ps=" << NowPs()
@@ -412,7 +443,12 @@ class UbNetFabric {
                   << " ns3_runtime_drops="
                   << utils::UbUtils::GetRuntimePacketDropCount()
                   << " ctp_tassn_discontinuities="
-                  << ctp_tassn_discontinuities_ << '\n';
+                  << ctp_tassn_discontinuities_
+                  << " ctp_retransmissions=" << ctp_retransmissions
+                  << " ctp_retransmission_exhausted="
+                  << ctp_retransmission_exhausted
+                  << " injected_ctp_request_drops="
+                  << injected_ctp_request_drops_ << '\n';
     }
 
   private:
@@ -484,6 +520,9 @@ class UbNetFabric {
             controller->FreezeCtpEntities();
             endpoint_switch->Init();
             Ptr<UbCtpTransportService> service = controller->GetCtpTransportService();
+            service->SetRetransmissionEnabled(options_.ctp_retransmission);
+            service->SetRetransmissionTimeout(PicoSeconds(options_.ctp_rto_ps));
+            service->SetMaxRetransmissionAttempts(options_.ctp_max_retransmissions);
             controller->GetUbTransaction()->SetTargetExecutor(
                 UbTargetExecutor(MakeCallback(&UbNetFabric::OnTargetExecute, this)
                                      .Bind(endpoint)));
@@ -826,6 +865,10 @@ class UbNetFabric {
                          UbTargetCompletion completion)
     {
         if (request == nullptr) return completion(UbWorkExecutionResult{});
+        if (options_.drop_first_ctp_request && injected_ctp_request_drops_ == 0) {
+            ++injected_ctp_request_drops_;
+            return;
+        }
         const auto source_it = endpoint_by_node_.find(request->GetSrc());
         auto task = native_tasks_.find(request->GetTaskId());
         if (source_it == endpoint_by_node_.end() || task == native_tasks_.end())
@@ -1102,6 +1145,7 @@ class UbNetFabric {
     std::uint64_t native_order_relax_{};
     std::uint64_t native_order_strong_{};
     std::uint64_t native_trace_size_mismatches_{};
+    std::uint64_t injected_ctp_request_drops_{};
     bool lifecycle_active_{false};
 };
 
@@ -1122,7 +1166,10 @@ int main(int argc, char** argv)
                      "--endpoint SOCKET,EID [--endpoint ...] [--ports N] "
                      "[--link-delay-ps N] [--switch-delay-ps N] "
                      "[--rate-gbps N] [--sync off|optional|required] "
-                     "[--sync-interval-ps N] [--lifecycle-sync]\n";
+                     "[--sync-interval-ps N] [--lifecycle-sync] "
+                     "[--ctp-retransmission on|off] [--ctp-rto-ps N] "
+                     "[--ctp-max-retransmissions N] "
+                     "[--drop-first-ctp-request]\n";
         return 1;
     }
 }

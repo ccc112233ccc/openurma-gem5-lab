@@ -897,6 +897,9 @@ peer_latency_ns="${UBSIM_PEER_LATENCY_NS:-100}"
 sync_quantum_ns="${UBSIM_SYNC_QUANTUM_NS:-$peer_latency_ns}"
 sync_request="${UBSIM_SYNC:-auto}"
 sync_mode="${UBSIM_SYNC_MODE:-adapter-local}"
+ctp_retransmission_request="${UBSIM_CTP_RETRANSMISSION:-auto}"
+ctp_rto_ps="${UBSIM_CTP_RTO_PS:-25600000}"
+ctp_max_retransmissions="${UBSIM_CTP_MAX_RETRANSMISSIONS:-7}"
 peer_link_rate_gbps="${UBSIM_PEER_LINK_RATE_GBPS:-$profile_peer_link_rate_gbps}"
 peer_serialization_stages="${UBSIM_PEER_SERIALIZATION_STAGES:-$profile_peer_serialization_stages}"
 peer_switch_delay="${UBSIM_PEER_SWITCH_DELAY:-$profile_peer_switch_delay}"
@@ -1127,6 +1130,15 @@ elif (( sync_enabled )); then
 else
     synchronization=disabled
 fi
+case "$ctp_retransmission_request" in
+    auto) (( sync_enabled )) && ctp_retransmission=on || ctp_retransmission=off ;;
+    on|off) ctp_retransmission=$ctp_retransmission_request ;;
+    *) die "UBSIM_CTP_RETRANSMISSION must be auto, on, or off" ;;
+esac
+[[ "$ctp_rto_ps" =~ ^[0-9]+$ ]] && (( ctp_rto_ps > 0 )) ||
+    die "UBSIM_CTP_RTO_PS must be a positive integer"
+[[ "$ctp_max_retransmissions" =~ ^[0-9]+$ ]] && (( ctp_max_retransmissions > 0 )) ||
+    die "UBSIM_CTP_MAX_RETRANSMISSIONS must be a positive integer"
 
 lab_host="$(cd "$script_dir/../.." && pwd)"
 lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$lab_host")}"
@@ -1539,6 +1551,9 @@ virtual_time_synchronization=$synchronization
 lifecycle_sync=$lifecycle_sync_enabled
 restore_checkpoint=${restore_checkpoint:-none}
 sync_mode=$sync_mode
+ctp_retransmission=$ctp_retransmission
+ctp_rto_ps=$ctp_rto_ps
+ctp_max_retransmissions=$ctp_max_retransmissions
 ub_port_count=$ub_port_count
 ub_transport=$ub_transport
 network_backend=$network_backend
@@ -1788,7 +1803,10 @@ ubsim_exec test -x "$udma_device_binary" ||
         --link-delay-ps "$((peer_latency_ns * 1000))"
         --switch-delay-ps "$switch_delay_ps"
         --rate-gbps "$peer_link_rate_gbps" --sync "$modular_sync_mode"
-        --sync-interval-ps "$((sync_quantum_ns * 1000))")
+        --sync-interval-ps "$((sync_quantum_ns * 1000))"
+        --ctp-retransmission "$ctp_retransmission"
+        --ctp-rto-ps "$ctp_rto_ps"
+        --ctp-max-retransmissions "$ctp_max_retransmissions")
     (( lifecycle_sync_enabled == 0 )) || ub_switch_args+=(--lifecycle-sync)
     for ((node = 0; node < node_count; ++node)); do
         ub_switch_args+=(--endpoint
