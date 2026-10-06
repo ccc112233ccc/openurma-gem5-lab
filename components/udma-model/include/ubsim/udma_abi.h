@@ -82,11 +82,13 @@ MakeCqe(bool receive, bool jetty, bool owner, std::uint8_t opcode,
         std::uint16_t entry, std::uint32_t local_id, std::uint32_t bytes,
         std::uint64_t user_data, std::uint64_t immediate,
         std::uint32_t remote_id = 0, std::uint32_t remote_eid = 0,
-        std::uint32_t tpn = 0)
+        std::uint32_t tpn = 0, std::uint8_t status = 0,
+        std::uint8_t substatus = 0)
 {
     std::array<std::uint8_t, kCqeBytes> cqe{};
     Store32(cqe.data(), (receive ? 1U : 0U) | (jetty ? 2U : 0U) |
-        (owner ? 4U : 0U) | (std::uint32_t(opcode & 7U) << 4));
+        (owner ? 4U : 0U) | (std::uint32_t(opcode & 7U) << 4) |
+        (std::uint32_t(substatus) << 16) | (std::uint32_t(status) << 24));
     Store32(cqe.data() + 4, entry | ((local_id & 0xffffU) << 16));
     Store32(cqe.data() + 8, ((local_id >> 16) & 0xfU) |
         ((remote_id & 0xfffffU) << 4));

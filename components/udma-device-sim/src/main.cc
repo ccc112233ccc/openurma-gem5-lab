@@ -440,7 +440,8 @@ class NetworkPort final : public device::NetworkInterface {
             frame.operation == device::Frame::Operation::SendImmediate;
         const bool target_completion =
             frame.operation == device::Frame::Operation::WriteAck ||
-            frame.operation == device::Frame::Operation::ReadResponse;
+            frame.operation == device::Frame::Operation::ReadResponse ||
+            frame.operation == device::Frame::Operation::RmaError;
         const std::size_t logical_total = read_request ? frame.transfer_length
                                                        : frame.bytes.size();
         const std::size_t payload_total = read_request ? 0 : frame.bytes.size();

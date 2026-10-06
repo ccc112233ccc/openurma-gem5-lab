@@ -46,13 +46,16 @@ The upstream ns-3-UB checkout is a generated dependency under
 `sources/ns-3-ub` at the revision recorded in `SOURCE_REVISIONS.md`. During
 `./lab build ns3ub`, the script restores the pinned CTP sources, applies
 `patches/0001-ctp-timeout-retransmission.patch` and
-`patches/0002-ctp-write-duplicate-suppression.patch`, installs the checked-in
+`patches/0002-ctp-write-duplicate-suppression.patch` followed by
+`patches/0003-ctp-retry-exhaustion.patch`, installs the checked-in
 adapter overlay, and builds it. It then runs UB-NET contracts with
 synchronization disabled and required, the native ordering contract, and a
 fault-injection contract that drops the first WRITE request and requires one
 timeout retransmission followed by exactly one WQE completion. A second fault
 contract drops the first TAACK and proves duplicate WRITE suppression plus
-TAACK replay.
+TAACK replay. A third contract permanently drops one request, exhausts a
+two-retry budget, and requires a failed native WQE plus an initiator-visible
+RMA error completion.
 
 Keeping the complete adapter here makes the integration reviewable from this
 repository. It also avoids depending on unpublished commits in a sibling

@@ -1505,7 +1505,8 @@ void
 UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
                       std::uint32_t wqebbs, std::uint16_t completed_index,
                       std::uint8_t opcode, std::uint32_t byte_count,
-                      std::uint64_t immediate, bool completion_enabled)
+                      std::uint64_t immediate, bool completion_enabled,
+                      std::uint8_t status)
 {
     auto finish = [this, jetty_id, producer, wqebbs](bool ok) {
         auto found = jetty_contexts_.find(jetty_id);
@@ -1521,7 +1522,8 @@ UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
     if (!completion_enabled) return finish(true);
     WriteCqe(found->second.completion_queue, false, found->second.is_jetty,
              opcode, completed_index, jetty_id, byte_count,
-             found->second.user_queue, immediate, std::move(finish));
+             found->second.user_queue, immediate, std::move(finish), 0, 0, 0,
+             status);
 }
 
 void
@@ -1530,14 +1532,15 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                     std::uint32_t local_id, std::uint32_t byte_count,
                     std::uint64_t user_data, std::uint64_t immediate,
                     Completion completion, std::uint32_t remote_id,
-                    std::uint32_t remote_eid, std::uint32_t tpn)
+                    std::uint32_t remote_eid, std::uint32_t tpn,
+                    std::uint8_t status)
 {
     auto found = jfc_contexts_.find(jfc_id);
     if (found == jfc_contexts_.end()) return completion(false);
     const std::uint64_t ci = found->second.index_iova;
     ReadToken(found->second.token, ci, 4,
         [this, jfc_id, receive, jetty, opcode, entry_index, local_id,
-         byte_count, user_data, immediate, remote_id, remote_eid, tpn,
+         byte_count, user_data, immediate, remote_id, remote_eid, tpn, status,
          completion = std::move(completion)]
         // remote identity is captured separately because it is produced by
         // the peer packet rather than the local queue context.
@@ -1553,7 +1556,7 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
             const bool owner = ((jfc.producer / jfc.depth) & 1U) == 0;
             const auto cqe = abi::MakeCqe(receive, jetty, owner, opcode,
                 entry_index, local_id, byte_count, user_data, immediate,
-                remote_id, remote_eid, tpn);
+                remote_id, remote_eid, tpn, status);
             const std::uint64_t address = jfc.queue_iova +
                 (jfc.producer & (jfc.depth - 1U)) * abi::kCqeBytes;
             WriteToken(jfc.token, address,
@@ -2285,6 +2288,16 @@ UdmaModel::Receive(Frame frame)
       case Frame::Operation::WriteAck: return ReceiveWriteAck(std::move(frame));
       case Frame::Operation::ReadResponse:
         return ReceiveReadResponse(std::move(frame));
+      case Frame::Operation::RmaError: {
+        auto found = pending_rma_.find(frame.request_id);
+        if (found == pending_rma_.end()) { ++ubase_errors_; return; }
+        const PendingRma pending = found->second;
+        pending_rma_.erase(found);
+        CompleteSq(pending.jetty_id, pending.producer, pending.wqebbs,
+                   pending.completed_index, pending.opcode, pending.byte_count,
+                   pending.immediate, pending.completion, 5);
+        return;
+      }
       default: ++ubase_errors_; return;
     }
 }

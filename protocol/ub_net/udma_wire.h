@@ -33,6 +33,7 @@ enum class UdmaOperation : std::uint8_t {
     ReadRequest = 6,
     WriteAck = 0x83,
     ReadResponse = 0x85,
+    RmaError = 0x86,
 };
 
 struct [[gnu::packed]] UdmaWireHeader {

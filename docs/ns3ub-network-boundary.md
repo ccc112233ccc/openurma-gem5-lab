@@ -66,7 +66,8 @@ and retransmission, while the target UDMA still owns the physical memory
 action. Focused contracts cover both loss of one request segment and loss of
 its TAACK. After a lost TAACK, the receiver suppresses the duplicate WRITE and
 replays the cached TAACK without repeating the target DMA. An
-initiator-visible error after retry exhaustion is not yet implemented.
+exhausted retry budget terminates the native WQE and is translated by UDMA to
+an official CQE with ACK-timeout status.
 
 ## Process topology
 
@@ -127,6 +128,6 @@ tests cover synchronized and asynchronous execution, NO/RO/SO WQE order
 propagation, and one injected WRITE-request loss followed by virtual-time RTO
 retransmission. Full-system runs cover multiple endpoints and physical ports.
 Native flow control is active for the validated lossless runs. Request loss
-and TAACK loss now have focused recovery contracts. Retry-exhaustion
-completion, READ-response duplicate handling, congestion feedback, larger-scale
+and TAACK loss plus retry exhaustion now have focused recovery contracts.
+READ-response duplicate handling, congestion feedback, larger-scale
 MTP profiling and optional MPI partitioning inside ns-3-UB remain future work.

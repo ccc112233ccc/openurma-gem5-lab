@@ -129,6 +129,14 @@ runs. `UBSIM_CTP_RTO_PS` defaults to 25,600,000 ps and
 the focused process contract; it is not evidence that unsynchronized
 full-system latency is valid.
 
+When the retry budget is exhausted, CTP removes every retained segment of the
+same WQE and terminates it with `UbWorkOutcome::FAILED`. The adapter returns an
+`RmaError` record to the initiating UDMA, which releases the SQ entry and emits
+an official-layout send CQE with status 5 (`URMA_CR_ACK_TIMEOUT_ERR`). The
+focused exhaustion contract drops the original request plus two retries and
+observes `ctp_retransmission_exhausted=1`, `native_wqes_failed=1`, and a single
+RMA error at the initiator.
+
 ## Focused 1-MiB proof
 
 One bidirectional `write_bw`, five iterations per endpoint at 1 MiB, produced:
@@ -159,7 +167,7 @@ while target memory access remains in the standalone UDMA hardware model.
 The full-system performance matrix exercises the current NO path and proves
 lossless CBFC under the included large bidirectional bursts. Focused process
 coverage now validates NO/RO/SO propagation, the RO-before-SO constraint, and
-request-loss and lost-TAACK recovery for WRITE. Remaining protocol validation
-should add an initiator-visible failure completion when the retry budget is
-exhausted, READ-response replay, and CNP/congestion behavior. Reliability
+request-loss and lost-TAACK recovery for WRITE, plus an initiator-visible
+ACK-timeout completion after retry exhaustion. Remaining protocol validation
+should add READ-response replay and CNP/congestion behavior. Reliability
 recovery is not claimed by the asynchronous full-system functional matrix.

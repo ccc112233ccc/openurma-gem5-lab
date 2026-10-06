@@ -62,7 +62,9 @@ int Run(const std::string& role, const std::string& socket,
     const bool ctp_order = profile == "ctp-order";
     const bool ctp_retrans = profile == "ctp-retrans";
     const bool ctp_taack_loss = profile == "ctp-taack-loss";
-    if (!ctp_order && !ctp_retrans && !ctp_taack_loss && profile != "raw") return 2;
+    const bool ctp_exhaust = profile == "ctp-exhaust";
+    if (!ctp_order && !ctp_retrans && !ctp_taack_loss && !ctp_exhaust &&
+        profile != "raw") return 2;
     const std::vector<std::uint8_t> request{'u', 'b', '-', 'n', 'e', 't'};
     const std::vector<std::uint8_t> response{'o', 'k'};
     bool link_up = false;
@@ -109,7 +111,7 @@ int Run(const std::string& role, const std::string& socket,
                         static_cast<std::uint8_t>(net::MessageType::Frame));
                 }
                 sent = next_order == 3;
-            } else if (ctp_retrans || ctp_taack_loss) {
+            } else if (ctp_retrans || ctp_taack_loss || ctp_exhaust) {
                 auto* output = net::UbNetOutAlloc(&interface, send_time);
                 if (output != nullptr) {
                     ZeroVolatile(output->frame);
@@ -184,7 +186,7 @@ int Run(const std::string& role, const std::string& socket,
             std::cerr << role << ": link state "
                       << (link_up ? "up" : "down") << '\n';
         } else if (type == net::MessageType::Frame) {
-            if (ctp_retrans || ctp_taack_loss) {
+            if (ctp_retrans || ctp_taack_loss || ctp_exhaust) {
                 bool valid = link_up &&
                              input->frame.source_eid == remote_eid &&
                              input->frame.destination_eid == local_eid &&
@@ -200,6 +202,18 @@ int Run(const std::string& role, const std::string& socket,
                         (wire.flags & net::kUdmaWireCtpSegment) &&
                         wire.request_id == 2000;
                 if (sender) {
+                    if (ctp_exhaust) {
+                        valid = valid && wire.operation ==
+                            static_cast<std::uint8_t>(net::UdmaOperation::RmaError) &&
+                            wire.payload_length == 0;
+                        net::UbNetInDone(&interface, input);
+                        if (!valid) return 8;
+                        std::cout << "sender: CTP retry exhaustion returned RMA error PASS\n";
+                        SimbricksBaseIfClose(&interface.base);
+                        SimbricksBaseIfSHMPoolUnmap(&pool);
+                        SimbricksBaseIfSHMPoolUnlink(&pool);
+                        return 0;
+                    }
                     valid = valid && wire.operation ==
                         static_cast<std::uint8_t>(net::UdmaOperation::WriteAck) &&
                         wire.payload_length == 0;
@@ -367,7 +381,7 @@ int main(int argc, char** argv)
 {
     if (argc != 5 && argc != 6) {
         std::cerr << "usage: ub-net-contract-peer sender|receiver SOCKET SHM "
-                     "off|required [raw|ctp-order|ctp-retrans|ctp-taack-loss]\n";
+                     "off|required [raw|ctp-order|ctp-retrans|ctp-taack-loss|ctp-exhaust]\n";
         return 2;
     }
     return Run(argv[1], argv[2], argv[3], argv[4],

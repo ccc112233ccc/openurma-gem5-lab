@@ -75,6 +75,7 @@ struct Frame {
         ReadRequest = 6,
         WriteAck = 0x83,
         ReadResponse = 0x85,
+        RmaError = 0x86,
     };
     std::uint64_t sequence{};
     std::uint32_t source_eid{};
@@ -260,13 +261,15 @@ class UdmaModel {
     void CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
                     std::uint32_t wqebbs, std::uint16_t completed_index,
                     std::uint8_t opcode, std::uint32_t byte_count,
-                    std::uint64_t immediate, bool completion_enabled);
+                    std::uint64_t immediate, bool completion_enabled,
+                    std::uint8_t status = 0);
     void WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                   std::uint8_t opcode, std::uint16_t entry_index,
                   std::uint32_t local_id, std::uint32_t byte_count,
                   std::uint64_t user_data, std::uint64_t immediate,
                   Completion completion, std::uint32_t remote_id = 0,
-                  std::uint32_t remote_eid = 0, std::uint32_t tpn = 0);
+                  std::uint32_t remote_eid = 0, std::uint32_t tpn = 0,
+                  std::uint8_t status = 0);
     void EmitCompletionEvent(std::uint32_t jfc_id, Completion completion);
     void ProcessCompletionEvent();
     void RaiseInterrupt(std::uint32_t vector, Completion completion);

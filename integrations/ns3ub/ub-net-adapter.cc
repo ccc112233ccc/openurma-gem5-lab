@@ -81,6 +81,7 @@ struct Options {
     std::uint32_t ctp_max_retransmissions{7};
     bool drop_first_ctp_request{false};
     bool drop_first_ctp_taack{false};
+    bool drop_all_ctp_requests{false};
 };
 
 EndpointOption ParseEndpoint(const std::string& value)
@@ -137,6 +138,8 @@ Options ParseOptions(int argc, char** argv)
             options.drop_first_ctp_request = true;
         } else if (arg == "--drop-first-ctp-taack") {
             options.drop_first_ctp_taack = true;
+        } else if (arg == "--drop-all-ctp-requests") {
+            options.drop_all_ctp_requests = true;
         } else {
             throw std::runtime_error("unknown or incomplete option: " + arg);
         }
@@ -163,6 +166,8 @@ UbTransactionOpcode TransactionOpcode(std::uint8_t operation)
       case ubnet::UdmaOperation::WriteAck: return UbTransactionOpcode::TAACK;
       case ubnet::UdmaOperation::ReadResponse:
         return UbTransactionOpcode::READ_RESPONSE;
+      case ubnet::UdmaOperation::RmaError:
+        return UbTransactionOpcode::MAX_OPCODE;
     }
     return UbTransactionOpcode::MAX_OPCODE;
 }
@@ -446,6 +451,7 @@ class UbNetFabric {
                   << ctp_native_send_delivery_completions_
                   << " native_wqes_submitted=" << native_wqes_submitted_
                   << " native_wqes_completed=" << native_wqes_completed_
+                  << " native_wqes_failed=" << native_wqes_failed_
                   << " native_order_no=" << native_order_no_
                   << " native_order_relax=" << native_order_relax_
                   << " native_order_strong=" << native_order_strong_
@@ -539,6 +545,7 @@ class UbNetFabric {
             service->SetMaxRetransmissionAttempts(options_.ctp_max_retransmissions);
             service->SetDropNextTaAckForTest(options_.drop_first_ctp_taack);
             service->SetDropNextRequestForTest(options_.drop_first_ctp_request);
+            service->SetDropAllRequestsForTest(options_.drop_all_ctp_requests);
             controller->GetUbTransaction()->SetTargetExecutor(
                 UbTargetExecutor(MakeCallback(&UbNetFabric::OnTargetExecute, this)
                                      .Bind(endpoint)));
@@ -765,6 +772,8 @@ class UbNetFabric {
         Ptr<UbJetty> jetty = function->GetJetty(jetty_id);
         if (!service->HasJettyPreparation(jetty_id) && !service->PrepareJetty(jetty, key))
             throw std::runtime_error("failed to prepare native CTP Jetty");
+        jetty->SetWqeCompletionCallback(
+            MakeCallback(&UbNetFabric::OnNativeWqeTerminal, this));
         const std::uint32_t task_id = next_native_task_id_++;
         const UbTransactionOpcode opcode = TransactionOpcode(complete.wire.operation);
         Ptr<UbWqe> wqe = function->CreateWqe(endpoint_nodes_[source]->GetId(),
@@ -797,9 +806,7 @@ class UbNetFabric {
             complete.frame.sequence, complete.wire, task_id, 0, {}});
         ++scheduled_packets_;
         ++native_wqes_submitted_;
-        if (!controller->SubmitUrmaWqe(
-                jetty_id, wqe,
-                MakeCallback(&UbNetFabric::OnNativeWqeComplete, this))) {
+        if (!controller->SubmitUrmaWqe(jetty_id, wqe, {})) {
             native_tasks_.erase(task_id);
             --scheduled_packets_;
             throw std::runtime_error("native CTP WQE submission was rejected");
@@ -1024,15 +1031,33 @@ class UbNetFabric {
         QueueUdma(task->second.source, frame, wire, payload);
     }
 
-    void OnNativeWqeComplete(std::uint32_t task_id, std::uint32_t)
+    void OnNativeWqeTerminal(UbWqeCompletion completion)
     {
-        auto task = native_tasks_.find(task_id);
+        auto task = native_tasks_.find(completion.wqeId);
         if (task == native_tasks_.end())
             throw std::runtime_error("native WQE completion has no external WQE");
+        if (completion.outcome != UbWorkOutcome::COMPLETED) {
+            ubnet::UdmaWireHeader wire{};
+            wire.magic = ubnet::kUdmaWireMagic;
+            wire.version = ubnet::kUdmaWireVersion;
+            wire.operation = static_cast<std::uint8_t>(ubnet::UdmaOperation::RmaError);
+            wire.flags = ubnet::kUdmaWireCtpSegment |
+                         ubnet::kUdmaWireLastFragment;
+            wire.source_jetty = task->second.wire.destination_jetty;
+            wire.destination_jetty = task->second.wire.source_jetty;
+            wire.request_id = task->second.wire.request_id;
+            ubnet::Frame frame{};
+            frame.sequence = task->second.sequence;
+            frame.source_eid = endpoints_[task->second.destination].eid;
+            frame.destination_eid = endpoints_[task->second.source].eid;
+            QueueUdma(task->second.source, frame, wire, {});
+            ++native_wqes_failed_;
+        } else {
+            ++native_wqes_completed_;
+        }
         native_tasks_.erase(task);
         NS_ABORT_MSG_IF(scheduled_packets_ == 0, "native WQE work counter underflow");
         --scheduled_packets_;
-        ++native_wqes_completed_;
     }
 
     bool Flush(Endpoint& endpoint, std::uint64_t now)
@@ -1153,6 +1178,7 @@ class UbNetFabric {
     std::uint64_t ctp_tassn_discontinuities_{};
     std::uint64_t native_wqes_submitted_{};
     std::uint64_t native_wqes_completed_{};
+    std::uint64_t native_wqes_failed_{};
     std::uint64_t native_order_no_{};
     std::uint64_t native_order_relax_{};
     std::uint64_t native_order_strong_{};
@@ -1180,7 +1206,8 @@ int main(int argc, char** argv)
                      "[--sync-interval-ps N] [--lifecycle-sync] "
                      "[--ctp-retransmission on|off] [--ctp-rto-ps N] "
                      "[--ctp-max-retransmissions N] "
-                     "[--drop-first-ctp-request] [--drop-first-ctp-taack]\n";
+                     "[--drop-first-ctp-request] [--drop-first-ctp-taack] "
+                     "[--drop-all-ctp-requests]\n";
         return 1;
     }
 }
