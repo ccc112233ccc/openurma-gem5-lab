@@ -61,7 +61,8 @@ int Run(const std::string& role, const std::string& socket,
 
     const bool ctp_order = profile == "ctp-order";
     const bool ctp_retrans = profile == "ctp-retrans";
-    if (!ctp_order && !ctp_retrans && profile != "raw") return 2;
+    const bool ctp_taack_loss = profile == "ctp-taack-loss";
+    if (!ctp_order && !ctp_retrans && !ctp_taack_loss && profile != "raw") return 2;
     const std::vector<std::uint8_t> request{'u', 'b', '-', 'n', 'e', 't'};
     const std::vector<std::uint8_t> response{'o', 'k'};
     bool link_up = false;
@@ -108,7 +109,7 @@ int Run(const std::string& role, const std::string& socket,
                         static_cast<std::uint8_t>(net::MessageType::Frame));
                 }
                 sent = next_order == 3;
-            } else if (ctp_retrans) {
+            } else if (ctp_retrans || ctp_taack_loss) {
                 auto* output = net::UbNetOutAlloc(&interface, send_time);
                 if (output != nullptr) {
                     ZeroVolatile(output->frame);
@@ -183,7 +184,7 @@ int Run(const std::string& role, const std::string& socket,
             std::cerr << role << ": link state "
                       << (link_up ? "up" : "down") << '\n';
         } else if (type == net::MessageType::Frame) {
-            if (ctp_retrans) {
+            if (ctp_retrans || ctp_taack_loss) {
                 bool valid = link_up &&
                              input->frame.source_eid == remote_eid &&
                              input->frame.destination_eid == local_eid &&
@@ -204,7 +205,9 @@ int Run(const std::string& role, const std::string& socket,
                         wire.payload_length == 0;
                     net::UbNetInDone(&interface, input);
                     if (!valid) return 8;
-                    std::cout << "sender: CTP WRITE completed after injected loss PASS\n";
+                    std::cout << "sender: CTP WRITE completed after injected "
+                              << (ctp_taack_loss ? "TAACK" : "request")
+                              << " loss PASS\n";
                     SimbricksBaseIfClose(&interface.base);
                     SimbricksBaseIfSHMPoolUnmap(&pool);
                     SimbricksBaseIfSHMPoolUnlink(&pool);
@@ -244,7 +247,9 @@ int Run(const std::string& role, const std::string& socket,
                         output_payload[i] = response_bytes[i];
                     net::UbNetOutSend(&interface, output,
                         static_cast<std::uint8_t>(net::MessageType::Frame));
-                    std::cout << "receiver: executed one retransmitted CTP WRITE PASS\n";
+                    std::cout << "receiver: executed one CTP WRITE for "
+                              << (ctp_taack_loss ? "TAACK-loss" : "request-loss")
+                              << " contract PASS\n";
                     for (std::uint64_t delay = 0; delay < 100000; ++delay)
                         std::this_thread::yield();
                     SimbricksBaseIfClose(&interface.base);
@@ -362,7 +367,7 @@ int main(int argc, char** argv)
 {
     if (argc != 5 && argc != 6) {
         std::cerr << "usage: ub-net-contract-peer sender|receiver SOCKET SHM "
-                     "off|required [raw|ctp-order|ctp-retrans]\n";
+                     "off|required [raw|ctp-order|ctp-retrans|ctp-taack-loss]\n";
         return 2;
     }
     return Run(argv[1], argv[2], argv[3], argv[4],

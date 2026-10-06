@@ -1,0 +1,162 @@
+diff --git a/src/unified-bus/model/protocol/ub-ctp.cc b/src/unified-bus/model/protocol/ub-ctp.cc
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -648,6 +648,42 @@ UbCtpTransportService::GetRetransmissionExhaustedCount() const
+     return m_retransmissionExhaustedCount;
+ }
+ 
++void
++UbCtpTransportService::SetDropNextTaAckForTest(bool enabled)
++{
++    m_dropNextTaAckForTest = enabled;
++}
++
++uint64_t
++UbCtpTransportService::GetDuplicateWriteSuppressedCount() const
++{
++    return m_duplicateWriteSuppressedCount;
++}
++
++uint64_t
++UbCtpTransportService::GetDuplicateTaAckReplayCount() const
++{
++    return m_duplicateTaAckReplayCount;
++}
++
++uint64_t
++UbCtpTransportService::GetInjectedTaAckDropCount() const
++{
++    return m_injectedTaAckDropCount;
++}
++
++void
++UbCtpTransportService::SetDropNextRequestForTest(bool enabled)
++{
++    m_dropNextRequestForTest = enabled;
++}
++
++uint64_t
++UbCtpTransportService::GetInjectedRequestDropCount() const
++{
++    return m_injectedRequestDropCount;
++}
++
+ void
+ UbCtpTransportService::SetRoutingType(RoutingType routingType)
+ {
+@@ -1194,7 +1230,18 @@ UbCtpTransportService::SendAdmittedFragment(Ptr<UbWqeSegment> segment,
+                                                   static_cast<uint8_t>(lbSalt & 0xff));
+     Ptr<UbCtpTxQueue> queue = GetOrCreateQueue(packetKey, outPort, packetKey.vl);
+     RegisterQueueIfNeeded(queue, outPort, packetKey.vl);
+-    queue->EnqueueData(packet);
++    const bool injectRequestDrop = m_dropNextRequestForTest &&
++        (segment->GetType() == UbTransactionOpcode::WRITE ||
++         segment->GetType() == UbTransactionOpcode::READ);
++    if (injectRequestDrop)
++    {
++        m_dropNextRequestForTest = false;
++        ++m_injectedRequestDropCount;
++    }
++    else
++    {
++        queue->EnqueueData(packet);
++    }
+     if (segment->GetType() == UbTransactionOpcode::WRITE ||
+         segment->GetType() == UbTransactionOpcode::READ)
+     {
+@@ -1664,11 +1688,50 @@ UbCtpTransportService::DispatchInboundTransaction(Ptr<UbWqeSegment> request,
+         controller == nullptr ? nullptr : controller->GetUbTransaction();
+     if (transaction == nullptr)
+         return false;
+-    UbTransactionResponseSink sink([this, key](Ptr<UbWqeSegment> response) {
++    for (auto record = m_receivedWrites.begin(); record != m_receivedWrites.end();)
++    {
++        if (record->second.response != nullptr &&
++            record->second.expires <= Simulator::Now())
++            record = m_receivedWrites.erase(record);
++        else
++            ++record;
++    }
++    const bool reliableWrite = request->GetType() == UbTransactionOpcode::WRITE;
++    const auto receiveKey = std::make_pair(key, request->GetRequestTassn());
++    if (reliableWrite)
++    {
++        auto [record, inserted] = m_receivedWrites.try_emplace(receiveKey);
++        if (!inserted)
++        {
++            ++m_duplicateWriteSuppressedCount;
++            if (record->second.response != nullptr)
++            {
++                ++m_duplicateTaAckReplayCount;
++                auto& state = GetOrCreateEntityState(key);
++                SendResponseSegment(record->second.response, state);
++            }
++            return true;
++        }
++    }
++    UbTransactionResponseSink sink([this, key, reliableWrite, receiveKey](Ptr<UbWqeSegment> response) {
+         if (response == nullptr)
+             return;
+         auto& state = GetOrCreateEntityState(key);
+         ++state.Rx().generatedResponses;
++        if (reliableWrite && response->GetType() == UbTransactionOpcode::TAACK)
++        {
++            auto& record = m_receivedWrites[receiveKey];
++            record.response = response;
++            record.expires = Simulator::Now() +
++                m_retransmissionTimeout * (m_maxRetransmissionAttempts + 1);
++            if (m_dropNextTaAckForTest)
++            {
++                m_dropNextTaAckForTest = false;
++                ++m_injectedTaAckDropCount;
++                TryRetireTransactionState(key);
++                return;
++            }
++        }
+         SendResponseSegment(response, state);
+         TryRetireTransactionState(key);
+     });
+@@ -2258,6 +2321,7 @@ UbCtpTransportService::DoDispose()
+         m_retransmissionEvents.Clear();
+     }
+     m_retransmissionRecords.clear();
++    m_receivedWrites.clear();
+ 
+     Ptr<UbSwitch> sw = m_node == nullptr ? nullptr : m_node->GetObject<UbSwitch>();
+     for (const auto& [key, queue] : m_queues)
+diff --git a/src/unified-bus/model/protocol/ub-ctp.h b/src/unified-bus/model/protocol/ub-ctp.h
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -143,6 +143,12 @@ class UbCtpTransportService : public Object
+     void SetMaxRetransmissionAttempts(uint32_t attempts);
+     uint64_t GetRetransmissionCount() const;
+     uint64_t GetRetransmissionExhaustedCount() const;
++    void SetDropNextTaAckForTest(bool enabled);
++    uint64_t GetDuplicateWriteSuppressedCount() const;
++    uint64_t GetDuplicateTaAckReplayCount() const;
++    uint64_t GetInjectedTaAckDropCount() const;
++    void SetDropNextRequestForTest(bool enabled);
++    uint64_t GetInjectedRequestDropCount() const;
+     UbCtpTransportConstraints GetTransactionConstraints() const;
+ 
+     UbCtpEntityState& GetOrCreateEntityState(const UbCtpEntityKey& key);
+@@ -340,6 +346,19 @@ class UbCtpTransportService : public Object
+     uint64_t m_retransmissionExhaustedCount{0};
+     std::map<std::pair<UbCtpEntityKey, uint32_t>, RetransmissionRecord>
+         m_retransmissionRecords;
++    struct ReceivedWriteRecord
++    {
++        Ptr<UbWqeSegment> response;
++        Time expires{Seconds(0)};
++    };
++    std::map<std::pair<UbCtpEntityKey, uint32_t>, ReceivedWriteRecord>
++        m_receivedWrites;
++    bool m_dropNextTaAckForTest{false};
++    uint64_t m_duplicateWriteSuppressedCount{0};
++    uint64_t m_duplicateTaAckReplayCount{0};
++    uint64_t m_injectedTaAckDropCount{0};
++    bool m_dropNextRequestForTest{false};
++    uint64_t m_injectedRequestDropCount{0};
+     std::map<UbCtpEntityKey, std::vector<Ptr<UbJetty>>> m_keyJettys;
+     std::map<UbCtpEntityKey, uint32_t> m_keyJettyRrIndex;
+     std::map<UbCtpEntityKey, UbCtpEntityState> m_entityStates;

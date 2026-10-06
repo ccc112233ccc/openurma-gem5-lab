@@ -63,9 +63,10 @@ segment until its TAACK or READ response arrives. A virtual-time RTO requeues
 that exact packet through the original native queue and physical port;
 completion removes the retained segment. The fabric therefore owns timeout
 and retransmission, while the target UDMA still owns the physical memory
-action. The first closed-loop contract covers loss of one request segment.
-Duplicate suppression for a lost acknowledgement and an initiator-visible
-error after retry exhaustion are not yet implemented.
+action. Focused contracts cover both loss of one request segment and loss of
+its TAACK. After a lost TAACK, the receiver suppresses the duplicate WRITE and
+replays the cached TAACK without repeating the target DMA. An
+initiator-visible error after retry exhaustion is not yet implemented.
 
 ## Process topology
 
@@ -125,7 +126,7 @@ The native fabric and full-system launcher cutover are complete. Contract
 tests cover synchronized and asynchronous execution, NO/RO/SO WQE order
 propagation, and one injected WRITE-request loss followed by virtual-time RTO
 retransmission. Full-system runs cover multiple endpoints and physical ports.
-Native flow control is active for the validated lossless runs. Lost-ACK
-duplicate suppression, retry-exhaustion completion, congestion feedback,
-larger-scale MTP profiling and optional MPI partitioning inside ns-3-UB remain
-future work.
+Native flow control is active for the validated lossless runs. Request loss
+and TAACK loss now have focused recovery contracts. Retry-exhaustion
+completion, READ-response duplicate handling, congestion feedback, larger-scale
+MTP profiling and optional MPI partitioning inside ns-3-UB remain future work.

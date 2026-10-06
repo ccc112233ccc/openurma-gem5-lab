@@ -104,6 +104,23 @@ WQE exactly once. The checked-in patch is reapplied to a clean pinned ns-3-UB
 source tree on every adapter build, so the behavior does not depend on an
 unrecorded edit inside `sources/`.
 
+A second contract drops the first native TAACK after the target WRITE has
+completed. The sender times out and retransmits the request, while the receiver
+uses its `(Entity, TASSN)` replay record to suppress the duplicate target DMA
+and resend the cached TAACK:
+
+```text
+ctp_retransmissions=1
+duplicate_write_suppressed=1
+duplicate_taack_replays=1
+injected_taack_drops=1
+native_wqes_completed=1
+```
+
+The replay record is retained for the configured retry horizon and then
+removed, preventing an unbounded receive-side cache and avoiding collisions
+after TASSN reuse.
+
 RTO is meaningful only on a shared virtual-time axis. Accordingly,
 `UBSIM_CTP_RETRANSMISSION=auto` resolves to `on` for full conservative
 synchronization and `off` for asynchronous functional or lifecycle-only
@@ -142,7 +159,7 @@ while target memory access remains in the standalone UDMA hardware model.
 The full-system performance matrix exercises the current NO path and proves
 lossless CBFC under the included large bidirectional bursts. Focused process
 coverage now validates NO/RO/SO propagation, the RO-before-SO constraint, and
-one request-loss retransmission. Remaining protocol validation should add
-CNP/congestion, lost-ACK duplicate suppression, and an initiator-visible
-failure completion when the retry budget is exhausted. Request-loss recovery
-is not claimed by the asynchronous full-system functional matrix.
+request-loss and lost-TAACK recovery for WRITE. Remaining protocol validation
+should add an initiator-visible failure completion when the retry budget is
+exhausted, READ-response replay, and CNP/congestion behavior. Reliability
+recovery is not claimed by the asynchronous full-system functional matrix.

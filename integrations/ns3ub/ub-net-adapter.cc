@@ -80,6 +80,7 @@ struct Options {
     std::uint64_t ctp_rto_ps{25600000};
     std::uint32_t ctp_max_retransmissions{7};
     bool drop_first_ctp_request{false};
+    bool drop_first_ctp_taack{false};
 };
 
 EndpointOption ParseEndpoint(const std::string& value)
@@ -134,6 +135,8 @@ Options ParseOptions(int argc, char** argv)
             options.ctp_max_retransmissions = static_cast<std::uint32_t>(value);
         } else if (arg == "--drop-first-ctp-request") {
             options.drop_first_ctp_request = true;
+        } else if (arg == "--drop-first-ctp-taack") {
+            options.drop_first_ctp_taack = true;
         } else {
             throw std::runtime_error("unknown or incomplete option: " + arg);
         }
@@ -406,11 +409,19 @@ class UbNetFabric {
             std::chrono::steady_clock::now() - wall_started).count();
         std::uint64_t ctp_retransmissions = 0;
         std::uint64_t ctp_retransmission_exhausted = 0;
+        std::uint64_t duplicate_write_suppressed = 0;
+        std::uint64_t duplicate_taack_replays = 0;
+        std::uint64_t injected_taack_drops = 0;
+        std::uint64_t injected_ctp_request_drops = 0;
         for (const auto& node : endpoint_nodes_) {
             Ptr<UbController> controller = node->GetObject<UbController>();
             Ptr<UbCtpTransportService> service = controller->GetCtpTransportService();
             ctp_retransmissions += service->GetRetransmissionCount();
             ctp_retransmission_exhausted += service->GetRetransmissionExhaustedCount();
+            duplicate_write_suppressed += service->GetDuplicateWriteSuppressedCount();
+            duplicate_taack_replays += service->GetDuplicateTaAckReplayCount();
+            injected_taack_drops += service->GetInjectedTaAckDropCount();
+            injected_ctp_request_drops += service->GetInjectedRequestDropCount();
         }
         std::cerr << "[NS3_UB_NET_STATS] forwarded=" << forwarded_
                   << " delivered=" << delivered_ << " payload_bytes="
@@ -448,7 +459,10 @@ class UbNetFabric {
                   << " ctp_retransmission_exhausted="
                   << ctp_retransmission_exhausted
                   << " injected_ctp_request_drops="
-                  << injected_ctp_request_drops_ << '\n';
+                  << injected_ctp_request_drops
+                  << " duplicate_write_suppressed=" << duplicate_write_suppressed
+                  << " duplicate_taack_replays=" << duplicate_taack_replays
+                  << " injected_taack_drops=" << injected_taack_drops << '\n';
     }
 
   private:
@@ -523,6 +537,8 @@ class UbNetFabric {
             service->SetRetransmissionEnabled(options_.ctp_retransmission);
             service->SetRetransmissionTimeout(PicoSeconds(options_.ctp_rto_ps));
             service->SetMaxRetransmissionAttempts(options_.ctp_max_retransmissions);
+            service->SetDropNextTaAckForTest(options_.drop_first_ctp_taack);
+            service->SetDropNextRequestForTest(options_.drop_first_ctp_request);
             controller->GetUbTransaction()->SetTargetExecutor(
                 UbTargetExecutor(MakeCallback(&UbNetFabric::OnTargetExecute, this)
                                      .Bind(endpoint)));
@@ -865,10 +881,6 @@ class UbNetFabric {
                          UbTargetCompletion completion)
     {
         if (request == nullptr) return completion(UbWorkExecutionResult{});
-        if (options_.drop_first_ctp_request && injected_ctp_request_drops_ == 0) {
-            ++injected_ctp_request_drops_;
-            return;
-        }
         const auto source_it = endpoint_by_node_.find(request->GetSrc());
         auto task = native_tasks_.find(request->GetTaskId());
         if (source_it == endpoint_by_node_.end() || task == native_tasks_.end())
@@ -1145,7 +1157,6 @@ class UbNetFabric {
     std::uint64_t native_order_relax_{};
     std::uint64_t native_order_strong_{};
     std::uint64_t native_trace_size_mismatches_{};
-    std::uint64_t injected_ctp_request_drops_{};
     bool lifecycle_active_{false};
 };
 
@@ -1169,7 +1180,7 @@ int main(int argc, char** argv)
                      "[--sync-interval-ps N] [--lifecycle-sync] "
                      "[--ctp-retransmission on|off] [--ctp-rto-ps N] "
                      "[--ctp-max-retransmissions N] "
-                     "[--drop-first-ctp-request]\n";
+                     "[--drop-first-ctp-request] [--drop-first-ctp-taack]\n";
         return 1;
     }
 }

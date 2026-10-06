@@ -13,10 +13,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$peer" sender "$work/a.sock" "$work/a.shm" off ctp-retrans \
+"$peer" sender "$work/a.sock" "$work/a.shm" off ctp-taack-loss \
     >"$work/a.log" 2>&1 &
 sender_pid=$!
-"$peer" receiver "$work/b.sock" "$work/b.shm" off ctp-retrans \
+"$peer" receiver "$work/b.sock" "$work/b.shm" off ctp-taack-loss \
     >"$work/b.log" 2>&1 &
 receiver_pid=$!
 
@@ -27,7 +27,7 @@ done
 [[ -S "$work/a.sock" && -S "$work/b.sock" ]]
 
 "$adapter" --sync off --ctp-retransmission on --ctp-rto-ps 1000000 \
-    --drop-first-ctp-request \
+    --drop-first-ctp-taack \
     --endpoint "$work/a.sock,0x101" \
     --endpoint "$work/b.sock,0x202" >"$work/adapter.log" 2>&1 &
 adapter_pid=$!
@@ -37,12 +37,14 @@ wait "$receiver_pid"
 kill "$adapter_pid" 2>/dev/null || true
 wait "$adapter_pid" 2>/dev/null || true
 
-grep -q 'CTP WRITE completed after injected request loss PASS' "$work/a.log"
-grep -q 'executed one CTP WRITE for request-loss contract PASS' "$work/b.log"
+grep -q 'completed after injected TAACK loss PASS' "$work/a.log"
+grep -q 'executed one CTP WRITE for TAACK-loss contract PASS' "$work/b.log"
 grep -q 'native_wqes_submitted=1' "$work/adapter.log"
 grep -q 'native_wqes_completed=1' "$work/adapter.log"
 grep -q 'ctp_retransmissions=1' "$work/adapter.log"
+grep -q 'duplicate_write_suppressed=1' "$work/adapter.log"
+grep -q 'duplicate_taack_replays=1' "$work/adapter.log"
+grep -q 'injected_taack_drops=1' "$work/adapter.log"
 grep -q 'ctp_retransmission_exhausted=0' "$work/adapter.log"
-grep -q 'injected_ctp_request_drops=1' "$work/adapter.log"
 grep -q 'ns3_runtime_drops=0' "$work/adapter.log"
-echo 'ns-3-UB native CTP timeout retransmission contract: PASS'
+echo 'ns-3-UB CTP lost-TAACK duplicate suppression contract: PASS'
