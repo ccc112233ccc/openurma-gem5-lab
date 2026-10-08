@@ -29,3 +29,9 @@ legacy bundle, SystemC hardware scaffold, compatibility provider, or
 in-process peer-ring backend.
 
 Historical result documents are evidence only and are not build inputs.
+
+For operation-level support, simplifications and missing behavior, see the
+[official driver coverage audit](validation/official-driver-coverage.md).
+Module packaging or successful command completion alone is not proof of
+complete hardware behavior. The guest also includes the lab-owned
+`ubsim_ub_v2m.ko` bridge, which is not an official UB driver.

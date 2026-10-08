@@ -984,6 +984,7 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
     constexpr std::uint8_t QueryJfsContext = 0x06;
     constexpr std::uint8_t DestroyJfsContext = 0x07;
     constexpr std::uint8_t DestroyJfcContext = 0x27;
+    constexpr std::uint8_t DestroyCeqContext = 0x47;
     constexpr std::uint8_t DestroyJfrContext = 0x57;
     const std::uint32_t tag =
         LoadLe<std::uint32_t>(descriptor.data() + 16) >> 8;
@@ -991,6 +992,13 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
     if (command == DestroyJfsContext) jetty_contexts_.erase(tag);
     if (command == DestroyJfcContext) jfc_contexts_.erase(tag);
     if (command == DestroyJfrContext) jfr_contexts_.erase(tag);
+    // The current model exposes one CEQ. Destroy must revoke the DMA target,
+    // not merely acknowledge the mailbox while retaining the guest buffer.
+    if (command == DestroyCeqContext) {
+        ceq_iova_ = 0;
+        ceq_depth_ = 0;
+        ceq_producer_ = 0;
+    }
 
     if (command == QueryJfsContext && context_iova) {
         std::vector<std::uint8_t> context(128, 0);

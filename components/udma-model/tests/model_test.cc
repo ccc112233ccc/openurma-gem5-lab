@@ -81,6 +81,7 @@ class MockHost final : public device::HostInterface {
                   device::Completion completion) override
     {
         events.emplace_back("dma-write");
+        dma_write_addresses.push_back(address);
         Store(address, data);
         completion(true);
     }
@@ -120,6 +121,7 @@ class MockHost final : public device::HostInterface {
     }
 
     std::vector<std::string> events;
+    std::vector<std::uint64_t> dma_write_addresses;
     std::uint32_t irq_vector{};
     bool irq_asserted{};
     std::uint32_t irq_pulses{};
@@ -766,6 +768,63 @@ int main()
     assert(!official_model.ReadMmio(
         device::UdmaModel::kOfficialApertureBytes, 1, value));
 
+    // Exercise lifecycle commands through the same CSQ DMA/MMIO boundary as
+    // the official driver, including ring wrap. Do not call model internals.
+    const auto mailbox = [&](std::vector<std::uint8_t> desc) {
+        std::uint64_t head{};
+        assert(official_model.ReadMmio(0x318414, 4, head));
+        const auto slot = head % 8;
+        host.Store(ubase_csq + slot * 32, std::move(desc));
+        assert(official_model.WriteMmio(0x318410, 4, (slot + 1) % 8));
+        assert(official_model.ReadMmio(0x318414, 4, head));
+        assert(head == (slot + 1) % 8);
+        const auto& completed = host.Load(ubase_csq + slot * 32);
+        assert((completed[2] & 2) && !completed[4] && !completed[5]);
+    };
+    const auto destroy = [&](std::uint8_t opcode, std::uint32_t id) {
+        std::vector<std::uint8_t> desc(32, 0);
+        desc[1] = 0x70; desc[3] = 1;
+        store32(desc, 16, (id << 8) | opcode);
+        mailbox(std::move(desc));
+    };
+    const auto errors_before_lifecycle = official_model.ubase_errors();
+    assert(official_model.ceq_enabled());
+    destroy(0x47, 0);
+    assert(!official_model.ceq_enabled());
+    mailbox(create_ceq);
+    assert(official_model.ceq_enabled());
+    destroy(0x47, 0);
+    assert(!official_model.ceq_enabled());
+    const auto jfcs_before = official_model.jfc_count();
+    assert(jfcs_before > 0);
+    for (unsigned round = 0; round < 16; ++round) {
+        destroy(0x27, 7);
+        assert(official_model.jfc_count() == jfcs_before - 1);
+        mailbox(create_jfc);
+        assert(official_model.jfc_count() == jfcs_before);
+    }
+    assert(official_model.ubase_errors() == errors_before_lifecycle);
+    const auto dma_before_destroyed_ceq = host.dma_write_addresses.size();
+    for (std::uint32_t index = 8; index < 10; ++index) {
+        auto wqe = send_wqe;
+        const auto flags = index | (0x60U << 16) | (1U << 31);
+        std::memcpy(wqe.data(), &flags, 4);
+        host.Store(sq_iova + index * 64, {wqe.begin(), wqe.end()});
+    }
+    const auto completions_before_destroyed_ceq = official_model.sq_completions();
+    assert(official_model.WriteMmio(jetty_page + 0x80, 4, 10));
+    // First CQE is below moderation threshold; the second needs a CEQ and
+    // must fail notification rather than DMA into the destroyed buffer.
+    assert(official_model.sq_completions() == completions_before_destroyed_ceq + 1);
+    assert(official_model.ubase_errors() == errors_before_lifecycle + 1);
+    bool saw_cqe = false;
+    for (std::size_t i = dma_before_destroyed_ceq; i < host.dma_write_addresses.size(); ++i) {
+        const auto address = host.dma_write_addresses[i];
+        assert(address < ceq_iova || address >= ceq_iova + 4096);
+        saw_cqe |= address >= cq_iova && address < cq_iova + 4096;
+    }
+    assert(saw_cqe); // real CQ completion occurred, but no DMA to freed CEQ memory
+    std::cout << "udma-model CEQ destroy/recreate and JFC lifecycle/ring-wrap: PASS\n";
     std::cout << "udma-model host/device/network separation test: PASS\n";
     return 0;
 }
