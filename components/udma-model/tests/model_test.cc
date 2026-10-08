@@ -811,6 +811,38 @@ int main()
         store32(desc, 16, (id << 8) | opcode);
         mailbox(std::move(desc));
     };
+    const auto drain_destroy = [&](std::vector<std::uint8_t> desc) {
+        std::uint64_t head{}, after{};
+        assert(official_model.ReadMmio(0x318414, 4, head));
+        const auto errors = official_model.ubase_errors();
+        desc[2] &= ~2U;
+        host.Store(ubase_csq + head * 32, desc);
+        std::vector<std::uint8_t> follower(32, 0);
+        follower[0] = 7; follower[3] = 1; // NOTIFY_DRV_CAPS after destroy
+        host.Store(ubase_csq + ((head + 1) % 8) * 32, follower);
+        assert(official_model.WriteMmio(0x318410, 4, (head + 2) % 8));
+        assert(official_model.ReadMmio(0x318414, 4, after) && after == head);
+        assert(!(host.Load(ubase_csq + head * 32)[2] & 2));
+        assert(!(host.Load(ubase_csq + ((head + 1) % 8) * 32)[2] & 2));
+        assert(!official_model.IsQuiescent());
+        // Finish the event write, but hold its Type-1 MSI completion next.
+        assert(host.pending_writes.size() == 1);
+        host.defer_write_address = msi_address;
+        auto event_done = std::move(host.pending_writes.front());
+        host.pending_writes.pop_front();
+        event_done();
+        assert(host.pending_writes.size() == 1);
+        assert(official_model.ReadMmio(0x318414, 4, after) && after == head);
+        assert(!(host.Load(ubase_csq + head * 32)[2] & 2));
+        host.defer_write_address = 0;
+        host.FlushWrites();
+        assert(official_model.ReadMmio(0x318414, 4, after) && after == (head + 2) % 8);
+        for (unsigned i = 0; i < 2; ++i) {
+            const auto& done = host.Load(ubase_csq + ((head + i) % 8) * 32);
+            assert((done[2] & 2) && !done[4] && !done[5]);
+        }
+        assert(official_model.ubase_errors() == errors);
+    };
     // Hold actual event DMA completion while later CSQ commands continue.
     host.defer_write_address = aeq_iova;
     mailbox(create_aeq); // producer resets to zero; event DMA remains in flight
@@ -824,12 +856,9 @@ int main()
     auto destroy_aeq = create_aeq;
     store32(destroy_aeq, 16, 0x37);
     store32(destroy_aeq, 20, 0); // official EQ teardown uses polling
-    mailbox(destroy_aeq, 16);
     mailbox(create_aeq, 16);
     assert(official_model.aeq_enabled());
-    host.defer_write_address = 0;
-    host.FlushWrites();
-    mailbox(destroy_aeq);
+    drain_destroy(destroy_aeq);
     assert(!official_model.aeq_enabled());
     const auto old_aeq_writes = host.dma_write_addresses.size();
     auto recreated_aeq = create_aeq;
@@ -893,13 +922,10 @@ int main()
     assert(host.pending_writes.size() == 1);
     auto destroy_ceq = create_ceq;
     store32(destroy_ceq, 16, 0x47);
-    mailbox(destroy_ceq, 16);
     mailbox(create_ceq, 16);
     assert(official_model.ceq_enabled());
     assert(!official_model.IsQuiescent());
-    host.defer_write_address = 0;
-    host.FlushWrites();
-    mailbox(destroy_ceq);
+    drain_destroy(destroy_ceq);
     assert(!official_model.ceq_enabled());
     std::cout << "udma-model CEQ in-flight destroy/replacement guard: PASS\n";
     auto duplicate_jfc=create_jfc;

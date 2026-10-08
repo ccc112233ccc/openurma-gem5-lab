@@ -1024,11 +1024,20 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
     const std::uint32_t tag =
         LoadLe<std::uint32_t>(descriptor.data() + 16) >> 8;
 
-    // Singleton event queues must not be replaced/revoked while a DMA or
-    // interrupt completion still refers to their current lifetime.
-    if (((command == 0x34 || command == 0x37) && aeq_in_flight_) ||
-        ((command == 0x44 || command == 0x47) &&
-         (completion_event_busy_ || !completion_events_.empty())))
+    const bool eq_busy = (command == 0x34 || command == 0x37) ?
+        aeq_in_flight_ != 0 : (completion_event_busy_ || !completion_events_.empty());
+    // Keep ownership of CSQ until old event writes and interrupts finish.
+    // The official driver frees EQ memory even on mailbox failure, so EBUSY
+    // is not a safe completion for destruction.
+    if ((command == 0x37 || command == 0x47) && eq_busy) {
+        draining_eq_command_ = command;
+        pending_eq_destroy_ = [this, descriptor = std::move(descriptor),
+                               descriptor_count]() mutable {
+            HandleUbaseMailbox(std::move(descriptor), descriptor_count);
+        };
+        return;
+    }
+    if ((command == 0x34 || command == 0x44) && eq_busy)
         return RejectUbase(std::move(descriptor), descriptor_count, 16);
 
     const bool needs_context = command == QueryJfsContext || command == 0x34 ||
@@ -1227,12 +1236,27 @@ UdmaModel::EmitMailboxEvent(std::uint16_t sequence, Completion completion)
                     [this, completion = std::move(completion)](bool interrupt_ok) mutable {
                         --aeq_in_flight_;
                         completion(interrupt_ok);
+                        MaybeCompleteEqDestroy();
                     });
                 return;
             }
             --aeq_in_flight_;
             completion(false);
+            MaybeCompleteEqDestroy();
         });
+}
+
+void
+UdmaModel::MaybeCompleteEqDestroy()
+{
+    if (!pending_eq_destroy_) return;
+    if (draining_eq_command_ == 0x37 && aeq_in_flight_) return;
+    if (draining_eq_command_ == 0x47 &&
+        (completion_event_busy_ || !completion_events_.empty())) return;
+    auto complete = std::move(pending_eq_destroy_);
+    pending_eq_destroy_ = {};
+    draining_eq_command_ = 0;
+    complete();
 }
 
 bool
@@ -1667,6 +1691,12 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
 void
 UdmaModel::EmitCompletionEvent(std::uint32_t jfc_id, Completion completion)
 {
+    // Already accepted events drain; later notifications cannot extend the
+    // lifetime of a queue whose destroy command has been accepted.
+    if (draining_eq_command_ == 0x47) {
+        completion(false);
+        return;
+    }
     completion_events_.push_back({jfc_id, std::move(completion)});
     ProcessCompletionEvent();
 }
@@ -1674,7 +1704,11 @@ UdmaModel::EmitCompletionEvent(std::uint32_t jfc_id, Completion completion)
 void
 UdmaModel::ProcessCompletionEvent()
 {
-    if (completion_event_busy_ || completion_events_.empty()) return;
+    if (completion_event_busy_) return;
+    if (completion_events_.empty()) {
+        MaybeCompleteEqDestroy();
+        return;
+    }
     PendingCompletionEvent pending = std::move(completion_events_.front());
     completion_events_.pop_front();
     if (!ceq_iova_ || !ceq_depth_ || (ceq_depth_ & (ceq_depth_ - 1))) {

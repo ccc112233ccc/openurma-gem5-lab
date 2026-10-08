@@ -430,6 +430,9 @@ class UdmaModel {
     std::uint32_t aeq_depth_{};
     std::uint32_t aeq_producer_{};
     std::uint32_t aeq_in_flight_{};
+    void MaybeCompleteEqDestroy();
+    std::uint8_t draining_eq_command_{};
+    std::function<void()> pending_eq_destroy_;
     std::uint64_t ceq_iova_{};
     std::uint32_t ceq_depth_{};
     std::uint32_t ceq_producer_{};

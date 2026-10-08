@@ -30,7 +30,7 @@ Paths below are repository-relative.
 | UDMA JFS/Jetty context | `oe66/drivers/ub/urma/hw/udma/udma_cmd.h`, `udma_jetty.c` | Mailbox create 0x04, query 0x06, destroy 0x07 | Create/DMA path covered; query is synthesized, full modify/flush/in-flight teardown not verified |
 | UDMA JFC | `udma_jfc.c`, command header | Create 0x24, modify 0x25, destroy 0x27; CQE/moderation tests | Partial modify masks; new 16-cycle destroy/recreate test exercises CSQ wrap |
 | UDMA JFR | `udma_jfr.c`, command header | Create 0x54, destroy 0x57; SEND receive DMA tests | Full modify/query and in-flight teardown not verified |
-| AEQ / CEQ | command header and UBASE event setup | Create 0x34/0x44, destroy 0x37/0x47; mailbox/completion event DMA | **Single modeled AEQ/CEQ**, not per-ID multi-queue hardware. Busy destroy/replacement rejects; full driver teardown still needs drain |
+| AEQ / CEQ | command header and UBASE event setup | Create 0x34/0x44, destroy 0x37/0x47; mailbox/completion event DMA | **Single modeled AEQ/CEQ**. Destroy drains accepted events and MSI; busy replacement rejects. Not full driver teardown verification |
 | CtrlQ QoS/SEID | `udma_ctrlq*`, UBASE control envelope | Services 4:1/2, 2:1/0x15 in `BuildCtrlqResponse` | Template responses; SEID query is not proof of complete security-entity behavior |
 | CtrlQ TP | `udma_ctrlq_tp.h/.c` | GET_LIST 0x21, ACTIVE 0x22, DEACTIVE 0x23, REMOVE 0x13; exhaustion/reclaim/reuse tests | REMOVE supports inactive routes with no pending RMA; CHECK/SET_ATTR/GET_ATTR not implemented |
 | Official provider SEND / SEND_IMM / WRITE / READ | `sources/umdk/src/urma/hw/udma/udma_u_jfs.c` | `SqWqe`, `ProcessSq`, receive paths; native and historical full-system RMA tests | Implemented subset; SQ opcodes accepted are 0, 1, 3, 6 |
@@ -136,7 +136,7 @@ revalidation was performed for this stage.
 Final no-change rerun took **0.10 s** to check build targets and **0.17 s**
 for the same two tests; assertions remain enabled via `-UNDEBUG`.
 
-## Third implementation result: event queue lifetime guards
+## Third implementation result: event queue lifetime guards (historical)
 
 AEQ destroy (0x37) now clears its DMA address, depth and producer instead of
 silently succeeding. AEQ outstanding operations are counted through DMA and
@@ -161,6 +161,38 @@ path must defer successful destruction until in-flight DMA/interrupts finish,
 with bounded failure handling. Per-ID queues, parallel AEQ producer allocation
 and queue-full semantics also remain unimplemented. No guest revalidation is
 claimed for these native tests.
+
+## Fourth implementation result: asynchronous EQ destruction
+
+The previous EBUSY-on-destroy policy is replaced by a drain. If an AEQ/CEQ
+event is outstanding, the model retains the CSQ descriptor without returning
+ownership or advancing Head. Completion callbacks resume destruction only
+after accepted event DMA and MSI operations finish. It then clears queue state,
+completes the command successfully and resumes subsequent CSQ descriptors.
+Create/replacement while busy continues to return EBUSY.
+
+CEQ notifications already queued are drained; newly arriving notifications
+after destroy acceptance fail instead of extending the queue lifetime. This
+does not automatically drain every JFC/SQ/RMA producer: software must stop
+producers before dismantling the event queue, and producer teardown remains
+separate work.
+
+Native tests independently hold the event DMA and then its Type-1 MSI write.
+At both boundaries, destroy and a following NOTIFY_DRV_CAPS remain uncompleted.
+After MSI completion both finish successfully in order, the queue is disabled,
+and the existing AEQ new-buffer recreation/no-old-buffer-write test passes.
+This exercises the official polling-destroy command shape without modifying
+the driver, but does not execute the official kernel itself.
+
+First build/test: **3.69 s / 1.55 s**. Final expanded DMA+MSI test build/run:
+**1.47 s / 0.63 s**, both process-contract and model tests passed. No guest
+restart was performed.
+
+Failure boundary: callbacks must eventually complete. There is no transport
+cancellation or lost-callback watchdog yet. Returning a timeout while a write
+can still occur would recreate the freed-buffer hazard; that fault requires
+transport quiescence/reset, not an invented successful completion. Therefore
+full guest unload safety and fault recovery remain unverified.
 
 ## Next priority gaps
 
