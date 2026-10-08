@@ -8,7 +8,52 @@ import subprocess
 import time
 import re
 import os
+import signal
 from run_modular_rma_regression import validate_depth_output, validate_bw_scan
+
+
+def observe_drain(root, timeout):
+    """Sample live process-owned work; not a coordinated checkpoint barrier."""
+    begin = time.monotonic()
+    specs = [(f"udma-node{n}/udma", "UDMA_PROGRESS") for n in (0, 1)]
+    specs.append(("ub-fabric/ns3", "NS3_UB_NET_PROGRESS"))
+    samples = []
+    consecutive = 0
+    while time.monotonic() - begin < timeout:
+        offsets = {}
+        for component, marker in specs:
+            path = root / f"{component}.log"
+            offsets[component] = path.stat().st_size
+            os.kill(int((root / f"{component}.pid").read_text()), signal.SIGUSR1)
+        replies = {}
+        deadline = min(begin + timeout, time.monotonic() + 1)
+        while time.monotonic() < deadline:
+            for component, marker in specs:
+                with (root / f"{component}.log").open("rb") as stream:
+                    stream.seek(offsets[component])
+                    lines = stream.read().decode(errors="replace").splitlines(keepends=True)
+                for line in lines:
+                    if line.endswith("\n") and line.startswith(f"[{marker}]"):
+                        replies[component] = {k: int(v) for k, v in
+                            re.findall(r"(\w+)=(\d+)", line)}
+            if len(replies) == len(specs):
+                break
+            time.sleep(0.02)
+        drained = all(replies.get(f"udma-node{n}/udma", {}).get("quiescent") == 1
+                      for n in (0, 1))
+        fabric = replies.get("ub-fabric/ns3", {})
+        drained = drained and all(fabric.get(k) == 0 for k in
+            ("native_tasks", "pending_target_dma", "scheduled_packets"))
+        drained = drained and fabric.get("outputs_empty") == 1
+        samples.append(dict(wall_seconds=time.monotonic() - begin,
+                            processes=replies, observed_work_drained=drained))
+        consecutive = consecutive + 1 if drained else 0
+        if consecutive >= 2:
+            break
+        time.sleep(min(0.25, max(0, begin + timeout - time.monotonic())))
+    return dict(label="post-workload-drain", wall_seconds=time.monotonic() - begin,
+                observed_work_drained=consecutive >= 2, samples=samples,
+                scope="Live work snapshots, not global event-queue or checkpoint quiescence")
 
 
 def main():
@@ -16,6 +61,8 @@ def main():
     p.add_argument("output", type=Path)
     p.add_argument("--timeout", type=float, default=180)
     p.add_argument("--sizes", type=int, nargs="+", default=[4096, 65536, 1048576])
+    p.add_argument("--drain-timeout", type=float, default=0,
+                   help="optional bounded live drain observation before stopping processes")
     p.add_argument("--user-read-scan", action="store_true",
                    help="run requested a23/n16384 READ scan, capped to reported queue limits")
     p.add_argument("--read-size", type=int,
@@ -128,6 +175,15 @@ def main():
         return 0
     finally:
         if launched:
+            if args.drain_timeout > 0:
+                try:
+                    drain = observe_drain(root, args.drain_timeout)
+                    records.append(drain)
+                    print(f"drain: observed={drain['observed_work_drained']} "
+                          f"wall={drain['wall_seconds']:.3f}s", flush=True)
+                except (OSError, ValueError) as error:
+                    records.append(dict(label="post-workload-drain", error=str(error),
+                                        observed_work_drained=False))
             run("stop", ["./lab", "stop-qemu"], 15)
             time.sleep(1)
         for node in (0, 1):

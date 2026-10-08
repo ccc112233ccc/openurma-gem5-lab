@@ -38,6 +38,7 @@ ctp_full_ta_patch="$runtime_lab/integrations/ns3ub/patches/0008-ctp-full-transac
 ctp_request_context_patch="$runtime_lab/integrations/ns3ub/patches/0009-ctp-request-context.patch"
 ctp_late_response_patch="$runtime_lab/integrations/ns3ub/patches/0010-ctp-late-response-retirement.patch"
 ctp_remote_abort_patch="$runtime_lab/integrations/ns3ub/patches/0011-ctp-remote-abort.patch"
+ctp_wire_retry_patch="$runtime_lab/integrations/ns3ub/patches/0012-ctp-actual-send-retry.patch"
 simbricks_base_source="$runtime_lab/components/udma-device-sim/simbricks_base_portable.c"
 expected_source_revision=d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b
 
@@ -94,6 +95,8 @@ ubsim_exec git -C "$source_root" apply --check "$ctp_late_response_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_late_response_patch"
 ubsim_exec git -C "$source_root" apply --check "$ctp_remote_abort_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_remote_abort_patch"
+ubsim_exec git -C "$source_root" apply --check "$ctp_wire_retry_patch"
+ubsim_exec git -C "$source_root" apply "$ctp_wire_retry_patch"
 ubsim_exec rm -f "$source_root/scratch/ub-gem5-adapter.cc" \
     "$source_root/src/unified-bus/model/ub-external-adapter-protocol.h"
 ubsim_exec mkdir -p "$source_root/scratch/ubsim-ub-net"
@@ -125,7 +128,7 @@ ubsim_exec cmake -S "$source_root" -B "$cache_dir" \
     -DNS3_OUTPUT_DIRECTORY="$output_dir"
 
 ubsim_exec cmake --build "$cache_dir" \
-    --target scratch_ub-net-adapter scratch_ctp-recovery-contract scratch_ctp-feedback-contract scratch_ctp-read-length-contract \
+    --target scratch_ub-net-adapter scratch_ctp-recovery-contract scratch_ctp-feedback-contract scratch_ctp-read-length-contract scratch_ctp-wire-retry-contract \
     -j "${UBSIM_BUILD_JOBS:-8}"
 
 ubsim_exec test -x "$output_dir/scratch/ns3.44-ub-net-adapter"
@@ -134,6 +137,7 @@ ubsim_exec "$output_dir/scratch/ns3.44-ctp-feedback-contract"
 ubsim_exec "$output_dir/scratch/ns3.44-ctp-feedback-contract" enabled
 ubsim_exec "$output_dir/scratch/ns3.44-ctp-feedback-contract" enabled single
 ubsim_exec "$output_dir/scratch/ns3.44-ctp-read-length-contract"
+ubsim_exec "$output_dir/scratch/ns3.44-ctp-wire-retry-contract"
 
 if [[ "$UBSIM_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
     # The UB-NET contract peer is portable too.  Reuse the checked-in Darwin

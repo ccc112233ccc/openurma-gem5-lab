@@ -16,6 +16,15 @@ identity is checked independently of physical port. See
 [error-path acceptance](../../docs/validation/ctp-remote-abort-20261009.md);
 this does not fix premature retry timers or establish large-message bandwidth.
 
+Patch0012 starts retry timers at the source port's actual successful transmit
+callback, not enqueue or CTP queue dequeue. Queued retries cannot consume a
+second timeout until sent; generation/attempt checks prevent old callbacks
+from rearming a retired WQE. See
+[actual-send acceptance](../../docs/validation/ctp-actual-send-retry-20261009.md)
+for native port-blocking counterexamples and official-driver evidence. The
+adapter accepts SIGUSR1 for read-only live work snapshots; the timing trial
+runner can collect bounded pre-stop observations with `--drain-timeout`.
+
 The production boundary is `ub-net-adapter.cc`. It connects independent UDMA
 device processes through the simulator-neutral UB-NET v1 ABI and uses native
 ns-3-UB `UbSwitch`, `UbPort`, and `UbLink` objects for routing, serialization,

@@ -1,0 +1,305 @@
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -42,6 +42,41 @@
+ {
+ 
+ using UbTaSsnSequence = UbModuloSequence<16, uint32_t>;
++
++// Local simulator metadata, not wire bytes. Copies of one queued attempt
++// retain its identity; stale callbacks cannot arm a later generation's timer.
++class CtpRequestAttemptTag : public Tag
++{
++  public:
++    static TypeId GetTypeId()
++    {
++        static TypeId tid = TypeId("ns3::CtpRequestAttemptTag")
++            .SetParent<Tag>().AddConstructor<CtpRequestAttemptTag>();
++        return tid;
++    }
++    TypeId GetInstanceTypeId() const override { return GetTypeId(); }
++    uint32_t GetSerializedSize() const override { return 34; }
++    void Serialize(TagBuffer b) const override
++    {
++        b.WriteU32(node); b.WriteU32(key.srcEntityId); b.WriteU32(key.dstNodeId);
++        b.WriteU32(key.dstEntityId); b.WriteU8(key.vl); b.WriteU32(tassn);
++        b.WriteU64(generation); b.WriteU32(attempt); b.WriteU8(drop);
++    }
++    void Deserialize(TagBuffer b) override
++    {
++        node = b.ReadU32(); key.srcEntityId = b.ReadU32(); key.dstNodeId = b.ReadU32();
++        key.dstEntityId = b.ReadU32(); key.vl = b.ReadU8(); tassn = b.ReadU32();
++        generation = b.ReadU64(); attempt = b.ReadU32(); drop = b.ReadU8();
++    }
++    void Print(std::ostream& os) const override
++    { os << node << ':' << generation << ':' << attempt; }
++    uint32_t node{0};
++    UbCtpEntityKey key{};
++    uint32_t tassn{0};
++    uint64_t generation{0};
++    uint32_t attempt{0};
++    bool drop{false};
++};
+ 
+ uint16_t
+ EntityLoadBalanceSalt(uint32_t srcNodeId, const UbCtpEntityKey& key)
+@@ -1235,24 +1270,10 @@
+                                                   static_cast<uint8_t>(lbSalt & 0xff));
+     Ptr<UbCtpTxQueue> queue = GetOrCreateQueue(packetKey, outPort, packetKey.vl);
+     RegisterQueueIfNeeded(queue, outPort, packetKey.vl);
+-    const bool injectRequestDrop = (m_dropAllRequestsForTest ||
+-                                    m_dropNextRequestForTest) &&
+-        (segment->GetType() == UbTransactionOpcode::WRITE ||
+-         segment->GetType() == UbTransactionOpcode::READ);
+-    if (injectRequestDrop)
+-    {
+-        if (!m_dropAllRequestsForTest)
+-            m_dropNextRequestForTest = false;
+-        ++m_injectedRequestDropCount;
+-    }
+-    else
+-    {
+-        queue->EnqueueData(packet);
+-    }
+     if (segment->GetType() == UbTransactionOpcode::WRITE ||
+         segment->GetType() == UbTransactionOpcode::READ)
+     {
+-        ArmRetransmission(state.GetKey(),
++        TrackQueuedRequest(state.GetKey(),
+                           packetKey,
+                           taSsn,
+                           outPort,
+@@ -1261,6 +1282,7 @@
+                           segment->GetJettyNum(),
+                           segment->GetTaskId());
+     }
++    queue->EnqueueData(packet);
+     FirstPacketSendsNotify(segment->GetTaskId(),
+                            packetKey,
+                            taSsn,
+@@ -1278,7 +1300,7 @@
+ }
+ 
+ void
+-UbCtpTransportService::ArmRetransmission(const UbCtpEntityKey& stateKey,
++UbCtpTransportService::TrackQueuedRequest(const UbCtpEntityKey& stateKey,
+                                          const UbCtpEntityKey& packetKey,
+                                          uint32_t taSsn,
+                                          uint32_t outPort,
+@@ -1287,12 +1309,10 @@
+                                          uint32_t jettyNum,
+                                          uint32_t wqeId)
+ {
+-    if (!m_retransmissionEnabled)
+-    {
+-        return;
+-    }
++    if (!m_retransmissionEnabled && !m_dropNextRequestForTest && !m_dropAllRequestsForTest) return;
+     const auto key = std::make_pair(stateKey, taSsn);
+     auto [record, inserted] = m_retransmissionRecords.try_emplace(key);
++    NS_ABORT_MSG_IF(!inserted, "CTP attempted to reuse a live retry identity");
+     if (inserted)
+     {
+         record->second.packetKey = packetKey;
+@@ -1300,14 +1320,49 @@
+         record->second.priority = priority;
+         record->second.jettyNum = jettyNum;
+         record->second.wqeId = wqeId;
++        NS_ABORT_MSG_IF(m_nextRequestGeneration == 0, "CTP request generation exhausted");
++        record->second.generation = m_nextRequestGeneration++;
+         record->second.packet = packet->Copy();
++    }
++    CtpRequestAttemptTag tag;
++    tag.node = m_node->GetId(); tag.key = stateKey; tag.tassn = taSsn;
++    tag.generation = record->second.generation;
++    packet->AddPacketTag(tag);
++}
++
++void
++UbCtpTransportService::RequestActuallySent(uint32_t outPort, Ptr<Packet> packet, Time)
++{
++    CtpRequestAttemptTag tag;
++    if (!packet->PeekPacketTag(tag) || m_node == nullptr || tag.node != m_node->GetId()) return;
++    const auto record = m_retransmissionRecords.find({tag.key, tag.tassn});
++    if (record == m_retransmissionRecords.end() || record->second.sent ||
++        record->second.generation != tag.generation || record->second.attempts != tag.attempt ||
++        record->second.outPort != outPort) return;
++    auto* state = GetTransactionOwner()->FindCtpTransactionState(tag.key);
++    if (state == nullptr || !state->outstandingSegments.contains(tag.tassn))
++    {
++        m_retransmissionRecords.erase(record);
++        return;
+     }
++    record->second.sent = true;
++    if (tag.attempt != 0) ++m_retransmissionCount;
++    if (m_dropAllRequestsForTest || m_dropNextRequestForTest)
++    {
++        if (!m_dropAllRequestsForTest) m_dropNextRequestForTest = false;
++        tag.drop = true;
++        packet->ReplacePacketTag(tag);
++        ++m_injectedRequestDropCount;
++    }
++    if (!m_retransmissionEnabled) return;
+     const uint64_t token = m_retransmissionEvents.Track(m_lifecycleOwner);
+     EventId event = Simulator::Schedule(m_retransmissionTimeout,
+                                         &UbCtpTransportService::HandleRetransmissionTimeout,
+                                         this,
+-                                        stateKey,
+-                                        taSsn,
++                                        tag.key,
++                                        tag.tassn,
++                                        tag.generation,
++                                        tag.attempt,
+                                         token);
+     m_retransmissionEvents.Attach(m_lifecycleOwner, token, event, {});
+ }
+@@ -1315,6 +1370,8 @@
+ void
+ UbCtpTransportService::HandleRetransmissionTimeout(UbCtpEntityKey stateKey,
+                                                    uint32_t taSsn,
++                                                   uint64_t generation,
++                                                   uint32_t attempt,
+                                                    uint64_t token)
+ {
+     if (!m_retransmissionEvents.Begin(m_lifecycleOwner, token))
+@@ -1323,11 +1380,19 @@
+     }
+     const auto key = std::make_pair(stateKey, taSsn);
+     auto record = m_retransmissionRecords.find(key);
+-    if (record == m_retransmissionRecords.end())
++    if (record == m_retransmissionRecords.end() || record->second.generation != generation ||
++        record->second.attempts != attempt || !record->second.sent)
+     {
+         m_retransmissionEvents.Resolve(m_lifecycleOwner, token);
+         return;
+     }
++    auto* state = GetTransactionOwner()->FindCtpTransactionState(stateKey);
++    if (state == nullptr || !state->outstandingSegments.contains(taSsn))
++    {
++        m_retransmissionRecords.erase(record);
++        m_retransmissionEvents.Resolve(m_lifecycleOwner, token);
++        return;
++    }
+     if (record->second.attempts >= m_maxRetransmissionAttempts)
+     {
+         const uint32_t jettyNum = record->second.jettyNum;
+@@ -1351,30 +1416,18 @@
+                                                record->second.outPort,
+                                                record->second.priority);
+     RegisterQueueIfNeeded(queue, record->second.outPort, record->second.priority);
+-    if (m_dropAllRequestsForTest)
+-        ++m_injectedRequestDropCount;
+-    else
+-        queue->EnqueueData(record->second.packet->Copy());
+     ++record->second.attempts;
+-    ++m_retransmissionCount;
++    record->second.sent = false;
++    Ptr<Packet> retry = record->second.packet->Copy();
++    CtpRequestAttemptTag tag;
++    tag.node = m_node->GetId(); tag.key = stateKey; tag.tassn = taSsn;
++    tag.generation = record->second.generation; tag.attempt = record->second.attempts;
++    retry->AddPacketTag(tag);
++    queue->EnqueueData(retry);
+     Ptr<UbPort> port = DynamicCast<UbPort>(m_node->GetDevice(record->second.outPort));
+     NS_ABORT_MSG_IF(port == nullptr, "CTP retransmission selected a non-UB source port");
+     port->TriggerTransmit();
+-    const UbCtpEntityKey packetKey = record->second.packetKey;
+-    const uint32_t outPort = record->second.outPort;
+-    const uint32_t priority = record->second.priority;
+-    const uint32_t jettyNum = record->second.jettyNum;
+-    const uint32_t wqeId = record->second.wqeId;
+-    Ptr<Packet> packet = record->second.packet;
+     m_retransmissionEvents.Resolve(m_lifecycleOwner, token);
+-    ArmRetransmission(stateKey,
+-                      packetKey,
+-                      taSsn,
+-                      outPort,
+-                      priority,
+-                      packet,
+-                      jettyNum,
+-                      wqeId);
+ }
+ 
+ bool
+@@ -1499,6 +1552,11 @@
+     {
+         return false;
+     }
++    // Loss injection is selected only after actual source-port transmission.
++    // The packet consumes the modeled wire/credit path, then is lost before
++    // transaction execution. Its sender has already started the retry timer.
++    CtpRequestAttemptTag attemptTag;
++    if (packet->PeekPacketTag(attemptTag) && attemptTag.drop) return true;
+ 
+     Ptr<Packet> copy = CopyPacketView(packet);
+ 
+@@ -2367,6 +2425,13 @@
+ {
+     NS_ABORT_MSG_IF(queue == nullptr, "CTP queue registration requires a queue");
+     NS_ABORT_MSG_IF(m_node == nullptr, "CTP queue registration requires a source node");
++    if (m_actualSendPorts.insert(outPort).second)
++    {
++        Ptr<UbPort> port = DynamicCast<UbPort>(m_node->GetDevice(outPort));
++        NS_ABORT_MSG_IF(port == nullptr, "CTP send observation requires a UB port");
++        port->TraceConnectWithoutContext("TraComEventNotify",
++            MakeCallback(&UbCtpTransportService::RequestActuallySent, this).Bind(outPort));
++    }
+ 
+     if (m_registeredQueues.find(queue) != m_registeredQueues.end())
+     {
+@@ -2689,6 +2754,15 @@
+ void
+ UbCtpTransportService::DoDispose()
+ {
++    for (uint32_t outPort : m_actualSendPorts)
++    {
++        if (m_node == nullptr) break;
++        Ptr<UbPort> port = DynamicCast<UbPort>(m_node->GetDevice(outPort));
++        if (port != nullptr)
++            port->TraceDisconnectWithoutContext("TraComEventNotify",
++                MakeCallback(&UbCtpTransportService::RequestActuallySent, this).Bind(outPort));
++    }
++    m_actualSendPorts.clear();
+     if (m_lifecycleOwner.generation != 0)
+     {
+         const std::vector<Callback<void>> cleanups =
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -268,7 +268,7 @@
+                                      Ptr<UbWqeSegment> response,
+                                      uint64_t token);
+     void CancelTrackedCompleteFromTaAck(UbCtpEntityKey key);
+-    void ArmRetransmission(const UbCtpEntityKey& stateKey,
++    void TrackQueuedRequest(const UbCtpEntityKey& stateKey,
+                            const UbCtpEntityKey& packetKey,
+                            uint32_t taSsn,
+                            uint32_t outPort,
+@@ -276,8 +276,11 @@
+                            Ptr<Packet> packet,
+                            uint32_t jettyNum,
+                            uint32_t wqeId);
++    void RequestActuallySent(uint32_t outPort, Ptr<Packet> packet, Time completionDelay);
+     void HandleRetransmissionTimeout(UbCtpEntityKey stateKey,
+                                      uint32_t taSsn,
++                                     uint64_t generation,
++                                     uint32_t attempt,
+                                      uint64_t token);
+     void TryRetireTransactionState(const UbCtpEntityKey& key);
+     UbCtpCongestionKey MakeCongestionKey(const UbCtpEntityKey& key) const;
+@@ -367,6 +370,8 @@
+         uint32_t attempts{0};
+         uint32_t jettyNum{0};
+         uint32_t wqeId{0};
++        uint64_t generation{0};
++        bool sent{false};
+         Ptr<Packet> packet;
+     };
+     bool m_retransmissionEnabled{false};
+@@ -374,6 +379,8 @@
+     uint32_t m_maxRetransmissionAttempts{7};
+     uint64_t m_retransmissionCount{0};
+     uint64_t m_retransmissionExhaustedCount{0};
++    uint64_t m_nextRequestGeneration{1};
++    std::set<uint32_t> m_actualSendPorts;
+     std::map<std::pair<UbCtpEntityKey, uint32_t>, RetransmissionRecord>
+         m_retransmissionRecords;
+     struct ReceivedRmaRecord

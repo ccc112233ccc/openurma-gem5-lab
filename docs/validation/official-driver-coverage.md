@@ -46,6 +46,24 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest accepted repair: [actual-send CTP retry timers](ctp-actual-send-retry-20261009.md)
+closes the reproduced1 MiB WRITE retry storm without increasing RTO. At400G,
+the synchronized `-B` short test reports88476.59 MiB/s (92.77443 GB/s), already
+combining directions. Both guests return success;128/128 WQEs,32768 TA/ACKs,
+zero retries/errors and both UDMAs drained. Command82.301 s, total131.962 s.
+Five real-port counterexamples, ten independent DMA/error contracts and twelve
+official-driver no-sync cases pass. Long-run repeatability, wider parameter
+sensitivity and multiport utilization remain performance acceptance work.
+The200G one-variable control also passes and drains, average36611.45 MiB/s
+(38.38989 GB/s), total134.261 s. It exposes11251 stale queued retry requests
+and duplicate ACK replays despite zero active-record retransmissions. Next
+priority is retiring stale queued attempts before departure with correct queue
+accounting, then repeating sensitivity/longer measurements. Do not call this
+zero physical retransmission or linear scaling.
+
+Earlier stage evidence below is retained as history; its1 MiB failure was
+reproduced and then resolved by the actual-send change above.
+
 Latest error-path stage: [CTP Remote Abort](ctp-remote-abort-20261009.md)
 converts validated target READ/WRITE DMA errors into protocol errors instead
 of crashing on an unsupported completion. Final native contracts10/10 and

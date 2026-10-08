@@ -47,6 +47,8 @@ namespace ubnet = ubsim::proto::net;
 namespace {
 
 std::atomic<bool> running{true};
+volatile std::sig_atomic_t progress_requested = 0;
+void RequestProgress(int) { progress_requested = 1; }
 
 // IsFinished() also reports true after Simulator::Stop(), even with queued
 // events. Observe the real scheduler queue instead; no event is classified or
@@ -367,6 +369,19 @@ class UbNetFabric {
                   << " boundary=ub-net-v1\n";
         while (running.load()) {
             ++loop_iterations_;
+            if (progress_requested) {
+                progress_requested = 0;
+                // Observation only: never advance time or classify a queued
+                // native event as dispensable to manufacture quiescence.
+                std::cerr << "[NS3_UB_NET_PROGRESS] virtual_ps=" << NowPs()
+                          << " native_tasks=" << native_tasks_.size()
+                          << " pending_target_dma=" << pending_target_executions_.size()
+                          << " scheduled_packets=" << scheduled_packets_
+                          << " outputs_empty=" << OutputsEmpty()
+                          << " native_wqes_submitted=" << native_wqes_submitted_
+                          << " native_wqes_completed=" << native_wqes_completed_
+                          << " native_wqes_failed=" << native_wqes_failed_ << '\n';
+            }
             std::uint64_t now = NowPs();
             bool progress = false;
             bool all_terminated = true;
@@ -1498,6 +1513,7 @@ int main(int argc, char** argv)
     try {
         std::signal(SIGINT, StopProcess);
         std::signal(SIGTERM, StopProcess);
+        std::signal(SIGUSR1, RequestProgress);
         Time::SetResolution(Time::PS);
         UbNetFabric fabric(ParseOptions(argc, argv));
         fabric.Run();
