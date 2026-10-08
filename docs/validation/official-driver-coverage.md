@@ -46,6 +46,17 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest timing gate: [longer WRITE / observed concurrency](write-depth512-timing-20261009.md).
+At400G, fixed inline64/SQ depth512 and2048 operations per direction complete
+with average93.89407 GB/s (`-B`, already combined). Each UDMA observes511
+concurrent issued RMA WQEs and2 SQ wraps, not512 WQEs inferred from native TA
+admission.4096/4096 WQEs,4 GiB,1048576 TA/ACKs, zero retries/errors and work
+drained; wall196.113 s. The harness's erroneous inline/depth coupling was caught
+and fixed; its earlier inline512 attempt is a rejected configuration, not a
+data-path failure. Read-only result auditing now cross-checks actual evidence.
+Next: longer READ/SEND timing, isolated parameter changes, repeated timed
+resource reuse, payload integrity and multi-Jetty/multiport performance.
+
 Latest accepted repair: [stale source retry cancellation](ctp-stale-retry-cancel-20261009.md)
 raises the same200G1 MiB `-B` short-test average from38.38989 to47.62731 GB/s,
 without changing RTO.11254 queued retries reconcile as11104 cancelled,

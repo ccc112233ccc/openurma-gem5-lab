@@ -12,16 +12,19 @@ import signal
 from run_modular_rma_regression import validate_depth_output, validate_bw_scan
 
 
-def write_bw_command(size, port, iterations=64, depth=64, post_list=16, cq_mod=16):
+def write_bw_command(size, port, iterations=64, depth=64, post_list=16, cq_mod=16,
+                     inline_size=64):
     if min(size, port, iterations, depth, post_list, cq_mod) <= 0:
         raise ValueError("WRITE settings must be positive")
     if post_list > depth or cq_mod > depth:
         raise ValueError("WRITE post list and CQ moderation must not exceed SQ depth")
     if iterations % post_list or iterations % cq_mod:
         raise ValueError("WRITE iterations must be divisible by post list and CQ moderation")
+    if inline_size < 0:
+        raise ValueError("WRITE inline size must not be negative")
     return ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest write_bw "
             f"-d udma0 --eid_idx 0 --ctp -B -s {size} -P {port} "
-            f"-J 1 -I {depth} -T {depth} -n {iterations} -l {post_list} -Q {cq_mod} -p 0")
+            f"-J 1 -I {inline_size} -T {depth} -n {iterations} -l {post_list} -Q {cq_mod} -p 0")
 
 
 def observe_drain(root, timeout):
@@ -68,6 +71,25 @@ def observe_drain(root, timeout):
                 scope="Live work snapshots, not global event-queue or checkpoint quiescence")
 
 
+def validate_write_capabilities(text, depth, inline_size):
+    sections = re.split(r"(?m)^--- UART \d+ ---\s*$", text)[1:]
+    if len(sections) != 2:
+        raise ValueError("need capability responses from both guests")
+    limits = []
+    for node, section in enumerate(sections):
+        values = {}
+        for field, requested in (("max_jfs_depth", depth),
+                                 ("max_jfs_inline_size", inline_size)):
+            found = re.findall(r"(?m)^" + field + r"\s*:\s*(\d+)\s*$", section)
+            if len(found) != 1:
+                raise ValueError(f"node{node}: missing unique {field}")
+            values[field] = int(found[0])
+            if requested > values[field]:
+                raise ValueError(f"node{node}: requested {requested} exceeds {field}={values[field]}")
+        limits.append(values)
+    return limits
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("output", type=Path)
@@ -79,6 +101,8 @@ def main():
     p.add_argument("--write-depth", type=int, default=64)
     p.add_argument("--write-post-list", type=int, default=16)
     p.add_argument("--write-cq-mod", type=int, default=16)
+    p.add_argument("--write-inline", type=int, default=64,
+                   help="maximum inline bytes (-I), independent of SQ depth (-T)")
     p.add_argument("--user-read-scan", action="store_true",
                    help="run requested a23/n16384 READ scan, capped to reported queue limits")
     p.add_argument("--read-size", type=int,
@@ -90,7 +114,7 @@ def main():
         try:
             for size in args.sizes:
                 write_bw_command(size, 21410, args.write_iterations, args.write_depth,
-                                 args.write_post_list, args.write_cq_mod)
+                                 args.write_post_list, args.write_cq_mod, args.write_inline)
         except ValueError as error:
             p.error(str(error))
     lab = Path(__file__).resolve().parents[1]
@@ -183,9 +207,20 @@ def main():
                                       "udma-node1/udma", "ub-fabric/ns3"):
                         os.kill(int((root/f"{component}.pid").read_text().strip()), 0)
             return int(failed)
+        if run("capabilities", serial+["--command", "urma_admin show -d udma0 -w"],
+               args.timeout+10): return 1
+        try:
+            records[-1]["write_capabilities"] = validate_write_capabilities(
+                (args.output / "capabilities.txt").read_text(), args.write_depth, args.write_inline)
+        except ValueError as error:
+            records[-1]["validation_errors"] = [str(error)]
+            records[-1]["returncode"] = 1
+            print(f"WRITE capability preflight failed: {error}", flush=True)
+            return 1
         for index, size in enumerate(args.sizes):
             command = write_bw_command(size, 21410 + index, args.write_iterations,
-                                       args.write_depth, args.write_post_list, args.write_cq_mod)
+                                       args.write_depth, args.write_post_list, args.write_cq_mod,
+                                       args.write_inline)
             if run(f"write-{size}", serial+["--stagger", "1", "--commands",
                      command, command+" -S 10.0.0.1"], args.timeout+10): return 1
             errors = validate_depth_output(
