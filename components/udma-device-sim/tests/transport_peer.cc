@@ -122,6 +122,7 @@ int RunHost(const std::string& socket)
             if (response == nullptr) return 15;
             ZeroVolatile(response->completion);
             response->completion.request_id = message->dma.request_id;
+            response->completion.length = message->dma.length;
             response->completion.status = 0;
             host_proto::UbHostH2DOutSend(&interface, response,
                 static_cast<std::uint8_t>(host_proto::H2DType::DmaWriteCompletion));

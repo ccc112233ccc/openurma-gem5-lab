@@ -13,7 +13,10 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <stdexcept>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -128,6 +131,7 @@ void ZeroVolatile(volatile T& object)
 }
 
 class HostPort final : public device::HostInterface {
+    friend struct HostPortTestAccess;
   public:
     HostPort(host_proto::Interface& interface, std::uint64_t& now)
         : interface_(interface), now_(now) {}
@@ -269,7 +273,14 @@ class HostPort final : public device::HostInterface {
         } else if (type == host_proto::H2DType::Lifecycle &&
                    message->lifecycle.action == static_cast<std::uint8_t>(
                        host_proto::LifecycleAction::PrepareSync)) {
+            if (prepare_seen_)
+                throw std::runtime_error("UB-HOST duplicate PREPARE before fence commit");
+            if (message->lifecycle.enabled > 1)
+                throw std::runtime_error("UB-HOST PREPARE has invalid enabled flag");
+            if (generation_seen_ && message->lifecycle.generation <= generation_)
+                throw std::runtime_error("UB-HOST PREPARE generation did not advance");
             prepare_seen_ = true;
+            generation_seen_ = true;
             generation_ = message->lifecycle.generation;
             target_enabled_ = message->lifecycle.enabled != 0;
         }
@@ -281,6 +292,8 @@ class HostPort final : public device::HostInterface {
     struct Pending {
         device::ReadCompletion read;
         device::Completion write;
+        std::size_t requested_length;
+        bool is_read;
     };
 
     std::size_t PayloadCapacity() const
@@ -317,7 +330,7 @@ class HostPort final : public device::HostInterface {
             for (std::size_t i = 0; i < payload->size(); ++i) destination[i] = (*payload)[i];
         }
         pending_.emplace(id, Pending{std::move(read_completion),
-                                     std::move(write_completion)});
+                                     std::move(write_completion), length, read});
         host_proto::UbHostD2HOutSend(
             &interface_, message,
             static_cast<std::uint8_t>(read ? host_proto::D2HType::DmaRead
@@ -352,20 +365,42 @@ class HostPort final : public device::HostInterface {
     {
         const std::uint64_t id = message->completion.request_id;
         auto found = pending_.find(id);
-        if (found == pending_.end()) return;
-        Pending pending = std::move(found->second);
-        pending_.erase(found);
+        const auto invalid = [id](const char* reason) {
+            throw std::runtime_error("UB-HOST DMA completion request=" +
+                                     std::to_string(id) + ": " + reason);
+        };
+        if (found == pending_.end()) invalid("unknown or duplicate request ID");
+        const auto& expected = found->second;
+        const auto expected_type = expected.is_read
+            ? host_proto::H2DType::DmaReadCompletion
+            : host_proto::H2DType::DmaWriteCompletion;
+        if (type != expected_type) invalid("direction does not match request");
+        if (message->completion.status > static_cast<std::uint16_t>(host_proto::Status::InternalError))
+            invalid("unknown status");
         const bool ok = message->completion.status ==
             static_cast<std::uint16_t>(host_proto::Status::Success);
-        if (type == host_proto::H2DType::DmaReadCompletion) {
-            std::vector<std::uint8_t> bytes(message->completion.length);
+        const std::size_t length = message->completion.length;
+        // Existing gem5/QEMU peers echo the requested length. A failed read
+        // may also report zero bytes; failure payload is never inspected.
+        if (length != expected.requested_length && (ok || length != 0))
+            invalid("length does not match request");
+        std::vector<std::uint8_t> bytes;
+        if (expected.is_read && ok) {
+            const std::size_t entry_bytes = interface_.base.in_elen;
+            if (entry_bytes < sizeof(host_proto::H2DMessage) ||
+                length > entry_bytes - sizeof(host_proto::H2DMessage))
+                invalid("read payload exceeds incoming ring entry");
+            bytes.resize(length);
             const auto* source = reinterpret_cast<volatile std::uint8_t*>(message) +
                                  sizeof(host_proto::H2DMessage);
             for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = source[i];
-            if (pending.read) pending.read(ok, std::move(bytes));
-        } else if (pending.write) {
-            pending.write(ok);
         }
+        // Validate and copy before releasing ownership. A malformed completion
+        // cannot discard the real callback or pretend that DMA was cancelled.
+        Pending pending = std::move(found->second);
+        pending_.erase(found);
+        if (pending.is_read) pending.read(ok, std::move(bytes));
+        else pending.write(ok);
     }
 
     host_proto::Interface& interface_;
@@ -374,6 +409,7 @@ class HostPort final : public device::HostInterface {
     std::uint64_t next_request_{1};
     std::unordered_map<std::uint64_t, Pending> pending_;
     bool prepare_seen_{false};
+    bool generation_seen_{};
     bool target_enabled_{false};
     std::uint64_t generation_{};
     std::uint64_t async_timestamp_jumps_{};
@@ -388,9 +424,11 @@ class NetworkPort final : public device::NetworkInterface {
         : interface_(interface), now_(now) {}
     void Attach(device::UdmaModel* model) { model_ = model; }
     bool CommitSeen() const { return commit_seen_; }
+    bool FencePending() const { return prepare_sent_ || commit_seen_; }
     bool CommitEnabled() const { return commit_enabled_; }
-    void FinishFence() { commit_seen_ = false; }
-    bool PendingEmpty() const { return outgoing_.empty(); }
+    std::uint64_t CommitGeneration() const { return commit_generation_; }
+    void FinishFence() { commit_seen_ = false; prepare_sent_ = false; }
+    bool PendingEmpty() const { return outgoing_.empty() && fragments_.empty(); }
     std::uint64_t FragmentsQueued() const { return fragments_queued_; }
     std::uint64_t FragmentsSent() const { return fragments_sent_; }
     std::uint64_t SendBackpressure() const { return send_backpressure_; }
@@ -399,6 +437,7 @@ class NetworkPort final : public device::NetworkInterface {
 
     bool SendPrepare(std::uint64_t generation, bool enabled)
     {
+        if (prepare_sent_) throw std::runtime_error("duplicate network lifecycle prepare");
         auto* message = net_proto::UbNetOutAlloc(&interface_, now_);
         if (message == nullptr) return false;
         ZeroVolatile(message->lifecycle);
@@ -408,6 +447,9 @@ class NetworkPort final : public device::NetworkInterface {
         message->lifecycle.enabled = enabled ? 1 : 0;
         net_proto::UbNetOutSend(&interface_, message,
             static_cast<std::uint8_t>(net_proto::MessageType::Lifecycle));
+        prepare_sent_ = true;
+        prepare_generation_ = generation;
+        prepare_enabled_ = enabled;
         return true;
     }
 
@@ -423,6 +465,9 @@ class NetworkPort final : public device::NetworkInterface {
             outgoing_.push_back(std::move(pending));
             return;
         }
+        if (net_proto::UbNetOutMsgLen(&interface_) <=
+            sizeof(net_proto::Message) + sizeof(net_proto::UdmaWireHeader))
+            return pending.completion(false);
         const std::size_t ring_capacity = net_proto::UbNetOutMsgLen(&interface_) -
                                           sizeof(net_proto::Message) -
                                           sizeof(net_proto::UdmaWireHeader);
@@ -552,6 +597,9 @@ class NetworkPort final : public device::NetworkInterface {
         const auto type = static_cast<net_proto::MessageType>(
             net_proto::UbNetInType(&interface_, message));
         if (type == net_proto::MessageType::Frame && model_ != nullptr) {
+            if (interface_.base.in_elen < sizeof(net_proto::Message) ||
+                message->frame.length > interface_.base.in_elen - sizeof(net_proto::Message))
+                throw std::runtime_error("network frame exceeds inbound ring slot");
             device::Frame frame{};
             frame.sequence = message->frame.sequence;
             frame.source_eid = message->frame.source_eid;
@@ -565,6 +613,10 @@ class NetworkPort final : public device::NetworkInterface {
             if (frame.bytes.size() >= sizeof(net_proto::UdmaWireHeader)) {
                 net_proto::UdmaWireHeader header{};
                 std::memcpy(&header, frame.bytes.data(), sizeof(header));
+                if (header.magic == net_proto::kUdmaWireMagic &&
+                    (header.version != net_proto::kUdmaWireVersion ||
+                     header.payload_length != frame.bytes.size() - sizeof(header)))
+                    throw std::runtime_error("malformed UDMA wire header");
                 if (header.magic == net_proto::kUdmaWireMagic &&
                     header.version == net_proto::kUdmaWireVersion &&
                     frame.bytes.size() == sizeof(header) + header.payload_length) {
@@ -585,18 +637,38 @@ class NetworkPort final : public device::NetworkInterface {
                                       frame.bytes.begin() + sizeof(header));
                     if ((header.flags & net_proto::kUdmaWireFragmented) &&
                         !(header.flags & net_proto::kUdmaWireCtpSegment)) {
-                        auto& partial = fragments_[frame.sequence];
+                        const bool last = header.flags & net_proto::kUdmaWireLastFragment;
+                        if (!header.transfer_length || !header.payload_length ||
+                            header.payload_offset > header.transfer_length ||
+                            header.payload_length > header.transfer_length - header.payload_offset ||
+                            last != (header.payload_length == header.transfer_length - header.payload_offset))
+                            throw std::runtime_error("invalid fragment extent or last flag");
+                        const auto fragment_key = std::make_pair(frame.source_eid, frame.sequence);
+                        auto existing = fragments_.find(fragment_key);
+                        if ((header.payload_offset == 0) != (existing == fragments_.end()))
+                            throw std::runtime_error("missing or repeated first fragment");
+                        auto& partial = fragments_[fragment_key];
                         if (header.payload_offset == 0) {
                             partial.frame = frame;
                             partial.frame.bytes.clear();
-                            partial.frame.bytes.reserve(header.transfer_length);
                             partial.next_offset = 0;
                         }
-                        if (header.payload_offset != partial.next_offset) {
-                            fragments_.erase(frame.sequence);
-                            net_proto::UbNetInDone(&interface_, message);
-                            return true;
-                        }
+                        if (header.payload_offset != partial.next_offset ||
+                            header.transfer_length != partial.frame.transfer_length ||
+                            frame.source_eid != partial.frame.source_eid ||
+                            frame.destination_eid != partial.frame.destination_eid ||
+                            frame.source_port != partial.frame.source_port ||
+                            frame.destination_port != partial.frame.destination_port ||
+                            frame.operation != partial.frame.operation ||
+                            frame.order_type != partial.frame.order_type ||
+                            frame.tpn != partial.frame.tpn ||
+                            frame.segment != partial.frame.segment ||
+                            frame.remote_address != partial.frame.remote_address ||
+                            frame.immediate != partial.frame.immediate ||
+                            frame.source_jetty != partial.frame.source_jetty ||
+                            frame.destination_jetty != partial.frame.destination_jetty ||
+                            frame.request_id != partial.frame.request_id)
+                            throw std::runtime_error("fragment metadata or offset changed");
                         partial.frame.bytes.insert(partial.frame.bytes.end(),
                                                    frame.bytes.begin(),
                                                    frame.bytes.end());
@@ -606,7 +678,7 @@ class NetworkPort final : public device::NetworkInterface {
                             return true;
                         }
                         frame = std::move(partial.frame);
-                        fragments_.erase(frame.sequence);
+                        fragments_.erase(fragment_key);
                     }
                 }
             }
@@ -619,6 +691,11 @@ class NetworkPort final : public device::NetworkInterface {
         } else if (type == net_proto::MessageType::Lifecycle &&
                    message->lifecycle.action == static_cast<std::uint8_t>(
                        net_proto::LifecycleAction::CommitSync)) {
+            if (!prepare_sent_ || commit_seen_ ||
+                message->lifecycle.generation != prepare_generation_ ||
+                message->lifecycle.enabled > 1 ||
+                (message->lifecycle.enabled != 0) != prepare_enabled_)
+                throw std::runtime_error("unsolicited, stale or mismatched network commit");
             commit_seen_ = true;
             commit_generation_ = message->lifecycle.generation;
             commit_enabled_ = message->lifecycle.enabled != 0;
@@ -643,16 +720,31 @@ class NetworkPort final : public device::NetworkInterface {
     std::uint64_t& now_;
     device::UdmaModel* model_{nullptr};
     bool commit_seen_{false};
+    bool prepare_sent_{};
+    bool prepare_enabled_{};
+    std::uint64_t prepare_generation_{};
     bool commit_enabled_{false};
     std::uint64_t commit_generation_{};
     std::deque<PendingSend> outgoing_;
-    std::unordered_map<std::uint64_t, PartialFrame> fragments_;
+    std::map<std::pair<std::uint32_t, std::uint64_t>, PartialFrame> fragments_;
     std::uint64_t fragments_queued_{};
     std::uint64_t fragments_sent_{};
     std::uint64_t send_backpressure_{};
     std::uint64_t async_timestamp_jumps_{};
     std::uint64_t async_timestamp_jump_ps_{};
 };
+
+bool SaveDeviceState(const std::string& path, const HostPort& host,
+                     const NetworkPort& network, const device::UdmaModel& model)
+{
+    // Adapter queues/fence state are not part of the model's serialized state.
+    // Refuse before opening the file, preserving any earlier valid checkpoint.
+    if (!host.PendingEmpty() || !network.PendingEmpty() ||
+        host.PrepareSeen() || network.FencePending() || !model.IsQuiescent())
+        return false;
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    return output && model.SaveState(output);
+}
 
 int Run(const Options& options)
 {
@@ -770,7 +862,8 @@ int Run(const Options& options)
             host.PendingEmpty() && network.PendingEmpty() &&
             model.IsQuiescent()) {
             const bool enable = host.TargetEnabled();
-            if (network.CommitEnabled() != enable || enable == lifecycle_active) {
+            if (network.CommitGeneration() != host.Generation() ||
+                network.CommitEnabled() != enable || enable == lifecycle_active) {
                 std::cerr << "udma-device-sim: lifecycle target mismatch\n";
                 return 4;
             }
@@ -892,9 +985,7 @@ int Run(const Options& options)
               << model.last_unknown_queue_offset() << std::dec
               << " ubase_errors=" << model.ubase_errors() << '\n';
     if (!options.state_out.empty()) {
-        std::ofstream output(options.state_out,
-                             std::ios::binary | std::ios::trunc);
-        if (!output || !model.SaveState(output)) {
+        if (!SaveDeviceState(options.state_out, host, network, model)) {
             std::cerr << "udma-device-sim: device was not quiescent; state not saved\n";
             return 4;
         }
@@ -924,5 +1015,13 @@ int main(int argc, char** argv)
     }
     std::signal(SIGINT, Stop);
     std::signal(SIGTERM, Stop);
-    return Run(options);
+    try {
+        return Run(options);
+    } catch (const std::exception& error) {
+        // Fail-stop only: host DMA may remain live. Do not claim a reset or
+        // enter SimBricks Close(), which can wait forever on a full peer ring.
+        std::cerr << "udma-device-sim: fail-stop: " << error.what()
+                  << "; host stop/drain still required, state not saved\n";
+        return 4;
+    }
 }

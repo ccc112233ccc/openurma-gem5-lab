@@ -313,6 +313,57 @@ not implemented fixes. Address them before claiming loss/reset robustness.
 
 ## Next priority gaps
 
+### Transport validation increment (2026-10-08)
+
+The next increment addresses malformed messages before attempting reconnect:
+
+- Host DMA completions must match a live ID, requested direction, status,
+  length and inbound payload capacity before pending ownership is released.
+  Failed reads never copy payload. Malformed completions do not call the
+  original completion callback or erase it before the device exits.
+- Host PREPARE cannot overwrite an in-flight fence. Network COMMIT must match
+  the generation and target of a successfully sent PREPARE; unsolicited,
+  stale/future or duplicate COMMIT is a protocol error. Run also checks the
+  host/network generation before rebasing time.
+  A later host PREPARE must advance generation, matching both official adapter
+  implementations' increment-on-request behavior.
+- Network idle checks include partial incoming frames. Network payload length
+  is bounded by the actual ring slot before allocation/copy. Recognized UDMA
+  wire headers and non-CTP fragment bounds, final-fragment flags, offsets and
+  stable metadata are validated. Untrusted transfer length no longer drives
+  a large upfront reserve. Reassembly keys include source EID and sequence.
+- These protocol violations terminate the device with exit status 4 and an
+  explicit diagnostic, without checkpointing or entering the potentially
+  blocking normal SimBricks Close path. This is **device-only fail-stop**:
+  the host may still have DMA in flight and must be stopped/drained by the
+  orchestrator. It is not hot reset, reconnect, or coordinated shutdown.
+- Independent final review caught a separate shutdown-checkpoint path that
+  checked only the model. `SaveDeviceState` now checks both adapters, partial
+  frames and pending fences before opening/truncating the destination. Tests
+  preserve a sentinel checkpoint while a half-frame/fence is pending, then
+  permit saving after completion. A model-only quiescent result is insufficient.
+
+The graceful/abrupt peer-loss path, bounded normal close, host stop/drain
+coordination and epoch-based recovery remain separate work. Fragment validation
+does not yet establish a global reassembly-memory budget or partial-frame
+timeout policy.
+
+Validation: clean build **5.20 s**. New host/network validation tests passed,
+but the first complete run failed the old process-contract fixture: mock WRITE
+completion omitted length. Actual gem5/QEMU both echo it. Correcting that
+fixture (not weakening validation) rebuilt in **0.48 s**, then **9/9 passed
+in 0.59 s**. Final monotonic-generation guard rebuilt in **1.33 s**, with
+**9/9 passed in 1.98 s**. That binary passed **12/12** dual-QEMU official
+perftest cases in **28.995 s** (wrapper **31.26 s**); local evidence is
+`experiments/transport-validation-qemu-20261008-final/`. No-sync QEMU does not
+exercise live lifecycle rebasing; lifecycle corruption checks have native
+ring-level evidence only. No gem5 cold boot was used.
+The subsequent shutdown-checkpoint guard changes were validated natively;
+they do not change the dataplane and were not separately rerun on guests.
+Final build/test with that guard: **1.11 s / 1.34 s**, **9/9 passed**.
+
+### Remaining broader driver gaps
+
 1. Enumerate every UBASE/mailbox/CtrlQ command into explicit implemented,
    accepted-no-op or rejected categories; remove false-success paths safely.
 2. Expand driver-visible error coverage beyond the validated command branches;

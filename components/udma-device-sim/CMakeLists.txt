@@ -25,6 +25,21 @@ target_compile_options(udma-device-sim PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(udma-host-completion-test tests/host_completion_test.cc)
+    target_include_directories(udma-host-completion-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+    target_link_libraries(udma-host-completion-test PRIVATE ubsim_udma_model simbricks_base)
+    target_compile_features(udma-host-completion-test PRIVATE cxx_std_17)
+    target_compile_options(udma-host-completion-test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME udma_host_completion_validation COMMAND udma-host-completion-test)
+    add_executable(udma-network-validation-test tests/network_validation_test.cc)
+    target_include_directories(udma-network-validation-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+    target_include_directories(udma-network-validation-test SYSTEM PRIVATE "${SIMBRICKS_ROOT}/lib")
+    target_link_libraries(udma-network-validation-test PRIVATE ubsim_udma_model simbricks_base)
+    target_compile_features(udma-network-validation-test PRIVATE cxx_std_17)
+    target_compile_options(udma-network-validation-test PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME udma_network_validation COMMAND udma-network-validation-test)
     add_executable(udma-transport-peer tests/transport_peer.cc)
     target_include_directories(udma-transport-peer PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/../..")
