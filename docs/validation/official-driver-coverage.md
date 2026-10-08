@@ -251,21 +251,65 @@ until their namespace is reviewed; this is not a hardware-implementation check.
 
 ### Next autonomous acceptance priorities
 
-1. Track remote READ/WRITE service DMA in checkpoint quiescence and resource
-   lifetime; review found these can currently be omitted from `IsQuiescent()`.
-2. Validate READ response interval coverage, not just TA uniqueness and total
-   bytes: distinct TAs with overlapping offsets must not falsely complete.
-3. Define cancellation/reset with transport quiescence for missing callbacks
+The remote-service quiescence and response-interval priorities were closed by
+the sixth implementation below. Remaining priorities:
+
+1. Define cancellation/reset with transport quiescence for missing callbacks
    or ACKs. Never time out successfully while a DMA can still land.
-4. Expand complete driver unload/reload, multi-Entity/multiport and error-path
+2. Expand complete driver unload/reload, multi-Entity/multiport and error-path
    full-system evidence after those native contracts pass.
-5. Continue removing completion-only operations by official caller semantics;
+3. Continue removing completion-only operations by official caller semantics;
    explicit unsupported errors are not equivalent to implemented features.
 
 The thread has an hourly continuation automation (`ubsim`) to advance this
 list with separate implementation/acceptance agents, save local milestones,
 and report meaningful results or decisions. This is a continuation mechanism,
 not a declaration that item 2 is complete.
+
+## Sixth implementation: remote-service quiescence and byte coverage
+
+Remote READ/WRITE now hold a service lease from valid request acceptance until
+all token DMA and the final response/ACK/error-send callback finish.
+`IsQuiescent`, checkpoint save/restore and time rebasing respect these leases.
+Failed DMA sends RmaError rather than a success-shaped ACK; a failed network
+send also releases exactly one lease. These one-sided operations address a
+segment token and remote address, so no unsupported Jetty ownership is invented.
+Malformed zero-length or wrapping-address requests are rejected before DMA.
+
+READ responses reserve sorted, non-overlapping byte ranges **before** DMA,
+in addition to reserving TA numbers. Distinct TAs cannot write the same range
+twice or falsely complete while leaving a hole. Adjacent ranges, out-of-order
+arrival and out-of-order DMA remain valid. Bounds checks use subtraction to
+avoid overflow; a last valid byte equal to UINT64_MAX is accepted. WRITE ACKs
+now enforce the same range uniqueness and overflow-safe accumulation.
+
+Native tests exercise concurrent remote services; delayed DMA and network
+completion; synchronous/asynchronous failure; multi-page failure drain;
+checkpoint guards at each phase; identical/partial/containing overlaps;
+duplicate TAs; malformed lengths; integer boundaries; successful reordered
+coverage; and rejection of new valid fragments after a request has failed.
+Independent acceptance found no P1 in these changes.
+
+Clean build: **5.36 s**. Initial **7/7 CTests passed in 3.42 s**. Additional
+highest-address/failed-request assertions rebuilt in **1.31 s** and passed
+**7/7 in 0.81 s**. The production binary then passed the full dual-QEMU
+official perftest matrix **12/12**, suite **28.999 s**, wrapper **31.28 s**.
+Local evidence: `experiments/official-coverage-qemu-20261008-c/`.
+
+Next recovery boundary: current SimBricks termination does not acknowledge
+cancellation of already accepted host DMA. HostPort has pending callbacks but
+no cancel/drained protocol; gem5 timing DMA may still complete later. First
+implement fail-stop and coordinated host shutdown on loss, then define an
+explicit drain/acknowledgement plus epoch protocol before any hot reset or
+guest-memory reuse. Returning fake successful teardown is not an alternative.
+
+Read-only transport review also identified concrete next regression targets:
+`NetworkPort::PendingEmpty()` omits partial `fragments_`; CommitSync does not
+validate its generation; `HostPort::HandleDmaCompletion` removes a pending
+callback before validating completion type and does not fully check length;
+abrupt process loss needs control-socket HUP detection, and the normal
+SimBricks close path can spin if the outbound ring is full. These are findings,
+not implemented fixes. Address them before claiming loss/reset robustness.
 
 ## Next priority gaps
 

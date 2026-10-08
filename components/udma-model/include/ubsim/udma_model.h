@@ -307,6 +307,9 @@ class UdmaModel {
     std::uint32_t draining_queue_id_{};
     std::function<void()> pending_queue_destroy_;
     std::unordered_map<std::uint32_t, std::uint32_t> read_response_dma_;
+    // One-sided remote services own token-addressed memory, not a local Jetty.
+    // Hold the model lease until both DMA and response transmission complete.
+    std::size_t remote_services_in_flight_{};
     void ReceiveSend(std::shared_ptr<Frame> frame);
     void ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
                     std::uint32_t rqe_index, std::uint32_t sge_index,
@@ -548,6 +551,8 @@ class UdmaModel {
         std::uint32_t response_dma{};
         std::uint32_t accepted_bytes{};
         bool failed{};
+        // Sorted, non-overlapping byte intervals reserved before response DMA.
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> response_ranges{};
     };
     std::unordered_map<std::uint64_t, PendingRma> pending_rma_;
 };

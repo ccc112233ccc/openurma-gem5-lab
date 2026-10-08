@@ -45,4 +45,9 @@ if(BUILD_TESTING)
     target_compile_options(udma_lifecycle_test PRIVATE
         -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
     add_test(NAME udma_lifecycle_drain COMMAND udma_lifecycle_test)
+    add_executable(udma_remote_service_test tests/remote_service_test.cc)
+    target_link_libraries(udma_remote_service_test PRIVATE ubsim_udma_model)
+    target_compile_options(udma_remote_service_test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME udma_remote_service_drain COMMAND udma_remote_service_test)
 endif()

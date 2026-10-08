@@ -8,6 +8,7 @@
 #include <functional>
 #include <iosfwd>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -207,13 +208,120 @@ int main() {
         f.AssertDestroyed(false);
         assert(!f.model.receive_busy_);
     }
+    // Distinct TA numbers are not enough: their byte intervals must partition
+    // the destination, including when packets and DMA callbacks are reordered.
+    {
+        Fixture f;
+        auto& request = f.model.pending_rma_[123];
+        request.jetty_id = 9; request.producer = 1; request.wqebbs = 1;
+        request.opcode = 6; request.byte_count = 12;
+        request.local_address = Payload; request.completion = true;
+        f.model.jetty_contexts_.at(9).busy = true;
+        const auto response = [](unsigned ta, unsigned offset, unsigned length) {
+            d::Frame frame{};
+            frame.operation = d::Frame::Operation::ReadResponse;
+            frame.request_id = 123; frame.ta_ssn = ta;
+            frame.transaction_offset = offset; frame.transfer_length = length;
+            frame.bytes.assign(length, static_cast<std::uint8_t>(ta));
+            return frame;
+        };
+        f.host.delayed_write = Payload + 4;
+        f.model.Receive(response(1, 4, 4));
+        assert(f.host.pending.size() == 1);
+        unsigned ta = 2;
+        for (const auto& interval : std::vector<std::pair<unsigned, unsigned>>{
+                 {4, 4}, {3, 3}, {6, 3}, {0, 8}, {0, 0}, {12, 1},
+                 {std::numeric_limits<unsigned>::max(), 1}}) {
+            const auto errors = f.model.ubase_errors();
+            f.model.Receive(response(ta++, interval.first, interval.second));
+            assert(f.model.ubase_errors() == errors + 1);
+            assert(request.accepted_bytes == 4 && request.response_ranges.size() == 1);
+            assert(request.completed_tassns.size() == 1 && f.host.pending.size() == 1);
+        }
+        auto mismatch = response(ta++, 0, 4); mismatch.bytes.pop_back();
+        f.model.Receive(mismatch);
+        f.model.Receive(response(1, 0, 4)); // same TA, otherwise disjoint
+        assert(request.accepted_bytes == 4 && f.host.pending.size() == 1);
+        f.host.delayed_write = Payload + 8;
+        f.model.Receive(response(ta++, 8, 4));
+        f.host.delayed_write = Payload;
+        f.model.Receive(response(ta++, 0, 4));
+        assert(request.accepted_bytes == 12 && f.host.pending.size() == 3);
+        // Release last-accepted DMA first, leaving a hole until the others end.
+        auto last = std::move(f.host.pending.back()); f.host.pending.pop_back();
+        last(true);
+        assert(f.model.pending_rma_.count(123) && !f.host.memory.count(Cq));
+        f.host.Finish();
+        assert(f.model.pending_rma_.count(123) && !f.host.memory.count(Cq));
+        f.host.Finish();
+        assert(f.model.pending_rma_.empty() && f.model.sq_completions() == 1);
+        assert(f.host.memory.at(Cq)[3] == 0);
+    }
+    {
+        Fixture f;
+        auto& request = f.model.pending_rma_[123];
+        request.opcode = 6; request.byte_count = 4;
+        request.local_address = std::numeric_limits<std::uint64_t>::max() - 1;
+        d::Frame frame{};
+        frame.operation = d::Frame::Operation::ReadResponse;
+        frame.request_id = 123; frame.transfer_length = 4; frame.bytes.resize(4);
+        const auto errors = f.model.ubase_errors();
+        f.model.Receive(frame);
+        assert(f.model.ubase_errors() == errors + 1);
+        assert(!request.accepted_bytes && request.response_ranges.empty());
+        assert(f.host.pending.empty() && f.model.read_response_dma_.empty());
+    }
+    // The last valid byte may equal UINT64_MAX: only wraparound is invalid.
+    {
+        Fixture f;
+        auto& request = f.model.pending_rma_[123];
+        request.jetty_id = 9; request.producer = 1; request.wqebbs = 1;
+        request.opcode = 6; request.byte_count = 4; request.completion = true;
+        request.local_address = std::numeric_limits<std::uint64_t>::max() - 3;
+        f.model.jetty_contexts_.at(9).busy = true;
+        const auto page = request.local_address & ~std::uint64_t{4095};
+        f.model.iotlb_[(std::uint64_t{1} << 63) | (page >> 12)] = page;
+        d::Frame frame{};
+        frame.operation = d::Frame::Operation::ReadResponse;
+        frame.request_id = 123; frame.transfer_length = 4; frame.bytes.assign(4, 0xab);
+        f.model.Receive(frame);
+        assert(f.model.pending_rma_.empty() && f.model.sq_completions() == 1);
+        assert(f.host.memory.at(std::numeric_limits<std::uint64_t>::max() - 3) ==
+               std::vector<std::uint8_t>(4, 0xab));
+    }
+    // WRITE ACKs also carry offsets; distinct TA numbers must not acknowledge
+    // the same bytes twice or wrap the completed-byte arithmetic.
+    {
+        Fixture f;
+        auto& request = f.model.pending_rma_[123];
+        request.jetty_id = 9; request.producer = 1; request.wqebbs = 1;
+        request.opcode = 3; request.byte_count = 12; request.completion = true;
+        f.model.jetty_contexts_.at(9).busy = true;
+        d::Frame ack{};
+        ack.operation = d::Frame::Operation::WriteAck;
+        ack.request_id = 123; ack.transfer_length = 4; ack.transaction_offset = 4;
+        f.model.Receive(ack);
+        ack.ta_ssn = 1;
+        const auto errors = f.model.ubase_errors();
+        f.model.Receive(ack);
+        assert(f.model.ubase_errors() == errors + 1 && request.completed_bytes == 4);
+        ack.transfer_length = std::numeric_limits<std::uint32_t>::max();
+        f.model.Receive(ack);
+        assert(request.completed_bytes == 4 && request.response_ranges.size() == 1);
+        ack.transfer_length = 4; ack.transaction_offset = 8;
+        f.model.Receive(ack);
+        assert(request.completed_bytes == 8 && !f.host.memory.count(Cq));
+        ack.ta_ssn = 2; ack.transaction_offset = 0;
+        f.model.Receive(ack);
+        assert(f.model.pending_rma_.empty() && f.model.sq_completions() == 1);
+    }
     // READ error retirement cannot release the destination while two response
     // DMAs are live. Exercise both a peer RmaError and a local DMA failure.
     for (bool peer_error : {true, false}) {
         Fixture f;
         auto& request = f.model.pending_rma_[123];
         request.jetty_id = 9; request.producer = 1; request.wqebbs = 1;
-        request.opcode = 6; request.byte_count = 6;
+        request.opcode = 6; request.byte_count = 9;
         request.local_address = Payload;
         request.completion = true;
         f.model.jetty_contexts_.at(9).busy = true;
@@ -240,6 +348,10 @@ int main() {
         f.host.Finish(peer_error);
         assert(!f.host.memory.count(Csq) && !f.host.memory.count(Cq));
         assert(f.model.pending_rma_.count(123));
+        response.ta_ssn = 2; response.transaction_offset = 6;
+        f.model.Receive(response); // valid final range, but request already failed
+        assert(f.host.pending.size() == 1);
+        assert(f.model.pending_rma_.at(123).accepted_bytes == 6);
         f.host.Finish();
         f.AssertDestroyed(true);
         assert(f.host.memory.at(Cq)[3] == 5); // Error CQE only after final DMA.

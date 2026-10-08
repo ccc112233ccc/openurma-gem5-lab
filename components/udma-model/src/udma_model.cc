@@ -2775,6 +2775,7 @@ bool
 UdmaModel::IsQuiescent() const
 {
     if (ubios_busy_ || ubase_busy_ || pending_queue_destroy_ ||
+        remote_services_in_flight_ ||
         pending_jfc_destroy_ || pending_eq_destroy_ ||
         active_receive_jfr_ || active_receive_jetty_ || !read_response_dma_.empty() ||
         aeq_in_flight_ || !mailbox_events_.empty() ||
@@ -2916,6 +2917,7 @@ UdmaModel::LoadState(std::istream& input)
     active_receive_jfr_.reset();
     active_receive_jetty_.reset();
     read_response_dma_.clear();
+    remote_services_in_flight_ = 0;
     pending_.clear();
     receive_frames_.clear();
     pending_rma_.clear();
@@ -2926,11 +2928,14 @@ UdmaModel::LoadState(std::istream& input)
 void
 UdmaModel::ReceiveWrite(Frame frame)
 {
-    if (!frame.remote_address || frame.bytes.size() != frame.transfer_length) {
+    if (!frame.remote_address || !frame.transfer_length ||
+        frame.transfer_length - 1 > UINT64_MAX - frame.remote_address ||
+        frame.bytes.size() != frame.transfer_length) {
         ++ubase_errors_;
         return;
     }
     const Frame reply_basis = frame;
+    ++remote_services_in_flight_;
     WriteToken(frame.segment, frame.remote_address,
                         std::move(frame.bytes),
         [this, reply_basis](bool ok) mutable {
@@ -2942,7 +2947,6 @@ UdmaModel::ReceiveWrite(Frame frame)
                           << " bytes=" << reply_basis.transfer_length
                           << " request=" << reply_basis.request_id << '\n';
                 ++ubase_errors_;
-                return;
             }
             Frame ack{};
             ack.sequence = next_sequence_++;
@@ -2950,7 +2954,7 @@ UdmaModel::ReceiveWrite(Frame frame)
             ack.destination_eid = reply_basis.source_eid;
             ack.source_port = reply_basis.destination_port;
             ack.destination_port = reply_basis.source_port;
-            ack.operation = Frame::Operation::WriteAck;
+            ack.operation = ok ? Frame::Operation::WriteAck : Frame::Operation::RmaError;
             ack.source_jetty = reply_basis.destination_jetty;
             ack.destination_jetty = reply_basis.source_jetty;
             ack.tpn = reply_basis.tpn;
@@ -2960,6 +2964,7 @@ UdmaModel::ReceiveWrite(Frame frame)
             ack.transfer_length = reply_basis.transfer_length;
             network_.Send(std::move(ack), [this](bool sent) {
                 if (!sent) ++ubase_errors_;
+                --remote_services_in_flight_;
             });
         }, config_.dma_max_outstanding);
 }
@@ -2967,15 +2972,18 @@ UdmaModel::ReceiveWrite(Frame frame)
 void
 UdmaModel::ReceiveReadRequest(Frame frame)
 {
-    if (!frame.remote_address || !frame.transfer_length) {
+    if (!frame.remote_address || !frame.transfer_length ||
+        frame.transfer_length - 1 > UINT64_MAX - frame.remote_address) {
         ++ubase_errors_;
         return;
     }
     const Frame reply_basis = frame;
+    ++remote_services_in_flight_;
     ReadToken(frame.segment, frame.remote_address,
                        frame.transfer_length,
         [this, reply_basis](bool ok, std::vector<std::uint8_t> payload) mutable {
-            if (!ok || payload.size() != reply_basis.transfer_length) {
+            const bool success = ok && payload.size() == reply_basis.transfer_length;
+            if (!success) {
                 std::cerr << "udma-model: remote READ translation failed"
                           << " token=" << reply_basis.segment
                           << " address=0x" << std::hex
@@ -2984,7 +2992,6 @@ UdmaModel::ReceiveReadRequest(Frame frame)
                           << " received=" << payload.size()
                           << " request=" << reply_basis.request_id << '\n';
                 ++ubase_errors_;
-                return;
             }
             Frame response{};
             response.sequence = next_sequence_++;
@@ -2992,7 +2999,8 @@ UdmaModel::ReceiveReadRequest(Frame frame)
             response.destination_eid = reply_basis.source_eid;
             response.source_port = reply_basis.destination_port;
             response.destination_port = reply_basis.source_port;
-            response.operation = Frame::Operation::ReadResponse;
+            response.operation = success ? Frame::Operation::ReadResponse :
+                                           Frame::Operation::RmaError;
             response.source_jetty = reply_basis.destination_jetty;
             response.destination_jetty = reply_basis.source_jetty;
             response.tpn = reply_basis.tpn;
@@ -3000,9 +3008,10 @@ UdmaModel::ReceiveReadRequest(Frame frame)
             response.transfer_length = reply_basis.transfer_length;
             response.ta_ssn = reply_basis.ta_ssn;
             response.transaction_offset = reply_basis.transaction_offset;
-            response.bytes = std::move(payload);
+            if (success) response.bytes = std::move(payload);
             network_.Send(std::move(response), [this](bool sent) {
                 if (!sent) ++ubase_errors_;
+                --remote_services_in_flight_;
             });
         }, config_.dma_max_outstanding);
 }
@@ -3018,10 +3027,23 @@ UdmaModel::ReceiveWriteAck(Frame frame)
     PendingRma& progress = found->second;
     if (frame.transfer_length == 0 ||
         progress.completed_tassns.count(frame.ta_ssn) != 0 ||
-        progress.completed_bytes + frame.transfer_length > progress.byte_count) {
+        frame.transaction_offset > progress.byte_count ||
+        frame.transfer_length > progress.byte_count - frame.transaction_offset ||
+        frame.transfer_length > progress.byte_count - progress.completed_bytes) {
         ++ubase_errors_;
         return;
     }
+    auto& ranges = progress.response_ranges;
+    const auto begin = frame.transaction_offset;
+    const auto end = begin + frame.transfer_length;
+    const auto next = std::lower_bound(ranges.begin(), ranges.end(), begin,
+        [](const auto& range, std::uint32_t offset) { return range.first < offset; });
+    if ((next != ranges.end() && next->first < end) ||
+        (next != ranges.begin() && (next - 1)->second > begin)) {
+        ++ubase_errors_;
+        return;
+    }
+    ranges.insert(next, {begin, end});
     progress.completed_tassns.emplace(frame.ta_ssn, true);
     progress.completed_bytes += frame.transfer_length;
     if (progress.completed_bytes != progress.byte_count) return;
@@ -3043,6 +3065,8 @@ UdmaModel::ReceiveReadResponse(Frame frame)
         frame.transaction_offset > found->second.byte_count ||
         frame.transfer_length > found->second.byte_count - frame.transaction_offset ||
         frame.transfer_length > found->second.byte_count - found->second.accepted_bytes ||
+        (found->second.byte_count && found->second.byte_count - 1ULL >
+            std::numeric_limits<std::uint64_t>::max() - found->second.local_address) ||
         found->second.completed_tassns.count(frame.ta_ssn) != 0) {
         ++ubase_errors_;
         return;
@@ -3051,6 +3075,17 @@ UdmaModel::ReceiveReadResponse(Frame frame)
     const std::uint32_t ta_ssn = frame.ta_ssn;
     const std::uint32_t transfer_length = frame.transfer_length;
     const std::uint32_t jetty_id = found->second.jetty_id;
+    auto& ranges = found->second.response_ranges;
+    const auto begin = frame.transaction_offset;
+    const auto end = begin + transfer_length; // bounded by byte_count above
+    const auto next = std::lower_bound(ranges.begin(), ranges.end(), begin,
+        [](const auto& range, std::uint32_t offset) { return range.first < offset; });
+    if ((next != ranges.end() && next->first < end) ||
+        (next != ranges.begin() && (next - 1)->second > begin)) {
+        ++ubase_errors_;
+        return;
+    }
+    ranges.insert(next, {begin, end});
     // Reserve the TA before issuing asynchronous writes. Duplicate packets
     // must not submit a second DMA into the same destination while one is live.
     found->second.completed_tassns.emplace(ta_ssn, false);
