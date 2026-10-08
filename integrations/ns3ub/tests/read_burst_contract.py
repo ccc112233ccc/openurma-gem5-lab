@@ -65,6 +65,12 @@ finally:
 text = (a.output / "adapter.log").read_text()
 stats = [line for line in text.splitlines() if line.startswith("[NS3_UB_NET_STATS]")]
 result["stats"] = dict((k, int(v)) for k, v in re.findall(r"(\w+)=(\d+)(?=\s|$)", stats[-1])) if stats else {}
+scope = re.search(r"\bctp_native_max_outstanding_scope=(\S+)", stats[-1]) if stats else None
+result["ctp_outstanding_scope"] = scope.group(1) if scope else None
+# count is submitted WQEs per peer; each 64 KiB READ requires sixteen TAs.
+# The native context window is a TA window, not a count of active WQEs.
+result["workload_geometry"] = dict(submitted_wqes_per_peer=a.count,
+    bytes_per_wqe=65536, tas_per_wqe=16, peers=2)
 result["final_process_rc"] = [proc.returncode for proc in processes]
 progress = [line for line in text.splitlines() if line.startswith("[NS3_UB_NET_PROGRESS]")]
 result["work_drained"] = None

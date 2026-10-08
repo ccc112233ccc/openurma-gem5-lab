@@ -1,0 +1,127 @@
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -1384,6 +1384,11 @@
+         return;
+     }
+     record->second.sent = true;
++    if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
++        std::cerr << "CTP_REQUEST_WIRE node=" << m_node->GetId()
++                  << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                  << " tassn=" << tag.tassn << " task=" << record->second.wqeId
++                  << " attempt=" << tag.attempt << " uid=" << packet->GetUid() << '\n';
+     if (tag.attempt != 0) ++m_retransmissionCount;
+     if (m_dropAllRequestsForTest || m_dropNextRequestForTest)
+     {
+@@ -1741,6 +1746,13 @@
+             Ptr<UbWqeSegment> outstandingRequest = findRequest(localKey);
+             if (outstandingRequest == nullptr)
+                 outstandingRequest = findRequest(MakeSourceGroupKeyForRequest(localKey));
++            if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
++                std::cerr << "CTP_RESPONSE_RX node=" << m_node->GetId()
++                          << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                          << " tassn=" << ackHeader.GetIniTaSsn() << " task=" << flowTag.GetFlowId()
++                          << " match=" << (outstandingRequest != nullptr &&
++                              outstandingRequest->GetTaskId() == flowTag.GetFlowId())
++                          << " uid=" << packet->GetUid() << '\n';
+             UbTransactionFields responseFields;
+             if (outstandingRequest != nullptr &&
+                 outstandingRequest->GetType() == UbTransactionOpcode::ATOMIC_SYNC)
+@@ -1950,6 +1962,11 @@
+ UbCtpTransportService::DispatchInboundTransaction(Ptr<UbWqeSegment> request,
+                                                    const UbCtpEntityKey& key)
+ {
++    if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
++        std::cerr << "CTP_REQUEST_RX node=" << m_node->GetId()
++                  << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                  << " tassn=" << request->GetRequestTassn()
++                  << " task=" << request->GetTaskId() << '\n';
+     Ptr<UbController> controller = m_node == nullptr ? nullptr : m_node->GetObject<UbController>();
+     Ptr<UbTransaction> transaction =
+         controller == nullptr ? nullptr : controller->GetUbTransaction();
+@@ -2619,6 +2636,11 @@
+         QueuedResponse{identity, response, Simulator::Now()}).second;
+     NS_ABORT_MSG_IF(!inserted, "CTP response packet already queued");
+     ++record->second.queued;
++    if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
++        std::cerr << "CTP_RESPONSE_ENQUEUE node=" << m_node->GetId()
++                  << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                  << " tassn=" << response->GetRequestTassn()
++                  << " task=" << response->GetTaskId() << " uid=" << packet->GetUid() << '\n';
+ }
+ 
+ void
+@@ -2776,6 +2798,10 @@
+              request->GetTransactionFields().taskId != response->GetTransactionFields().taskId))
+             return;
+         response->SetRequestOpcode(request->GetType());
++        if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
++            std::cerr << "CTP_RESPONSE_ACCEPT node=" << m_node->GetId()
++                      << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                      << " tassn=" << taSsn << " task=" << request->GetTaskId() << '\n';
+     }
+ 
+     Ptr<UbCtpTransactionContext> context = transactionState->context;
+--- a/src/unified-bus/model/ub-port.cc
++++ b/src/unified-bus/model/ub-port.cc
+@@ -13,6 +13,8 @@
+ #include "ns3/ub-utils.h"
+ #include "ns3/ub-header.h"
+ #include "ns3/ub-datatype.h"
++#include <cstdlib>
++#include <iostream>
+ #ifdef NS3_MPI
+ #include "ns3/mpi-receiver.h"
+ #endif
+@@ -1066,6 +1068,14 @@
+ 
+ void UbPort::PktRcvNotify(Ptr<Packet> p)
+ {
++    if (std::getenv("UBSIM_CTP_RESPONSE_TRACE")) {
++        UbFlowTag flow;
++        if (p->PeekPacketTag(flow))
++            std::cerr << "CTP_PORT_RX node=" << GetNode()->GetId() << " port=" << m_portId
++                      << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                      << " task=" << flow.GetFlowId() << " uid=" << p->GetUid()
++                      << " bytes=" << p->GetSize() << '\n';
++    }
+     m_tracePktRcvNotify(p);
+ }
+ 
+@@ -1080,6 +1090,14 @@
+ 
+ void UbPort::TraComEventNotify(Ptr<Packet> p, Time t)
+ {
++    if (std::getenv("UBSIM_CTP_RESPONSE_TRACE")) {
++        UbFlowTag flow;
++        if (p->PeekPacketTag(flow))
++            std::cerr << "CTP_PORT_WIRE node=" << GetNode()->GetId() << " port=" << m_portId
++                      << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                      << " task=" << flow.GetFlowId() << " uid=" << p->GetUid()
++                      << " bytes=" << p->GetSize() << '\n';
++    }
+     m_traceTraComEventNotify(p, t);
+ }
+ 
+--- a/src/unified-bus/model/protocol/ub-cbfc.cc
++++ b/src/unified-bus/model/protocol/ub-cbfc.cc
+@@ -6,6 +6,8 @@
+ #include "ns3/ub-network-address.h"
+ #include "ns3/ub-utils.h"
+ #include "ns3/ub-datatype.h"
++#include <cstdlib>
++#include <iostream>
+ using namespace utils;
+ 
+ namespace ns3 {
+@@ -122,6 +124,11 @@
+     int32_t consumeCellNum = ceil((float)nextPktSize / (m_cbfcCfg.m_flitLen * m_cbfcCfg.m_nFlitPerCell));
+     const bool blocked = m_crdTxfree[vl] < consumeCellNum;
+     if (m_creditBlockedLast[vl] != blocked) {
++        if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
++            std::cerr << "CTP_CREDIT_STATE node=" << m_nodeId << " port=" << m_portId
++                      << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                      << " vl=" << vl << " blocked=" << blocked
++                      << " credits=" << m_crdTxfree[vl] << " nextbytes=" << nextPktSize << '\n';
+         utils::UbUtils::CbfcStateNotify(m_nodeId,
+                                         m_portId,
+                                         blocked ? "BLOCK" : "RESUME",

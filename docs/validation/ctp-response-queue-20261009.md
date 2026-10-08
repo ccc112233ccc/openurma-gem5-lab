@@ -55,6 +55,14 @@ Each endpoint submits N64 KiB READs. Strict peer checks identities, offsets and
 data; measured target reply dwell/backpressure are0. No loss is injected in
 these burst runs. `work_drained=null` remains unknown, not a global checkpoint.
 
+Here N counts submitted WQEs per endpoint, not simultaneously admitted TAs.
+Each64 KiB WQE uses16 TAs; the native512-entry window belongs to a
+`(srcEntity,dstNode,dstEntity,VL)` context and counts TAs. The reported
+`ctp_native_max_outstanding` is the largest observed count of one context, not
+an aggregate fabric count or proof of512 active WQEs. The former
+`ctp_native_window_blocked=0` field was never incremented and is not evidence
+that admission never blocked; it has been removed from subsequent output.
+
 | N per endpoint | Completed / submitted | Failed | Actual retries | Response replays | Coalesced | Experiment wall(s) |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2/2 | 0 | 0 | 0 | 0 | 0.490 |

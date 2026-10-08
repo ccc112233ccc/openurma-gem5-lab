@@ -562,8 +562,8 @@ class UbNetFabric {
                   << " ctp_read_responses=" << ctp_read_responses_
                   << " ctp_max_payload=" << ctp_max_payload_
                   << " ctp_native_admitted=" << ctp_native_admitted_
-                  << " ctp_native_window_blocked=" << ctp_native_window_blocked_
                   << " ctp_native_max_outstanding=" << ctp_native_max_outstanding_
+                  << " ctp_native_max_outstanding_scope=per_context_ta"
                   << " ctp_native_completions=" << ctp_native_completions_
                   << " ctp_native_send_delivery_completions="
                   << ctp_native_send_delivery_completions_
@@ -1504,7 +1504,6 @@ class UbNetFabric {
     bool ctp_cnp_injected_{};
     std::uint64_t ctp_max_payload_{};
     std::uint64_t ctp_native_admitted_{};
-    std::uint64_t ctp_native_window_blocked_{};
     std::uint64_t ctp_native_max_outstanding_{};
     std::uint64_t ctp_native_completions_{};
     std::uint64_t ctp_native_send_delivery_completions_{};

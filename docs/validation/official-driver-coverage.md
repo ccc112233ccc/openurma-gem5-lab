@@ -46,6 +46,15 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest diagnosis: [READ512 switch residence](ctp-read-switch-residence-20261009.md).
+Opt-in path tracing explains one failing WQE's179.671 us switch residence:
+the estimated serialization occupancy is96.364%, with request backlog sharing a
+packet-RR output with large responses, not a long stopped-output interval.
+Trace-off and independent native runs preserve968/1024 completions and56
+failures (independent whole1.199 s). No timeout/scheduler policy was changed;
+READ512 remains unaccepted. Next work needs protocol/configuration grounds
+for window, retry and scheduling choices, not another unchanged guest boot.
+
 Latest partial model repair: [READ response queue coalescing](ctp-response-queue-20261009.md).
 N128's native18 failures are eliminated without changing RTO/rate; N512 still
 has56 failed WQEs and remains unaccepted. Queued duplicate responses are merged,
