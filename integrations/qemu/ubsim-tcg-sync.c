@@ -18,6 +18,9 @@ G_NORETURN void ubsim_tcg_suspend_cpu(CPUState *cpu)
     uintptr_t retaddr = ubsim_tcg_retaddr;
 
     g_assert(cpu != NULL);
+    /* A pending IRQ must not wake an unfinished device access: retrying it
+     * restores icount and can prevent the completion timer from ever running. */
+    cpu->ubsim_device_wait = true;
     cpu->halted = 1;
     cpu->exception_index = EXCP_HALTED;
     if (retaddr != 0) {
@@ -29,5 +32,6 @@ G_NORETURN void ubsim_tcg_suspend_cpu(CPUState *cpu)
 void ubsim_tcg_resume_cpu(CPUState *cpu)
 {
     g_assert(cpu != NULL);
+    cpu->ubsim_device_wait = false;
     cpu->halted = 0;
 }

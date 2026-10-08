@@ -100,6 +100,44 @@ if text.count("ubsim_tcg_set_retaddr(ra);") < 2:
         "        ubsim_tcg_set_retaddr(ra);\n" + write_call +
         "        ubsim_tcg_set_retaddr(0);\n", 1)
 cputlb.write_text(text)
+
+# Device-completion waits are not architectural WFI. Pending IRQs must remain
+# pending without defeating icount's idle warp to the completion timer. Keep
+# the pinned core hooks identical for incremental and clean source builds.
+def insert_once(relative, marker, anchor, replacement):
+    path = root / relative
+    text = path.read_text()
+    if marker not in text:
+        if text.count(anchor) != 1:
+            raise RuntimeError(f"QEMU device-wait hook anchor mismatch: {relative}")
+        path.write_text(text.replace(anchor, replacement, 1))
+
+insert_once("include/hw/core/cpu.h", "bool ubsim_device_wait;",
+            "    uint32_t halted;\n",
+            "    uint32_t halted;\n"
+            "    /* UBSim TCG MMIO completion wait; not interruptible WFI. */\n"
+            "    bool ubsim_device_wait;\n")
+insert_once("system/cpus.c", "/* UBSim device wait is idle even with pending IRQs. */",
+            "    if (!cpu->halted || cpu_has_work(cpu)) {\n",
+            "    /* UBSim device wait is idle even with pending IRQs. */\n"
+            "    if (cpu->ubsim_device_wait) {\n"
+            "        return true;\n"
+            "    }\n"
+            "    if (!cpu->halted || cpu_has_work(cpu)) {\n")
+insert_once("system/cpus.c", "/* UBSim: only completion releases this wait. */",
+            "bool cpu_can_run(CPUState *cpu)\n{\n",
+            "bool cpu_can_run(CPUState *cpu)\n{\n"
+            "    /* UBSim: only completion releases this wait. */\n"
+            "    if (cpu->ubsim_device_wait) {\n"
+            "        return false;\n"
+            "    }\n")
+insert_once("accel/tcg/cpu-exec.c", "/* UBSim MMIO is not an interruptible halt. */",
+            "static inline bool cpu_handle_halt(CPUState *cpu)\n{\n#ifndef CONFIG_USER_ONLY\n",
+            "static inline bool cpu_handle_halt(CPUState *cpu)\n{\n#ifndef CONFIG_USER_ONLY\n"
+            "    /* UBSim MMIO is not an interruptible halt. */\n"
+            "    if (cpu->ubsim_device_wait) {\n"
+            "        return true;\n"
+            "    }\n")
 PY
 
 if [[ ! -f "$source_dir/build/build.ninja" ]]; then

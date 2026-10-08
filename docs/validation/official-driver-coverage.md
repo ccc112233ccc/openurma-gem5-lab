@@ -49,11 +49,15 @@ misleading performance results on an in-scope path still require fixes.
 Latest follow-up: [full CTP transaction headers](read-full-ta-20261008.md)
 repair exact small/non-power-of-two lengths and per-segment remote addresses.
 All12 no-sync official-driver regression cases pass, including1 MiB RMA.
-Synchronized2/4/8/16 B now pass, but32 B stalls with identical repeated live
-snapshots. QEMU profiling identifies a separate pending-IRQ/MMIO retry loop;
-the continuous-scan reliability gate is reopened while an independent CPU
-device-wait fix is validated. The earlier successful scans remain evidence,
-not a claim that all synchronization stalls were eliminated.
+The first synchronized attempt stalled at32 B; QEMU profiling identified a
+separate pending-IRQ/MMIO retry loop. An independent CPU device-wait state now
+repairs this reproduced failure. All15 consecutive sizes (2–4096 B plus
+65/129/4097 B) pass in223.839 s, with245760/245760 WQEs,120 ring wraps,
+zero rejects/network failures/retransmissions and both devices quiescent.
+The4096 B result is963.98 MiB/s (1.010806 GB/s). Actual CPU-gate counterexample
+tests also pass. These results do not claim every synchronization failure is
+eliminated; the separate synchronized1 MiB WRITE lifetime failure and throughput
+bottleneck remain open.
 
 Latest fix: QEMU's synchronized empty-input poll now services due output SYNC
 nonblockingly, so a same-tick sync timer cannot be starved by the polling

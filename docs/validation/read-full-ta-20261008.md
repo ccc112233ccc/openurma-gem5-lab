@@ -81,3 +81,61 @@ prevents warp to the device completion timer. An independent device-wait state
 is under full-system validation; it preserves IRQs and releases only on the
 device completion. The previous poll-SYNC repair remains relevant but did not
 eliminate this distinct scheduling failure.
+
+## QEMU device-wait repair and synchronized acceptance
+
+The CPU now has a distinct `ubsim_device_wait` state: suspend sets it before
+exiting the unfinished instruction, completion clears it, and device teardown
+also releases a pending waiter. QEMU's run/idle/halt predicates keep the CPU
+non-runnable but idle for icount warp regardless of pending IRQs. Stop and
+work-list handling retain priority. IRQ state, lookahead and physical link
+delays are unchanged. This is a TCG scheduling repair, not a fabricated advance
+of virtual time. In-flight QEMU migration/reset remains outside this validation.
+
+`tools/test_qemu_device_wait.py` extracts the actual prepared core predicates
+and overlay suspend/resume functions. It verifies pending IRQ preservation,
+no early retry, idle warp eligibility, stop/work priority, completion resume,
+ordinary WFI behavior and both instruction-restore/direct-exit branches.
+The independent negative control disabling the new predicates fails as expected.
+Unit wall time0.320 s; existing poll-SYNC test0.272 s; QEMU rebuild29.46 s.
+
+`experiments/qemu-read-device-wait-20261008` passes all15 cases consecutively
+with the official provider/driver, conservative synchronization and QEMU icount
+shift0. These are15 separate perftest commands in one guest session, not the
+original single-process `-a23` sweep. Effective queue settings R/T/C=1024/1024/4096, batch256, n16384,
+CQ moderation1; no bidirectional flag. Host latency500 ns, network latency
+100 ns, switch delay50 ns,400 Gbit/s per port, host DMA outstanding limit256.
+
+All245760 WQEs complete, with120 SQ wraps, zero decode/depth rejects or ubase
+errors. Network262144 segments/responses complete, zero failures, drops,
+trace-size mismatches or retransmissions. Both devices are quiescent with no
+pending host DMA at shutdown. The4097 B case exercises two segments per WQE.
+Total wall223.839 s, shell-ready46.912 s. First case82.422 s includes control
+setup; later cases6.150–6.785 s. The previously stalled32 B case takes6.270 s.
+This validates the reproduced IRQ/MMIO progress repair, not every possible
+future synchronization failure or payload-content integrity.
+
+Perftest average column is MiB/s despite its MB/sec label; decimal GB/s is
+`value * 1048576 / 1e9`. This is single-direction READ, with no halving.
+
+| Bytes | Perftest average (MiB/s) | Decimal GB/s |
+| ---: | ---: | ---: |
+| 2 | 0.47 | 0.000493 |
+| 4 | 0.94 | 0.000986 |
+| 8 | 1.88 | 0.001971 |
+| 16 | 3.77 | 0.003953 |
+| 32 | 7.53 | 0.007896 |
+| 64 | 15.06 | 0.015792 |
+| 128 | 30.13 | 0.031594 |
+| 256 | 60.25 | 0.063177 |
+| 512 | 120.51 | 0.126364 |
+| 1024 | 241.01 | 0.252717 |
+| 2048 | 482.02 | 0.505435 |
+| 4096 | 963.98 | 1.010806 |
+| 65 | 15.30 | 0.016043 |
+| 129 | 30.36 | 0.031835 |
+| 4097 | 964.28 | 1.011121 |
+
+The nearly linear size trend still indicates an operation-rate bottleneck
+around0.247 Mops/s, not400 Gbit/s link saturation. Its decomposition and the
+separate synchronized1 MiB WRITE CTP-lifetime failure remain open work.

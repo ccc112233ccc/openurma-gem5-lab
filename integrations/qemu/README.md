@@ -59,6 +59,15 @@ then restore and retry the exact guest load instruction. The MMIO region opts
 out of QEMU's normal reentrancy guard because this protocol deliberately exits
 the callback through TCG's longjmp path, matching the SimBricks QEMU adapter.
 
+Device completion waits use a distinct CPU scheduling flag, not just ordinary
+WFI/halt: pending interrupts remain asserted but cannot repeatedly wake an
+unfinished MMIO load and roll back icount. The CPU is idle for timer warp and
+not runnable until the device completion releases it. CPU stop/work-list
+handling keeps priority. The build script installs these pinned QEMU core
+hooks for clean and incremental builds; `tools/test_qemu_device_wait.py`
+exercises their real predicates with deterministic IRQ stubs. In-flight QEMU
+migration and machine reset are not validated by this mechanism.
+
 The 500-ns reference run boots both unchanged official UDMA stacks and scans
 bidirectional `write_bw` from 2 bytes through 1 MiB. It measured about 58 us
 for 128-byte `send_lat`, 315 MB/s at 4 KiB, and a 553 MB/s large-message
