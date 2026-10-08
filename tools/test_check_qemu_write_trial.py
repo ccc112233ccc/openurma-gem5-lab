@@ -12,7 +12,7 @@ class AuditTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        command = "urma_perftest write_bw -B -s 4096 -n 64 -T 512 -J 1 -l 16 -Q 16 -I 64"
+        command = "urma_perftest write_bw --ctp -d udma0 --eid_idx 0 -B -s 4096 -n 64 -T 512 -J 1 -l 16 -Q 16 -I 64"
         records = [dict(label=label, returncode=0) for label in ("launch", "shell-ready", "network", "stop")]
         records += [dict(label="write-4096", returncode=0, validation_errors=[],
                          command=["--commands", command, command + " -S 10.0.0.1"])]
@@ -21,7 +21,7 @@ class AuditTests(unittest.TestCase):
         body = ""
         for port in (3560, 3570):
             body += (f"--- UART {port} ---\nURMA_WRITE Bidirectional JFS Post List BandWidth Test\n"
-                     "JFS depth : 512\nMax inline size : 64[B]\nBW peak[MB/sec] BW average[MB/sec]\n"
+                     "JFS depth : 512\nNumber of jettys : 1\nCQ Moderation : 16\nJFS post list : 16\nMax inline size : 64[B]\nBW peak[MB/sec] BW average[MB/sec]\n"
                      f"4096 64 1100.00 1000.00 0.100\n__UBSIM_RC_{port}_123__=0\n")
         self.write("write-4096.txt", body)
         self.write("ns3.log", "[NS3_UB_NET_PROGRESS] native_tasks=0 pending_target_dma=0 scheduled_packets=0 outputs_empty=1 native_wqes_submitted=128 native_wqes_completed=128 native_wqes_failed=0\n"
@@ -115,6 +115,134 @@ class AuditTests(unittest.TestCase):
     def test_negative_inline_rejected(self):
         self.replace("report.json", "-I 64", "-I -1")
         with self.assertRaises(AuditError): audit(self.root)
+
+    def set_verb(self, verb, correct_counters=True):
+        self.replace("report.json", "write", verb)
+        self.replace("report.json", "-T 512", "-T 512 -R 512")
+        raw = (self.root / "write-4096.txt").read_text().replace("URMA_WRITE", f"URMA_{verb.upper()}")
+        if verb == "read":
+            self.replace("report.json", "-I 64", "-I 0")
+            raw = raw.replace("Max inline size : 64[B]\n", "")
+        self.write(f"{verb}-4096.txt", raw)
+        if correct_counters:
+            self.replace("ns3.log", "ctp_taacks=128", "ctp_taacks=0")
+            if verb == "read":
+                self.replace("ns3.log", "ctp_read_responses=0", "ctp_read_responses=128 ctp_native_send_delivery_completions=0")
+                self.replace("ns3.log", "payload_bytes=524288", "payload_bytes=1048576")
+            else:
+                self.replace("ns3.log", "ctp_read_responses=0", "ctp_read_responses=0 ctp_native_send_delivery_completions=128")
+
+    def test_read_accounting_doubles_diagnostic_not_bandwidth(self):
+        self.set_verb("read")
+        result = audit(self.root, "read")
+        self.assertEqual(result["cases"][0]["average_GB_s"], 1.048576)
+        self.assertEqual(result["nodes"][0]["observed_rma_pending_peak"], 17)
+
+    def test_read_cannot_pass_write_counters(self):
+        self.set_verb("read", False)
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_read_requires_response_bytes_accounting(self):
+        self.set_verb("read")
+        self.replace("ns3.log", "payload_bytes=1048576", "payload_bytes=524288")
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_send_has_no_rma_outstanding_claim(self):
+        self.set_verb("send")
+        result = audit(self.root)
+        self.assertNotIn("observed_rma_pending_peak", result["nodes"][0])
+        self.assertIsNone(result["nodes"][0]["send_outstanding_peak"])
+        self.assertEqual(result["verb"], "send")
+
+    def test_send_cannot_pass_write_counters(self):
+        self.set_verb("send", False)
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_send_requires_delivery_completion(self):
+        self.set_verb("send")
+        self.replace("ns3.log", "ctp_native_send_delivery_completions=128", "ctp_native_send_delivery_completions=0")
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_explicit_verb_mismatch_rejected(self):
+        with self.assertRaises(AuditError): audit(self.root, "read")
+
+    def test_read_nonzero_inline_rejected(self):
+        self.set_verb("read")
+        self.replace("report.json", "-I 0", "-I 64")
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_read_send_require_receive_depth(self):
+        for verb in ("read", "send"):
+            with self.subTest(verb=verb):
+                from check_qemu_write_trial import command_config
+                command = f"urma_perftest {verb}_bw --ctp -d udma0 --eid_idx 0 -B -s 64 -n 64 -T 512 -J 1 -l 16 -Q 16 -I 0"
+                with self.assertRaises(AuditError): command_config(command)
+
+    def test_command_identity_and_roles(self):
+        original = (self.root / "report.json").read_text()
+        for old, new in (("--ctp", ""), ("-d udma0", "-d wrong"), ("--eid_idx 0", "--eid_idx 1"),
+                         ("-S 10.0.0.1", "-S 10.0.0.2"), ("-S 10.0.0.1", "")):
+            with self.subTest(new=new):
+                self.write("report.json", original.replace(old,new))
+                with self.assertRaises(AuditError): audit(self.root)
+
+    def test_server_cannot_also_be_client(self):
+        report = json.loads((self.root / "report.json").read_text())
+        report["records"][-1]["command"][-2] += " -S 10.0.0.1"
+        self.write("report.json", json.dumps(report))
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_endpoint_receive_depth_mismatch(self):
+        self.set_verb("send")
+        report = json.loads((self.root / "report.json").read_text())
+        report["records"][-1]["command"][-1] = report["records"][-1]["command"][-1].replace("-R 512", "-R 64")
+        self.write("report.json", json.dumps(report))
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_raw_parameter_mismatch(self):
+        original = (self.root / "write-4096.txt").read_text()
+        for old,new in (("CQ Moderation : 16", "CQ Moderation : 1"),
+                        ("Number of jettys : 1", "Number of jettys : 2"),
+                        ("JFS post list : 16", "JFS post list : 1")):
+            with self.subTest(old=old):
+                self.write("write-4096.txt", original.replace(old,new))
+                with self.assertRaises(AuditError): audit(self.root)
+
+    def test_message_rate_finite_nonnegative_and_equal(self):
+        original = (self.root / "write-4096.txt").read_text()
+        for value in ("nan", "inf", "-1", "0.200"):
+            with self.subTest(value=value):
+                self.write("write-4096.txt", original.replace("0.100",value,1))
+                with self.assertRaises(AuditError): audit(self.root)
+
+    def capabilities(self, first=65536, second=65536):
+        self.write("capabilities.txt", "".join(
+            f"--- UART {port} ---\nmax_msg_size : {size}\n__UBSIM_RC_{port}_123__=0\n"
+            for port, size in ((3560, first), (3570, second))))
+
+    def test_capabilities_absent_is_unknown_not_supported(self):
+        result = audit(self.root)
+        self.assertEqual(result["status"], "PASS")
+        self.assertIsNone(result["advertised_size_compliance"])
+
+    def test_within_both_advertised_limits(self):
+        self.capabilities()
+        self.assertTrue(audit(self.root)["advertised_size_compliance"])
+
+    def test_above_one_limit_keeps_counter_fact_not_support_claim(self):
+        self.capabilities(second=2048)
+        result = audit(self.root)
+        self.assertEqual(result["status"], "PASS")
+        self.assertFalse(result["advertised_size_compliance"])
+        self.assertTrue(result["capability_warnings"])
+        self.assertEqual(result["cases"][0]["average_GB_s"], 1.048576)
+
+    def test_incomplete_capabilities_do_not_prove_support(self):
+        self.capabilities()
+        self.replace("capabilities.txt", "max_msg_size : 65536", "unknown : 65536")
+        result = audit(self.root)
+        self.assertIsNone(result["advertised_size_compliance"])
+        self.assertTrue(result["capability_warnings"])
 
 
 if __name__ == "__main__":

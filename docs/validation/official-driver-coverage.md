@@ -46,6 +46,16 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest attempted timing gate: [READ/SEND high concurrency](read-send-timing-20261009.md).
+SEND4 KiB completes32768 WQEs with16 SQ wraps per endpoint, but its printed
+average exceeds peak, so timing acceptance fails. READ64 KiB/depth512 fails
+with native retry exhaustion; no bandwidth is reported. Preserve both failures
+and prioritize their native/runtime diagnostics before more size sweeps. Wall
+times137.081 s(SEND),136.903 s(READ). Do not call final error-drain a pass.
+The new capability preflight also confirms the official driver's fixed64 KiB
+`max_msg_size`; prior successful1 MiB trials are beyond that advertised limit,
+not a declaration of official1 MiB support. Their raw transfer evidence remains.
+
 Latest timing gate: [longer WRITE / observed concurrency](write-depth512-timing-20261009.md).
 At400G, fixed inline64/SQ depth512 and2048 operations per direction complete
 with average93.89407 GB/s (`-B`, already combined). Each UDMA observes511

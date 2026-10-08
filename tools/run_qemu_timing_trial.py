@@ -14,17 +14,33 @@ from run_modular_rma_regression import validate_depth_output, validate_bw_scan
 
 def write_bw_command(size, port, iterations=64, depth=64, post_list=16, cq_mod=16,
                      inline_size=64):
+    return bw_command("write_bw", size, port, iterations, depth, post_list, cq_mod, inline_size)
+
+
+def bw_command(verb, size, port, iterations=64, depth=64, post_list=16, cq_mod=16,
+               inline_size=64):
+    if verb not in ("write_bw", "read_bw", "send_bw"):
+        raise ValueError("unsupported bandwidth verb")
     if min(size, port, iterations, depth, post_list, cq_mod) <= 0:
-        raise ValueError("WRITE settings must be positive")
+        raise ValueError("bandwidth settings must be positive")
+    if depth > iterations:
+        raise ValueError("depth must not exceed iterations (perftest would silently lower it)")
+    if verb == "send_bw" and size > 4096:
+        raise ValueError("SEND payload must not exceed 4096 bytes")
     if post_list > depth or cq_mod > depth:
         raise ValueError("WRITE post list and CQ moderation must not exceed SQ depth")
     if iterations % post_list or iterations % cq_mod:
         raise ValueError("WRITE iterations must be divisible by post list and CQ moderation")
+    if post_list > 1 and post_list % cq_mod:
+        raise ValueError("post list must be a multiple of CQ moderation")
     if inline_size < 0:
         raise ValueError("WRITE inline size must not be negative")
-    return ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest write_bw "
+    if verb == "read_bw":
+        inline_size = 0  # Official perftest READ unconditionally disables inline.
+    receive_depth = f" -R {depth}" if verb != "write_bw" else ""
+    return (f"LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest {verb} "
             f"-d udma0 --eid_idx 0 --ctp -B -s {size} -P {port} "
-            f"-J 1 -I {inline_size} -T {depth} -n {iterations} -l {post_list} -Q {cq_mod} -p 0")
+            f"-J 1 -I {inline_size} -T {depth}{receive_depth} -n {iterations} -l {post_list} -Q {cq_mod} -p 0")
 
 
 def observe_drain(root, timeout):
@@ -72,14 +88,23 @@ def observe_drain(root, timeout):
 
 
 def validate_write_capabilities(text, depth, inline_size):
+    return validate_bw_capabilities(text, "write_bw", depth, inline_size)
+
+
+def validate_bw_capabilities(text, verb, depth, inline_size, max_size=None):
     sections = re.split(r"(?m)^--- UART \d+ ---\s*$", text)[1:]
     if len(sections) != 2:
         raise ValueError("need capability responses from both guests")
     limits = []
     for node, section in enumerate(sections):
         values = {}
-        for field, requested in (("max_jfs_depth", depth),
-                                 ("max_jfs_inline_size", inline_size)):
+        requested_limits = [("max_jfs_depth", depth),
+                            ("max_jfs_inline_size", 0 if verb == "read_bw" else inline_size)]
+        if verb != "write_bw":
+            requested_limits.append(("max_jfr_depth", depth))
+        if max_size is not None:
+            requested_limits.append(("max_msg_size", max_size))
+        for field, requested in requested_limits:
             found = re.findall(r"(?m)^" + field + r"\s*:\s*(\d+)\s*$", section)
             if len(found) != 1:
                 raise ValueError(f"node{node}: missing unique {field}")
@@ -90,18 +115,19 @@ def validate_write_capabilities(text, depth, inline_size):
     return limits
 
 
-def main():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("output", type=Path)
     p.add_argument("--timeout", type=float, default=180)
-    p.add_argument("--sizes", type=int, nargs="+", default=[4096, 65536, 1048576])
+    p.add_argument("--sizes", type=int, nargs="+", default=[4096, 65536])
     p.add_argument("--drain-timeout", type=float, default=0,
                    help="optional bounded live drain observation before stopping processes")
-    p.add_argument("--write-iterations", type=int, default=64)
-    p.add_argument("--write-depth", type=int, default=64)
-    p.add_argument("--write-post-list", type=int, default=16)
-    p.add_argument("--write-cq-mod", type=int, default=16)
-    p.add_argument("--write-inline", type=int, default=64,
+    p.add_argument("--bw-verb", choices=("write_bw", "read_bw", "send_bw"), default="write_bw")
+    p.add_argument("--iterations", "--write-iterations", dest="write_iterations", type=int, default=64)
+    p.add_argument("--depth", "--write-depth", dest="write_depth", type=int, default=64)
+    p.add_argument("--post-list", "--write-post-list", dest="write_post_list", type=int, default=16)
+    p.add_argument("--cq-mod", "--write-cq-mod", dest="write_cq_mod", type=int, default=16)
+    p.add_argument("--inline", "--write-inline", dest="write_inline", type=int, default=64,
                    help="maximum inline bytes (-I), independent of SQ depth (-T)")
     p.add_argument("--user-read-scan", action="store_true",
                    help="run requested a23/n16384 READ scan, capped to reported queue limits")
@@ -109,14 +135,22 @@ def main():
                    help="with --user-read-scan, isolate one size instead of a23")
     p.add_argument("--read-sizes", type=int, nargs="+",
                    help="test separate READ sizes; continue after clean guest errors")
-    args = p.parse_args()
+    args = p.parse_args(argv)
+    for sizes in (args.sizes, args.read_sizes or []):
+        if len(sizes) != len(set(sizes)):
+            p.error("duplicate sizes would overwrite experiment evidence")
     if not args.user_read_scan:
         try:
             for size in args.sizes:
-                write_bw_command(size, 21410, args.write_iterations, args.write_depth,
+                bw_command(args.bw_verb, size, 21410, args.write_iterations, args.write_depth,
                                  args.write_post_list, args.write_cq_mod, args.write_inline)
         except ValueError as error:
             p.error(str(error))
+    return args
+
+
+def main():
+    args = parse_args()
     lab = Path(__file__).resolve().parents[1]
     root = lab / "run-qemu-dual"
     args.output.mkdir(parents=True, exist_ok=False)
@@ -210,21 +244,26 @@ def main():
         if run("capabilities", serial+["--command", "urma_admin show -d udma0 -w"],
                args.timeout+10): return 1
         try:
-            records[-1]["write_capabilities"] = validate_write_capabilities(
-                (args.output / "capabilities.txt").read_text(), args.write_depth, args.write_inline)
+            records[-1]["bw_capabilities"] = validate_bw_capabilities(
+                (args.output / "capabilities.txt").read_text(), args.bw_verb,
+                args.write_depth, args.write_inline, max(args.sizes))
+            if args.bw_verb == "write_bw":
+                records[-1]["write_capabilities"] = records[-1]["bw_capabilities"]
+            records[-1]["effective_inline"] = 0 if args.bw_verb == "read_bw" else args.write_inline
         except ValueError as error:
             records[-1]["validation_errors"] = [str(error)]
             records[-1]["returncode"] = 1
-            print(f"WRITE capability preflight failed: {error}", flush=True)
+            print(f"{args.bw_verb} capability preflight failed: {error}", flush=True)
             return 1
         for index, size in enumerate(args.sizes):
-            command = write_bw_command(size, 21410 + index, args.write_iterations,
+            command = bw_command(args.bw_verb, size, 21410 + index, args.write_iterations,
                                        args.write_depth, args.write_post_list, args.write_cq_mod,
                                        args.write_inline)
-            if run(f"write-{size}", serial+["--stagger", "1", "--commands",
+            label = f"{args.bw_verb.removesuffix('_bw')}-{size}"
+            if run(label, serial+["--stagger", "1", "--commands",
                      command, command+" -S 10.0.0.1"], args.timeout+10): return 1
             errors = validate_depth_output(
-                (args.output/f"write-{size}.txt").read_text(), args.write_depth,
+                (args.output/f"{label}.txt").read_text(), args.write_depth,
                 size, args.write_iterations)
             records[-1]["validation_errors"] = errors
             if errors:
