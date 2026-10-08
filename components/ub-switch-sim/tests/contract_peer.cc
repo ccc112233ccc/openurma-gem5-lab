@@ -10,6 +10,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <deque>
+#include <set>
 
 namespace net = ubsim::proto::net;
 
@@ -132,6 +134,8 @@ int LateDma(net::Interface& interface, bool sender, const std::string& profile)
     return 6;
 }
 
+#include "read_burst_contract.inc"
+
 int Run(const std::string& role, const std::string& socket,
         const std::string& shm_path, const std::string& sync_mode,
         const std::string& profile)
@@ -166,6 +170,10 @@ int Run(const std::string& role, const std::string& socket,
         peer_intro.version != net::kVersion)
         return 4;
 
+    if (profile.rfind("ctp-read-burst-", 0) == 0) {
+        if (sync_mode != "required") return 2;
+        return ReadBurst(interface, sender, std::stoul(profile.substr(15)));
+    }
     if(profile=="ctp-late-dma" || profile=="ctp-late-read" ||
        profile=="ctp-late-dma-bad-length" || profile=="ctp-late-first" ||
        profile=="ctp-dma-error-read-active" || profile=="ctp-dma-error-write-active" ||

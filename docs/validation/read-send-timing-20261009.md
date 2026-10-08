@@ -121,3 +121,70 @@ for the trials. Remaining performance gates include these two failures,
 controlled parameter sensitivity, timed reuse, data integrity and multi-Jetty/
 multiport experiments. EQ events and invalid port1 admin attributes remain
 explicit limitations, not prerequisites for unrelated management coverage.
+
+SEND follow-up instrumentation is maintained separately in
+[the opt-in report diagnostic](perftest-bw-report-diagnostic-20261009.md).
+Three native C report-function tests pass, including reconstruction from the
+pinned source rather than an ignored dirty tree. It has **not** been built
+into the ARM guest; the current Docker daemon is not running. Normal source
+and image are unchanged, so setting the variable in the current guest alone
+will not enable it.
+
+## Fast native READ counterexample (independently reviewed)
+
+The guest failure now has a sub-second native reproducer, without changing the
+model, RTO or retry budget. New strict evidence is in
+`experiments/native-read-burst-strict-20261009/{n1-final,n128-final}`.
+Build the peer from current source, not a previously cached test binary:
+
+```sh
+cmake -S components/ub-switch-sim -B artifacts/read-burst-peer-build -DCMAKE_BUILD_TYPE=Release
+cmake --build artifacts/read-burst-peer-build --target ub-net-contract-peer -j4
+python3 integrations/ns3ub/tests/read_burst_contract.py \
+  sources/ns-3-ub/build-macos/scratch/ns3.44-ub-net-adapter \
+  artifacts/read-burst-peer-build/ub-net-contract-peer \
+  experiments/read-burst-new-attempt --count 128
+```
+
+The adapter must be the already-built current native ns-3 adapter. Output must
+be a new directory. Default exit status is1 for a failed workload even if every
+request reaches a terminal success/error; `--allow-workload-errors` is an
+explicit diagnostic-only opt-in, not an acceptance mode. Peer clean build was
+1.150 s. N1 passed in0.503 s. N128 took0.334 s and reproduced238 successful
+and18 failed WQEs,8026 actual retries/replays, with no injected loss, target
+DMA errors or runtime drops. Both endpoints each received and answered2048
+target TAs; **measured** reply dwell and output-allocation backpressure are0.
+Identity, offset alignment/range, target token/address and source response data
+are checked. This shows the test responder adds no virtual wait after receipt;
+it does not model or validate real host DMA performance.
+
+Independent review caught and repaired the initial harness's misleading zero
+exit on failed workloads, insufficient metadata checks and lack of reply-delay
+measurement. Old pre-strict evidence is preserved under
+`experiments/native-read-burst-20261009`. N256/512 there aborted on a repeated
+target request (request83/offset24576), then the surviving synchronized peer
+timed out. Those incomplete runs do not prove a simulator deadlock or drain.
+An additional `n128-independent` run under the strict directory accidentally
+used the old peer binary; it reproduces counts but is **not strict metadata/
+reply-delay evidence**. Do not substitute it for the `*-final` evidence.
+
+The subsequent evidence-schema guard rejects old peers missing reply-delay/
+backpressure metrics and records peer/adapter executable hashes (not all linked
+library hashes). `experiments/native-read-burst-schema-20261009` confirms new
+N1 passes (0.310 s), new N128 fails (0.347 s), and old-peer N1 is rejected despite
+completed work (0.106 s). Final process exit codes must also all be zero for a
+successful bounded run; workload success remains a separate stricter result.
+
+`pending_target_dma=0` and clean process exit do not establish global drain:
+the harness reports `work_drained=null` without a complete progress snapshot.
+Independent acceptance uses this limited claim. The native fixture is not an
+official provider/driver run, but allows fast model diagnosis before another
+full-system validation.
+
+Next source targets: `UbCtpTransportService::ReplayResponseSegment` enqueues
+another full READ response for every cached duplicate; response records expire
+after `(maxRetries+1)*RTO` from response creation, even when packets remain in
+queues. These are observed implementation mechanisms, **not yet a proven causal
+fix**. Trace original/replayed response residence and record lifetime against
+the N128 counterexample before changing policy. Do not increase RTO to make the
+test disappear or silently drop legitimate loss-recovery responses.
