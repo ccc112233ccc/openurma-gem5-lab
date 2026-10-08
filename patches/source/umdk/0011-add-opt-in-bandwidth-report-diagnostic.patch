@@ -1,0 +1,41 @@
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index dcc2d26..f7e5748 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -15,6 +15,7 @@
+ #include <signal.h>
+ #include <math.h>
+ #include <stddef.h>
++#include <inttypes.h>
+ 
+ #include "urma_api.h"
+ 
+@@ -2948,6 +2949,28 @@ static void print_bw_report(perftest_context_t *ctx, perftest_config_t *cfg,
+     peak_up = (cfg->no_peak == true ? 0 : 1) * size * cycles_to_units;
+     peak_down = opt_delta * PERFTEST_MBS;
+ 
++    /* Observe the existing report inputs only: no extra clock reads or samples. */
++    const char *bw_diagnostic = getenv("UBSIM_BW_REPORT_DIAGNOSTIC");
++    if (bw_diagnostic != NULL && strcmp(bw_diagnostic, "1") == 0) {
++        (void)fprintf(stderr,
++            "[UBSIM_BW_REPORT_DIAGNOSTIC] observation=existing_samples_only "
++            "pid=%ld api_type=%d bidirection=%u no_peak=%u "
++            "tposted0=%" PRIu64 " array0=%" PRIu64 " tcompleted0=%" PRIu64 " "
++            "tcompleted_last=%" PRIu64 " completed_index=%" PRIu64 " "
++            "iters_sum=%" PRIu64 " cfg_iters=%" PRIu64 " jettys=%u post_list=%u cq_mod=%u "
++            "size=%" PRIu64 " opt_delta=%" PRIu64 " cpu_mhz=%.17g scale=%.17g "
++            "cycles_sum=%.17g peak_up=%.17g peak_down=%.17g "
++            "avg_up=%.17g avg_down=%.17g peak=%.17g avg=%.17g\n",
++            (long)getpid(), (int)cfg->api_type, (unsigned)cfg->bidirection, (unsigned)cfg->no_peak,
++            tposted_0, run_ctx->tposted[0], run_ctx->tcompleted[0],
++            run_ctx->tcompleted[cfg->no_peak == true ? 0 : run_ctx_iters_sum],
++            cfg->no_peak == true ? UINT64_C(0) : run_ctx_iters_sum,
++            iters_sum, (uint64_t)cfg->iters, cfg->jettys, cfg->jfs_post_list, cfg->cq_mod,
++            size, opt_delta, cpu_mhz, cycles_to_units, cycles_sum, peak_up, peak_down,
++            (double)size * iters_sum * cycles_to_units, cycles_sum * PERFTEST_BW_MB,
++            (double)peak_up / peak_down, bw_avg);
++    }
++
+     if (local_bw_report != NULL) {
+         local_bw_report->size = cfg->size;
+         local_bw_report->iters = iters_sum;
