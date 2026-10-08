@@ -8,6 +8,23 @@ from check_qemu_write_trial import audit, AuditError, peak_policy, check_report_
 
 
 class AuditTests(unittest.TestCase):
+    def test_runtime_reliability_profile_matches_effective_manifest(self):
+        manifest = self.root / "run-manifest.txt"
+        log = self.root / "ns3.log"
+        manifest.write_text(manifest.read_text() + "ctp_retransmission=off\n")
+        log.write_text("[NS3_UB_NET] reliability_profile=ctp-lossless-lower-layer-assumed\n" + log.read_text())
+        result = audit(self.root)
+        self.assertTrue(result["runtime_reliability_profile_checked"])
+        self.assertEqual(result["ctp_retransmission"], "off")
+        manifest.write_text(manifest.read_text().replace("ctp_retransmission=off", "ctp_retransmission=on"))
+        with self.assertRaises(AuditError):
+            audit(self.root)
+
+    def test_legacy_unknown_reliability_is_not_invented(self):
+        result = audit(self.root)
+        self.assertIsNone(result["reliability_profile"])
+        self.assertFalse(result["runtime_reliability_profile_checked"])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

@@ -46,14 +46,28 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest accepted profile correction: [CTP reliability and READ512](ctp-reliability-profile-20261009.md).
+Synchronization no longer automatically enables our experimental TA timeout
+replay. The normative CTP implementation example relies on reliable lower-layer
+delivery; current default assumes that lossless delivery, not complete LLR.
+Official synchronized READ64 KiB/depth512/n2048 now completes4096/4096 WQEs:
+perftest average92.53954 GB/s (`-B`), each endpoint pending peak496 and2 SQ wraps,
+wall135.173 s, observed live-work drain. The old explicit-on native56 failures
+remain reproducible; this is a profile correction, not repair of that extension.
+Independent off+loss fails as required, while explicit-on loss recovery passes.
+Earlier512 context-capacity statements are corrected:512 is per-Jetty segment
+limit; context ACK bitmap capacity is2048. Next: small-size READ sweep and
+configuration sensitivity, then multi-resource contention; do not count LLR or
+RNR recovery as accepted from the lossless result.
+
 Latest diagnosis: [READ512 switch residence](ctp-read-switch-residence-20261009.md).
 Opt-in path tracing explains one failing WQE's179.671 us switch residence:
 the estimated serialization occupancy is96.364%, with request backlog sharing a
 packet-RR output with large responses, not a long stopped-output interval.
 Trace-off and independent native runs preserve968/1024 completions and56
 failures (independent whole1.199 s). No timeout/scheduler policy was changed;
-READ512 remains unaccepted. Next work needs protocol/configuration grounds
-for window, retry and scheduling choices, not another unchanged guest boot.
+READ512 with this explicit experimental-on profile remains unaccepted. The
+subsequent profile correction above supersedes its previous next-work plan.
 
 Latest partial model repair: [READ response queue coalescing](ctp-response-queue-20261009.md).
 N128's native18 failures are eliminated without changing RTO/rate; N512 still
@@ -72,9 +86,9 @@ reports2432.09 MiB/s =2.55023120384 GB/s,32768 completed WQEs and16 SQ wraps
 per endpoint; per-endpoint arithmetic and raw counters pass (wall135.876 s).
 Its two endpoint averaging windows differ, so this is the official tool's
 reported rate, not independently established common-window fabric goodput.
-READ64 KiB/depth512 still fails with native retry exhaustion; no bandwidth is
-reported. Prioritize its fast native response-queue counterexample before more
-full-system size sweeps. Prior READ wall136.903 s; error-drain is not a pass.
+That historical READ64 KiB/depth512 attempt with the retry extension fails;
+no bandwidth is reported. The lossless-profile result above does not overwrite
+it. Prior READ wall136.903 s; error-drain is not a pass.
 The new capability preflight also confirms the official driver's fixed64 KiB
 `max_msg_size`; prior successful1 MiB trials are beyond that advertised limit,
 not a declaration of official1 MiB support. Their raw transfer evidence remains.

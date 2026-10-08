@@ -165,6 +165,13 @@ def audit(directory, verb=None):
             raise AuditError(f"missing/unreadable evidence: {name}") from error
     report = json.loads(read("report.json"))
     manifest = dict(line.split("=", 1) for line in read("run-manifest.txt").splitlines() if "=" in line)
+    retry_mode = manifest.get("ctp_retransmission")
+    profiles = {"on": "experimental-ta-timeout-replay", "off": "ctp-lossless-lower-layer-assumed"}
+    require(retry_mode is None or retry_mode in profiles, "invalid effective CTP retry mode")
+    observed_profiles = re.findall(r"\breliability_profile=(\S+)", read("ns3.log"))
+    if observed_profiles:
+        require(retry_mode in profiles and observed_profiles == [profiles[retry_mode]],
+                "runtime CTP profile disagrees with manifest")
     for key, expected in {"runtime": "qemu-tcg-timing", "node_count": "2",
                           "network_backend": "modular-ns3ub", "synchronization": "required"}.items():
         require(manifest.get(key) == expected, f"manifest {key} must be {expected}")
@@ -334,6 +341,9 @@ def audit(directory, verb=None):
                 native_payload_note="Legacy logical counter, NOT wire bytes or application payload; never used to calculate bandwidth",
                 retry_diagnostics={key: fabric.get(key) for key in retry_keys},
                 configured_link_rate_gbps=link_rate,
+                ctp_retransmission=retry_mode,
+                reliability_profile=profiles.get(retry_mode),
+                runtime_reliability_profile_checked=bool(observed_profiles),
                 scope=f"{trial_verb.upper()} counter/configuration consistency only; PASS is not full hardware support, two-sample drain proof or a whole-system checkpoint",
                 fabric_payload_accounting="logical request plus response bytes" if trial_verb == "read" else "logical request bytes",
                 outstanding_note=("SEND outstanding is not measured by RMA or CTP TA counters" if trial_verb == "send"

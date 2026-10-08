@@ -18,7 +18,7 @@ network-owned backpressure for simultaneous multi-segment bursts.
 The adapter connects `UbTargetExecutor` to the standalone target UDMA, which
 performs the actual memory read or write for each native segment. WRITE TAACK
 and READ response packets carry the request TASSN and byte offset back to the
-initiator. READ request carrier size (one encoded byte) is kept distinct from
+initiator. READ request carrier payload (currently zero bytes) is kept distinct from
 its logical response length (up to 4 KiB). Duplicate TASSNs are rejected,
 completed bytes are accumulated, and one WQE CQE is produced only after the
 entire transaction has completed. CTP SEND remains a single packet and is
@@ -44,7 +44,8 @@ validation host; that directory is intentionally not a repository artifact.
 The fabric submitted and completed exactly 5,704 native WQEs. It observed
 145,376 admitted native request segments and exactly 145,376 native
 completions, with no TASSN discontinuity, trace-size mismatch, ns-3 packet
-drop, or window block. Peak native outstanding depth was 256. Of the
+drop. The old always-zero window-block field did not measure admission stalls.
+Peak native outstanding depth was 256. Of the
 completions, 200 were SEND target deliveries; the rest were 139,408 WRITE
 TAACKs and 5,768 READ responses. This distinction is intentional: the
 external SEND boundary has no target-DMA completion message, whereas WRITE
@@ -140,13 +141,26 @@ native_wqes_failed=0
 The external target peer exits after servicing its single READ, so successful
 recovery also proves that no second target-memory operation was issued.
 
-RTO is meaningful only on a shared virtual-time axis. Accordingly,
-`UBSIM_CTP_RETRANSMISSION=auto` resolves to `on` for full conservative
-synchronization and `off` for asynchronous functional or lifecycle-only
-runs. `UBSIM_CTP_RTO_PS` defaults to 25,600,000 ps and
+The timeout-replay mechanism below is a local experimental extension, not
+the CTP transport recovery described by UB Base Specification2.0 section6.3.2
+(page160). That example delegates reliable delivery to lower layers;
+section7.3.1.1 separately describes transaction retry for recoverable errors.
+`UBSIM_CTP_RETRANSMISSION=auto` resolves to `off` in all synchronization modes.
+Synchronization must not silently select a different reliability protocol.
+The default assumes lossless lower-layer delivery; it does not establish that
+physical link-layer CRC/retry recovery is implemented or validated.
+For explicit `on`, `UBSIM_CTP_RTO_PS` defaults to 25,600,000 ps and
 `UBSIM_CTP_MAX_RETRANSMISSIONS` defaults to seven. An explicit `on` is used by
-the focused process contract; it is not evidence that unsynchronized
-full-system latency is valid.
+the focused loss/retry process contracts. They remain tests of this extension,
+not evidence that unsynchronized full-system latency is valid. Existing
+extension-enabled failures remain valid counterexamples; passing with the
+default profile must not be called a repair of timeout replay. Shared virtual
+time is necessary for timing measurements but does not mandate this extension.
+With replay disabled, an actually lost request/response may remain incomplete;
+bounded runners must report deadline failure, not infer protocol recovery or
+successful drain. An interactive perftest can continue waiting in that case.
+The official driver's retry/ack-timeout fields are not thereby connected to
+this adapter-wide experimental timer.
 
 When the retry budget is exhausted, CTP removes every retained segment of the
 same WQE and terminates it with `UbWorkOutcome::FAILED`. The adapter returns an

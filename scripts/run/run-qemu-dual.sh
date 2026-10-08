@@ -70,7 +70,7 @@ done
 [[ "$ctp_max_retransmissions" =~ ^[0-9]+$ ]] && (( ctp_max_retransmissions > 0 )) ||
     die "UBSIM_CTP_MAX_RETRANSMISSIONS must be a positive integer"
 case "$ctp_retransmission" in
-    auto) [[ "$sync_mode" == required ]] && ctp_retransmission=on || ctp_retransmission=off ;;
+    auto) ctp_retransmission=off ;;
     on|off) ;;
     *) die "UBSIM_CTP_RETRANSMISSION must be auto, on, or off" ;;
 esac

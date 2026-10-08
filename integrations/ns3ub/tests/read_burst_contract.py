@@ -13,9 +13,16 @@ p.add_argument("adapter")
 p.add_argument("peer")
 p.add_argument("output", type=Path)
 p.add_argument("--count", type=int, required=True)
+p.add_argument("--ctp-retransmission", choices=("on", "off"), default="on",
+               help="on retains the historical experimental timeout-replay counterexample; "
+                    "off tests the lossless-lower-layer CTP profile, not retry recovery")
+p.add_argument("--drop-first-ctp-read-response", action="store_true",
+               help="negative control: inject response loss, including with replay disabled")
 p.add_argument("--allow-workload-errors", action="store_true",
                help="diagnostic-only: permit source errors, never protocol or deadline failures")
 a = p.parse_args()
+if not 1 <= a.count <= 2048:
+    p.error("count must be in the native peer's supported range 1..2048")
 a.output.mkdir(parents=True, exist_ok=False)
 binary_sha256 = {name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
                  for name, path in (("peer", a.peer), ("adapter", a.adapter))}
@@ -40,15 +47,22 @@ try:
         time.sleep(.01)
     adapter = launch("adapter", [a.adapter, "--sync", "required", "--rate-gbps", "400",
         "--ports", "2", "--link-delay-ps", "100000", "--switch-delay-ps", "50000",
-        "--ctp-retransmission", "on", "--ctp-rto-ps", "25600000",
+        "--ctp-retransmission", a.ctp_retransmission, "--ctp-rto-ps", "25600000",
         "--ctp-max-retransmissions", "7", "--endpoint", str(a.output / "a.sock") + ",0x101",
-        "--endpoint", str(a.output / "b.sock") + ",0x202"])
+        "--endpoint", str(a.output / "b.sock") + ",0x202"] +
+        (["--drop-first-ctp-read-response"] if a.drop_first_ctp_read_response else []))
     deadline = time.monotonic() + 35
     while any(peer.poll() is None for peer in peers) and adapter.poll() is None:
         if time.monotonic() > deadline:
             break
         time.sleep(.02)
     result = dict(count=a.count, allow_workload_errors=a.allow_workload_errors,
+                  ctp_retransmission=a.ctp_retransmission,
+                  reliability_profile=("experimental-ta-timeout-replay" if a.ctp_retransmission == "on"
+                                       else "ctp-lossless-lower-layer-assumed"),
+                  drop_first_ctp_read_response=a.drop_first_ctp_read_response,
+                  network_config=dict(rate_gbps=400, ports=2, link_delay_ps=100000,
+                      switch_delay_ps=50000, ctp_rto_ps=25600000, ctp_max_retransmissions=7),
                   peer_rc=[x.poll() for x in peers], adapter_rc=adapter.poll(),
                   wall_seconds=time.monotonic()-start)
 finally:

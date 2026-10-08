@@ -11,8 +11,11 @@ CBFC blocked-state transitions. Trace is disabled by default.
 Evidence directory: `experiments/native-read-e2e-20261009`, especially
 `n512-wirebytes`, `trace-off-n512`, and `independent-n512`.
 The workload remains two peers each submitting 512 × 64 KiB READ WQEs,400G ports,
-25.6 us RTO and7 retries. Each WQE is16 TAs; native admission is a512-TA window
-per `(srcEntity,dstNode,dstEntity,VL)`, not512 simultaneously active WQEs.
+25.6 us RTO and7 retries. Each WQE is16 TAs. Correction after subsequent
+source audit: the native Jetty's in-flight segment limit is512, whereas the
+`(srcEntity,dstNode,dstEntity,VL)` context ACK bitmap capacity is2048. The observed
+512 high-water mark was previously misidentified here as context capacity;
+it is neither that capacity nor512 simultaneously active WQEs.
 The previously unmaintained `ctp_native_window_blocked=0` statistic is removed;
 the high-water mark now explicitly declares `per_context_ta` scope.
 

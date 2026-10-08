@@ -1131,7 +1131,7 @@ else
     synchronization=disabled
 fi
 case "$ctp_retransmission_request" in
-    auto) (( sync_enabled )) && ctp_retransmission=on || ctp_retransmission=off ;;
+    auto) ctp_retransmission=off ;;
     on|off) ctp_retransmission=$ctp_retransmission_request ;;
     *) die "UBSIM_CTP_RETRANSMISSION must be auto, on, or off" ;;
 esac

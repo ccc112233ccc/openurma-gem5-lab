@@ -365,6 +365,9 @@ class UbNetFabric {
                   << " rate_gbps=" << options_.rate_gbps
                   << " ctp_retransmission="
                   << (options_.ctp_retransmission ? "on" : "off")
+                  << " reliability_profile="
+                  << (options_.ctp_retransmission ? "experimental-ta-timeout-replay"
+                                                  : "ctp-lossless-lower-layer-assumed")
                   << " ctp_rto_ps=" << options_.ctp_rto_ps
                   << " boundary=ub-net-v1\n";
         while (running.load()) {
@@ -1544,7 +1547,10 @@ int main(int argc, char** argv)
                      "[--inject-ctp-cnp-after-first-segment] "
                      "[--ctp-recovery-interval-ps N --ctp-recovery-step-bps N] "
                      "[--ctp-mark-threshold-bytes N] [--ctp-cnp-interval-ps N] "
-                     "[--drop-all-ctp-requests]\n";
+                     "[--drop-all-ctp-requests]\n"
+                     "CTP defaults to lower-layer lossless delivery (assumed; not proof of LLR).\n"
+                     "--ctp-retransmission on enables an experimental TA timeout-replay extension, "
+                     "not the CTP transport recovery described in UB Base 2.0 section 6.3.2.\n";
         return 1;
     }
 }

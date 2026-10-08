@@ -56,8 +56,9 @@ data; measured target reply dwell/backpressure are0. No loss is injected in
 these burst runs. `work_drained=null` remains unknown, not a global checkpoint.
 
 Here N counts submitted WQEs per endpoint, not simultaneously admitted TAs.
-Each64 KiB WQE uses16 TAs; the native512-entry window belongs to a
-`(srcEntity,dstNode,dstEntity,VL)` context and counts TAs. The reported
+Each64 KiB WQE uses16 TAs. Correction after subsequent source audit:512 is
+the native Jetty's in-flight segment limit, while the
+`(srcEntity,dstNode,dstEntity,VL)` context ACK bitmap capacity is2048. The reported
 `ctp_native_max_outstanding` is the largest observed count of one context, not
 an aggregate fabric count or proof of512 active WQEs. The former
 `ctp_native_window_blocked=0` field was never incremented and is not evidence
