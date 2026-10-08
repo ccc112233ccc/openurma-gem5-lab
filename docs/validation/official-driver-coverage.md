@@ -46,6 +46,21 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest fix: QEMU's synchronized empty-input poll now services due output SYNC
+nonblockingly, so a same-tick sync timer cannot be starved by the polling
+callback. The first fixed full-system run completed all seven64–4096 B READ
+cases consecutively, with114688/114688 SQ completions, zero model/network
+errors or retries, and both devices quiescent. The formerly blocked1024 B
+case took6.874 s instead of exceeding180 s. Total wall time173.682 s.
+Both QEMU logs confirm the new branch executed. See the READ record below
+for independent review and repeat-run evidence; this does not close2 B
+compact-length handling or the separate1 MiB CTP lifetime issue.
+A second full run passed all seven cases in186.962 s, again114688/114688
+completions, zero errors/retries, and both devices quiescent. Independent review
+accepted closure of this specific continuous-READ synchronization blocker.
+
+Historical failure evidence (before the poll-SYNC fix):
+
 Latest range request: [2–4096 B READ results](read-2b-4096b-20261008.md).
 Seven sizes64–4096 B have valid single-direction readings (0.015792–1.010911
 GB/s) in two sessions.2 B failed and cleanup stalled;4–32 B were not run.

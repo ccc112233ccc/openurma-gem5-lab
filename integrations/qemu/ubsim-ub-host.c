@@ -56,6 +56,7 @@ typedef struct UbSimUbHostState {
     uint64_t dma_transactions;
     uint64_t interrupts;
     uint64_t polls;
+    uint64_t poll_sync_services;
 } UbSimUbHostState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(UbSimUbHostState, UBSIM_UB_HOST)
@@ -470,6 +471,22 @@ static void ubsim_poll(void *opaque)
         }
         if (SimbricksBaseIfInTerminated(&s->interface.base)) {
             return;
+        }
+        /* Timer callbacks share one dispatcher.  An empty-ring wait must
+         * service an output SYNC due now: its separate timer cannot run until
+         * this callback returns, while the peer may need that horizon before
+         * it can produce our next input.  Do not block on a full output ring;
+         * keep checking input as well.  Never advance time beyond the peer. */
+        uint64_t now = ubsim_now_ps(s);
+        if (UbSimUbHostH2DOutNextSync(&s->interface) <= now &&
+            UbSimUbHostH2DOutSync(&s->interface, now) == 0) {
+            ++s->poll_sync_services;
+            if (s->poll_sync_services == 1) {
+                info_report("[QEMU_UB_POLL_SYNC] now_ps=%" PRIu64
+                            " input_ps=%" PRIu64, now, timestamp);
+            }
+            timer_mod(s->sync_timer, ubsim_time_from_ps(
+                          s, UbSimUbHostH2DOutNextSync(&s->interface)));
         }
     }
 }
