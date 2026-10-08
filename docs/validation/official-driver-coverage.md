@@ -46,6 +46,16 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest requested READ evidence:
+[single-direction scan and aligned control](requested-read-scan-20261008.md).
+Actual capabilities limit R/T/C to1024/1024/4096. With n16384, batch256 and
+CQ moderation1, `-a23` fails immediately at2 B: compact wire length decodes64 B
+while the initiator expects2 B, causing repeated response rejection. The4 KiB
+control passes at964.05 MiB/s (1.01088 GB/s),16384 completions, zero retries.
+Resolve logical-vs-wire READ length with protocol-backed handling and small/
+non-aligned counterexamples; do not hide it by increasing RTO. This is an
+additional timing acceptance blocker, separate from the1 MiB lifetime issue.
+
 See [timing results](qemu-timing-bandwidth-20261008.md). With the current
 pipeline and required QEMU/UDMA/ns-3 synchronization, WRITE bandwidth at64 KiB
 was 53120.86 MiB/s bidirectional at400G/port and 32905.46 at200G/port. The4 KiB

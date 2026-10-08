@@ -6,7 +6,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-from run_modular_rma_regression import validate_depth_output
+import re
+from run_modular_rma_regression import validate_depth_output, validate_bw_scan
 
 
 def main():
@@ -14,6 +15,10 @@ def main():
     p.add_argument("output", type=Path)
     p.add_argument("--timeout", type=float, default=180)
     p.add_argument("--sizes", type=int, nargs="+", default=[4096, 65536, 1048576])
+    p.add_argument("--user-read-scan", action="store_true",
+                   help="run requested a23/n16384 READ scan, capped to reported queue limits")
+    p.add_argument("--read-size", type=int,
+                   help="with --user-read-scan, isolate one size instead of a23")
     args = p.parse_args()
     lab = Path(__file__).resolve().parents[1]
     root = lab / "run-qemu-dual"
@@ -56,6 +61,41 @@ def main():
                             returncode=0))
         print(f"shell-ready: {time.monotonic()-start:.3f}s", flush=True)
         if run("network", serial+["--command", "ubsim-net-up"], args.timeout+10): return 1
+        if args.user_read_scan:
+            if run("capabilities", serial+["--command", "urma_admin show -d udma0 -w"],
+                   args.timeout+10): return 1
+            caps = (args.output/"capabilities.txt").read_text()
+            selected = {}
+            for option, name, requested in (("R", "max_jfr_depth", 8192),
+                                             ("T", "max_jfs_depth", 8192),
+                                             ("C", "max_jfc_depth", 524288)):
+                values = [int(v) for v in re.findall(name+r"\s*:\s*(\d+)", caps)]
+                if len(values) != 2 or min(values) <= 0:
+                    raise ValueError(f"missing both guests' capability: {name}")
+                selected[option] = min(requested, *values)
+            print(f"requested READ scan effective queue settings: {selected}", flush=True)
+            if selected["T"] < 256:
+                raise ValueError("reported JFS capacity cannot support requested batch256")
+            size_option = f"-s {args.read_size}" if args.read_size else "-a23"
+            command = ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest read_bw "
+                       f"-d udma0 --eid_idx 0 --ctp {size_option} -P 21115 -J 1 "
+                       f"-R {selected['R']} -T {selected['T']} -C {selected['C']} "
+                       "-Q 1 -l 256 -n 16384 -p 0")
+            rc = run("requested-read-scan", serial+["--stagger", "1", "--commands",
+                     command, command+" -S 10.0.0.1"], args.timeout+10)
+            transcript = (args.output/"requested-read-scan.txt").read_text()
+            # Single-direction READ server omits its JFS-depth header; use
+            # the exact-size result rows, not bidirectional depth validation.
+            if args.read_size:
+                sections = re.split(r"(?m)^--- UART \d+ ---\s*$", transcript)[1:]
+                row = rf"(?m)^\s*{args.read_size}\s+16384\s+[\d.]+\s+[\d.]+\s+[\d.]+\s*$"
+                errors = [] if len(sections) == 2 and all(
+                    len(re.findall(row, section)) == 1 for section in sections
+                ) else ["missing single-size READ results"]
+            else:
+                errors = validate_bw_scan(transcript, 23, 16384)
+            records[-1]["validation_errors"] = errors
+            return rc or int(bool(errors))
         for index, size in enumerate(args.sizes):
             command = ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest write_bw "
                        f"-d udma0 --eid_idx 0 --ctp -B -s {size} -P {21410+index} "
