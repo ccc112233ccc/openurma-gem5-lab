@@ -30,7 +30,11 @@ void ZeroVolatile(volatile T& object)
 // completion. Keep both participants advancing after the initiator's error.
 int LateDma(net::Interface& interface, bool sender, const std::string& profile)
 {
-    const bool read=profile=="ctp-late-read";
+    const bool targetError=profile.rfind("ctp-dma-error-",0)==0;
+    const bool activeError=targetError && profile.find("-active")!=std::string::npos;
+    const bool lossError=targetError && profile.find("-loss")!=std::string::npos;
+    const bool read=profile=="ctp-late-read" ||
+                    (targetError && profile.find("-read-")!=std::string::npos);
     const bool badLength=profile=="ctp-late-dma-bad-length";
     const bool lateFirst=profile=="ctp-late-first";
     const auto start = std::chrono::steady_clock::now();
@@ -65,6 +69,10 @@ int LateDma(net::Interface& interface, bool sender, const std::string& profile)
                                                                : net::UdmaOperation::WriteAck);
                     wire.flags=net::kUdmaWireCtpSegment|net::kUdmaWireLastFragment;
                     wire.payload_length=read ? 32 : 0;
+                    if(targetError) {
+                        wire.operation=static_cast<std::uint8_t>(net::UdmaOperation::RmaError);
+                        wire.payload_length=0;
+                    }
                     if(badLength) wire.transfer_length=31;
                 }
                 out->frame.length=sizeof(wire)+wire.payload_length;
@@ -94,13 +102,15 @@ int LateDma(net::Interface& interface, bool sender, const std::string& profile)
                 if(sender) {
                     if(wire.operation!=static_cast<std::uint8_t>(net::UdmaOperation::RmaError) || ++errors!=1)
                         return 8;
+                    if(activeError && now>=25600000) return 8;
+                    if(lossError && (now<25600000 || now>=51200000)) return 8;
                     std::cout<<"EXPECTED_RMA_ERROR now_ps="<<now<<std::endl;
                 } else {
                     if(wire.operation!=static_cast<std::uint8_t>(read ? net::UdmaOperation::ReadRequest
                                                                     : net::UdmaOperation::Write) ||
                        wire.transfer_length!=32 || wire.payload_length!=(read ? 0U : 32U) ||
                        ++requests!=1) return 8;
-                    delayed=wire; due=lateFirst ? now : now+300000000;
+                    delayed=wire; due=(lateFirst || activeError || lossError) ? now : now+300000000;
                     std::cout<<"TARGET_ACCEPTED now_ps="<<now<<" completion_due_ps="<<due<<std::endl;
                 }
             }
@@ -157,7 +167,10 @@ int Run(const std::string& role, const std::string& socket,
         return 4;
 
     if(profile=="ctp-late-dma" || profile=="ctp-late-read" ||
-       profile=="ctp-late-dma-bad-length" || profile=="ctp-late-first") {
+       profile=="ctp-late-dma-bad-length" || profile=="ctp-late-first" ||
+       profile=="ctp-dma-error-read-active" || profile=="ctp-dma-error-write-active" ||
+       profile=="ctp-dma-error-read-loss" || profile=="ctp-dma-error-write-loss" ||
+       profile=="ctp-dma-error-read-terminal" || profile=="ctp-dma-error-write-terminal") {
         if(sync_mode!="required") return 2;
         return LateDma(interface,sender,profile);
     }
@@ -532,7 +545,10 @@ int main(int argc, char** argv)
         std::cerr << "usage: ub-net-contract-peer sender|receiver SOCKET SHM "
                      "off|required [raw|ctp-order|ctp-retrans|ctp-taack-loss|"
                      "ctp-exhaust|ctp-read-response-loss|ctp-late-dma|ctp-late-read|"
-                     "ctp-late-dma-bad-length|ctp-late-first]\n";
+                     "ctp-late-dma-bad-length|ctp-late-first|"
+                     "ctp-dma-error-read-active|ctp-dma-error-write-active|"
+                     "ctp-dma-error-read-loss|ctp-dma-error-write-loss|"
+                     "ctp-dma-error-read-terminal|ctp-dma-error-write-terminal]\n";
         return 2;
     }
     return Run(argv[1], argv[2], argv[3], argv[4],

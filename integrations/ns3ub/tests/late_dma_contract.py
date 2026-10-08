@@ -10,7 +10,10 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("adapter")
 p.add_argument("peer")
 p.add_argument("work", type=pathlib.Path)
-p.add_argument("--profile", choices=("ctp-late-dma", "ctp-late-read", "ctp-late-dma-bad-length", "ctp-late-first"),
+p.add_argument("--profile", choices=("ctp-late-dma", "ctp-late-read", "ctp-late-dma-bad-length", "ctp-late-first",
+               "ctp-dma-error-read-active", "ctp-dma-error-write-active",
+               "ctp-dma-error-read-loss", "ctp-dma-error-write-loss",
+               "ctp-dma-error-read-terminal", "ctp-dma-error-write-terminal"),
                default="ctp-late-dma")
 a = p.parse_args()
 a.work.mkdir(parents=True, exist_ok=False)
@@ -37,6 +40,9 @@ try:
     # Native switch processing, not IPC link delay, places first target
     # execution after the 204.8us sender retry budget.
     extra = ["--switch-delay-ps", "300000000"] if a.profile == "ctp-late-first" else []
+    if a.profile.endswith("-loss"):
+        extra = ["--drop-first-ctp-read-response" if "-read-" in a.profile
+                 else "--drop-first-ctp-taack"]
     adapter = launch("adapter", [a.adapter, "--sync", "required",
                      "--ctp-retransmission", "on", "--ctp-rto-ps", "25600000",
                      "--ctp-max-retransmissions", "7",
@@ -73,7 +79,24 @@ if a.profile != "ctp-late-dma-bad-length":
                 "pending_target_dma": 0}
     if a.profile == "ctp-late-first":
         expected["native_target_after_terminal"] = 1
-    if a.profile != "ctp-late-first":
+    if a.profile.startswith("ctp-dma-error-"):
+        expected["target_dma_errors"] = 1
+        active = a.profile.endswith("-active")
+        loss = a.profile.endswith("-loss")
+        expected["target_dma_drained_after_terminal"] = 0 if active or loss else 1
+        expected["ctp_retransmissions"] = 1 if loss else (0 if active else 7)
+        expected["ctp_retransmission_exhausted"] = 0 if active or loss else 1
+        expected["native_late_response_received"] = 0 if active or loss else 1
+        if loss:
+            if "-read-" in a.profile:
+                expected.update(duplicate_read_suppressed=1,
+                                duplicate_read_response_replays=1,
+                                injected_read_response_drops=1)
+            else:
+                expected.update(duplicate_write_suppressed=1,
+                                duplicate_taack_replays=1,
+                                injected_taack_drops=1)
+    elif a.profile != "ctp-late-first":
         expected["native_late_response_received"] = 1
     stats = [line for line in text.splitlines() if line.startswith("[NS3_UB_NET_STATS]")]
     valid &= len(stats) == 1 and all(

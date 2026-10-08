@@ -19,6 +19,7 @@ using namespace ns3;
 
 struct ReadLengthTest {
     bool attachContext{true};
+    bool sourceGroup{false};
     static std::vector<uint8_t> Context(unsigned id) {
         return {0, 0xff, 0x55, 0xaa, static_cast<uint8_t>(id), 0, 0x7f};
     }
@@ -50,16 +51,17 @@ struct ReadLengthTest {
     Ptr<UbCtpTransportService> sender;
     void BadResponses(Ptr<const UbWqeSegment> request) {
         const auto cnps=sender->GetCnpSentCount();
-        for(unsigned kind=0;kind<5;++kind) {
-            auto packet=Create<Packet>(kind==4 ? 2 : 1);
+        for(unsigned kind=0;kind<7;++kind) {
+            auto packet=Create<Packet>(kind>=5 ? 0 : (kind==4 ? 2 : 1));
             packet->AddPacketTag(UbFlowTag(request->GetTaskId(),request->GetWqeSize()));
             UbAckTransactionHeader ack;
             ack.SetUbTransactionOpcode(UbTransactionOpcode::READ_RESPONSE);
             ack.SetIniTaSsn(request->GetRequestTassn());
             ack.SetIniRcType(kind==1 ? 0 : 1); ack.SetIniRcId(kind==3 ? 8 : 7);
             ack.SetRspStatus(kind==0 ? 1 : 0); ack.SetPoison(kind==2);
+            if(kind>=5) { ack.SetRspStatus(3); ack.SetRspInfo(2); }
             packet->AddHeader(ack);
-            UbCompactEidHeader eid; eid.SetSourceEid(1); eid.SetDestinationEid(1);
+            UbCompactEidHeader eid; eid.SetSourceEid(kind==6 ? 99 : 1); eid.SetDestinationEid(1);
             packet->AddHeader(eid);
             UbCompactUpiHeader upi; upi.SetUpi(0); packet->AddHeader(upi);
             UbCtpHeader ctp; ctp.SetTPOpcode(CtpOpcode::CTP_DATA);
@@ -67,14 +69,16 @@ struct ReadLengthTest {
             const auto pad=(4-(packet->GetSize()+ctp.GetSerializedSize())%4)%4;
             ctp.SetPadding(pad); packet->AddPaddingAtEnd(pad); packet->AddHeader(ctp);
             UbCna16NetworkHeader cna;
-            cna.SetScna(utils::NodeIdToCna16(request->GetDest(),0));
+            cna.SetScna(utils::NodeIdToCna16(kind==5 ? request->GetSrc() : request->GetDest(),0));
             cna.SetDcna(utils::NodeIdToCna16(request->GetSrc(),0));
             cna.SetServiceLevel(1); cna.SetNlp(UB_CNA_NLP_CTPH);
             if(kind==4) { cna.SetMode(4); cna.SetFecn(1); }
             packet->AddHeader(cna);
             UbDataLink::AddPacketHeader(packet,false,false,1,1,
                 static_cast<RoutingType>(0),UbDatalinkHeaderConfig::PACKET_CNA16);
-            sender->HandleReceivedPacket(packet,0);
+            const bool accepted=sender->HandleReceivedPacket(packet,0);
+            if(sourceGroup && kind>=5 && accepted)
+                throw std::runtime_error("wrong-peer remote abort was not rejected");
         }
         if(sender->GetCnpSentCount()!=cnps+1)
             throw std::runtime_error("marked READ response lost congestion feedback");
@@ -149,10 +153,12 @@ struct ReadLengthTest {
             MakeCallback(&ReadLengthTest::Target,this));
         auto ctrl=hosts[0]->GetObject<UbController>(); auto fn=ctrl->GetUbFunction();
         sender=ctrl->GetCtpTransportService();
-        fn->CreateJetty(hosts[0]->GetId(),hosts[1]->GetId(),7);
+        if(sourceGroup) fn->CreateJetty(hosts[0]->GetId(),7);
+        else fn->CreateJetty(hosts[0]->GetId(),hosts[1]->GetId(),7);
         auto jetty=fn->GetJetty(7);
         jetty->SetWqeCompletionCallback(MakeCallback(&ReadLengthTest::Complete,this));
-        if(!ctrl->GetCtpTransportService()->PrepareJetty(jetty,{1,hosts[1]->GetId(),1,1}))
+        const UbCtpEntityKey key{1,sourceGroup ? 0U : hosts[1]->GetId(),sourceGroup ? 0U : 1U,1};
+        if(!ctrl->GetCtpTransportService()->PrepareJetty(jetty,key))
             throw std::runtime_error("prepare");
         for(unsigned id=0;id<sizes.size();++id) {
             auto w=fn->CreateWqe(hosts[0]->GetId(),hosts[1]->GetId(),sizes[id],id,UbTransactionOpcode::READ);
@@ -182,4 +188,5 @@ int main() {
     ReadLengthTest::TagValueRoundTrip();
     ReadLengthTest test; test.Run();
     ReadLengthTest emptyContext; emptyContext.attachContext=false; emptyContext.Run();
+    ReadLengthTest sourceGroup; sourceGroup.sourceGroup=true; sourceGroup.Run();
 }

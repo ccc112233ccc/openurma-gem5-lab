@@ -46,6 +46,19 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest error-path stage: [CTP Remote Abort](ctp-remote-abort-20261009.md)
+converts validated target READ/WRITE DMA errors into protocol errors instead
+of crashing on an unsupported completion. Final native contracts10/10 and
+official-driver no-sync cases12/12 pass; error replay does not reexecute DMA,
+and wrong-peer responses cannot terminate an unrelated source WQE. This is
+not closure of the synchronized1 MiB throughput/retry-lifetime gate.
+The synchronized repeat now returns official error completions instead of
+crashing the adapter:128 native WQEs,12 successes/116 failures and212659 retries;
+no valid bandwidth result. Command85.937 s, total133.978 s. Target drain was
+still incomplete at the runner's stop snapshot. Next repair is starting retry
+timers at actual port transmission rather than local enqueue, with queued
+attempt invalidation; see the linked acceptance record for concrete tests.
+
 Latest follow-up: [full CTP transaction headers](read-full-ta-20261008.md)
 repair exact small/non-power-of-two lengths and per-segment remote addresses.
 All12 no-sync official-driver regression cases pass, including1 MiB RMA.

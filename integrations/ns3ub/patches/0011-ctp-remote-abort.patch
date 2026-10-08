@@ -1,0 +1,208 @@
+--- a/src/unified-bus/model/ub-datatype.h
++++ b/src/unified-bus/model/ub-datatype.h
+@@ -1300,6 +1300,17 @@
+         return m_externalRequestContext;
+     }
+     uint32_t GetExternalContextOffset() const { return m_externalRequestOffset; }
++    void SetResponseStatus(uint8_t status, uint8_t info)
++    {
++        m_responseStatus = status;
++        m_responseInfo = info;
++    }
++    uint8_t GetResponseStatus() const { return m_responseStatus; }
++    uint8_t GetResponseInfo() const { return m_responseInfo; }
++    bool IsRemoteAbortResponse() const
++    {
++        return m_responseStatus == 3 && m_responseInfo == 2;
++    }
+ 
+     // ========== 构造函数 ==========
+     UbWqeSegment()
+@@ -1871,6 +1882,8 @@
+     uint32_t m_requestTassn{UINT32_MAX};
+     UbTransactionOpcode m_requestOpcode{UbTransactionOpcode::WRITE};
+     uint32_t m_responseBytes{0};
++    uint8_t m_responseStatus{0};
++    uint8_t m_responseInfo{0};
+     uint64_t m_remoteAddress{0};
+     uint32_t m_remoteTokenId{0};
+     bool m_needsTransactionResponse{true};
+--- a/src/unified-bus/model/protocol/ub-transaction.h
++++ b/src/unified-bus/model/protocol/ub-transaction.h
+@@ -126,6 +126,8 @@
+     {
+         /** The target executed the request successfully. */
+         SUCCESS = 0,
++        /** Target execution aborted; full ATAH Completer Error / Remote Abort. */
++        REMOTE_ABORT,
+     };
+     /** Outcome one target executor reports back through its completion callback. */
+     struct UbWorkExecutionResult
+--- a/src/unified-bus/model/protocol/ub-transaction.cc
++++ b/src/unified-bus/model/protocol/ub-transaction.cc
+@@ -1988,9 +1988,14 @@
+                                         const UbTransactionRule& rule,
+                                         UbWorkExecutionResult result) const
+ {
+-    if (request == nullptr || rule.role != UbTransactionSegmentKind::REQUEST ||
+-        result.outcome != UbWorkOutcome::COMPLETED ||
+-        result.protocolStatus != UbTransactionProtocolStatus::SUCCESS) return nullptr;
++    if (request == nullptr || rule.role != UbTransactionSegmentKind::REQUEST) return nullptr;
++    const bool remoteAbort = result.protocolStatus == UbTransactionProtocolStatus::REMOTE_ABORT;
++    // Only the CTP carrier currently serializes terminal target error status.
++    // Do not let the RTP carrier silently encode this as a successful response.
++    if (remoteAbort && localTpn != UINT32_MAX) return nullptr;
++    if ((!remoteAbort && (result.outcome != UbWorkOutcome::COMPLETED ||
++                         result.protocolStatus != UbTransactionProtocolStatus::SUCCESS)) ||
++        (remoteAbort && result.outcome != UbWorkOutcome::FAILED)) return nullptr;
+     UbTransactionOpcode responseOpcode = request->HasTransactionResolved()
+                                              ? request->GetTransactionResolved().responseOpcode
+                                              : UbTransactionOpcode::TAACK;
+@@ -2001,7 +2006,7 @@
+     if (request->HasTransactionResolved())
+     {
+         resolved = request->GetTransactionResolved();
+-        if (result.responsePayloadBytes)
++        if (result.responsePayloadBytes && !remoteAbort)
+         {
+             if (request->GetType() != UbTransactionOpcode::ATOMIC_SYNC ||
+                 (*result.responsePayloadBytes != 0 &&
+@@ -2019,7 +2024,13 @@
+         // would allow a response to disagree with the request that was actually admitted.
+         return nullptr;
+     }
++    if (remoteAbort)
++    {
++        payload = 0;
++        resolved.responsePayloadBytes = 0;
++    }
+     auto response = CreateObject<UbWqeSegment>();
++    if (remoteAbort) response->SetResponseStatus(3, 2);
+     response->SetSrc(m_nodeId); response->SetDest(request->GetSrc()); response->SetSport(request->GetDport()); response->SetDport(request->GetSport());
+     response->SetType(responseOpcode); response->SetSize(std::max(payload, 1u)); response->SetLogicalBytes(payload); response->SetPayloadBytes(payload); response->SetCarrierBytes(std::max(payload, 1u)); response->SetPriority(request->GetPriority());
+     response->SetTaskId(request->GetTaskId()); response->SetWqeSize(request->GetWqeSize()); response->SetOrderType(request->GetOrderType()); response->SetJettyNum(request->GetOriginJettyNum()); response->SetTaMsn(0); response->SetTaSsn(request->GetRequestTassn()); response->SetSegmentKind(UbTransactionSegmentKind::RESPONSE); response->SetOriginJettyNum(request->GetOriginJettyNum()); response->SetRequestTassn(request->GetRequestTassn()); response->SetRequestOpcode(request->GetType()); response->SetResponseBytes(payload); response->SetRemoteAddress(request->GetRemoteAddress()); response->SetRemoteTokenId(request->GetRemoteTokenId()); response->SetNeedsTransactionResponse(false); response->SetTpn(localTpn); response->SetTransactionFields(request->GetTransactionFields());
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -201,6 +201,8 @@
+             ackHeader.SetIniTaSsn(static_cast<uint16_t>(taSsn));
+             ackHeader.SetIniRcType(0x01);
+             ackHeader.SetIniRcId(segment->GetOriginJettyNum());
++            ackHeader.SetRspStatus(segment->GetResponseStatus());
++            ackHeader.SetRspInfo(segment->GetResponseInfo());
+             packet->AddHeader(ackHeader);
+         }
+         else
+@@ -1621,7 +1623,10 @@
+             }
+             const auto opcode = static_cast<UbTransactionOpcode>(
+                 ackHeader.GetUbTransactionOpcode());
+-            if (ackHeader.GetRspStatus() != 0 || ackHeader.GetPoison() ||
++            const bool remoteAbort = ackHeader.GetRspStatus() == 3 &&
++                                     ackHeader.GetRspInfo() == 2;
++            if ((!remoteAbort && (ackHeader.GetRspStatus() != 0 ||
++                                  ackHeader.GetRspInfo() != 0)) || ackHeader.GetPoison() ||
+                 ackHeader.GetIniRcType() != 0x01) return false;
+             if (opcode != UbTransactionOpcode::TAACK &&
+                 cnaHeader.GetMode() == 4 && cnaHeader.GetFecn() != 0)
+@@ -1651,6 +1656,7 @@
+             // TAACK may carry experiment-only link padding, never response data.
+             const uint32_t responsePayloadBytes = opcode == UbTransactionOpcode::TAACK
+                 ? 0 : ackCandidate->GetSize();
++            if (remoteAbort && ackCandidate->GetSize() != 0) return false;
+             UbPacketTraceTag traceTag;
+             copy->PeekPacketTag(traceTag);
+             CtpRecvNotify(packet->GetUid(),
+@@ -1665,6 +1671,19 @@
+             // newly admitted operation after a wire sequence wraps.
+             if (outstandingRequest == nullptr ||
+                 outstandingRequest->GetTaskId() != flowTag.GetFlowId()) return true;
++
++            // The source-group lookup deliberately omits the peer. Validate
++            // the actual reverse endpoint identity before accepting any reply;
++            // a different physical ingress port remains legal under multipath.
++            Ptr<UbJetty> preparedJetty;
++            UbCtpEntityKey preparedKey;
++            if (!TryGetJettyPreparation(outstandingRequest->GetJettyNum(),
++                                        preparedJetty, preparedKey)) return false;
++            const auto expectedKey = MakeTxKeyForSegment(preparedKey, outstandingRequest);
++            if (wireSrcNodeId != outstandingRequest->GetDest() ||
++                wireDstNodeId != outstandingRequest->GetSrc() ||
++                srcEntityId != expectedKey.dstEntityId ||
++                dstEntityId != expectedKey.srcEntityId) return false;
+ 
+             Ptr<UbWqeSegment> response = CreateObject<UbWqeSegment>();
+             response->SetSrc(wireSrcNodeId);
+@@ -1683,6 +1702,7 @@
+             response->SetResponseBytes(responsePayloadBytes);
+             response->SetNeedsTransactionResponse(false);
+             response->SetTransactionFields(responseFields);
++            response->SetResponseStatus(ackHeader.GetRspStatus(), ackHeader.GetRspInfo());
+             response->SetSize(std::max(1u, responsePayloadBytes));
+             response->SetLogicalBytes(responsePayloadBytes);
+             response->SetPayloadBytes(responsePayloadBytes);
+@@ -2371,7 +2391,7 @@
+ 
+     const UbCtpEntityKey& key = state.GetKey();
+     uint32_t taSsn = response->GetRequestTassn();
+-    if (response->GetType() == UbTransactionOpcode::TAACK)
++    if (response->GetType() == UbTransactionOpcode::TAACK || response->IsRemoteAbortResponse())
+     {
+         const uint16_t lbSalt = NextLoadBalanceSalt(state, key);
+         const uint32_t outPort = SelectOutPort(response, state, key, lbSalt);
+@@ -2420,7 +2440,7 @@
+                                              UbCtpEntityState& state)
+ {
+     NS_ABORT_MSG_IF(response == nullptr, "CTP response replay requires WQE segment");
+-    if (response->GetType() == UbTransactionOpcode::TAACK)
++    if (response->GetType() == UbTransactionOpcode::TAACK || response->IsRemoteAbortResponse())
+         return SendResponseSegment(response, state);
+     if (response->GetType() != UbTransactionOpcode::READ_RESPONSE)
+         return false;
+@@ -2554,6 +2574,8 @@
+     {
+         const auto request = outstandingIt->second;
+         if (response->GetOriginJettyNum() != request->GetJettyNum()) return;
++        if (response->IsRemoteAbortResponse() && response->GetTaskId() != request->GetTaskId())
++            return;
+         if (response->GetType() != UbTransactionOpcode::TAACK && response->GetTaskId() != 0 &&
+             response->GetTaskId() != request->GetTaskId())
+             return;
+@@ -2563,6 +2585,29 @@
+         const auto expected = request->HasTransactionResolved()
+                                   ? request->GetTransactionResolved().responseOpcode
+                                   : rule->responseOpcode;
++        if (response->GetType() != expected ||
++            response->GetSegmentKind() != UbTransactionSegmentKind::RESPONSE) return;
++        if (response->IsRemoteAbortResponse())
++        {
++            if (response->GetPayloadBytes() != 0) return;
++            if (request->GetType() == UbTransactionOpcode::ATOMIC_SYNC &&
++                (!request->GetTransactionFields().taskId ||
++                 !response->GetTransactionFields().taskId ||
++                 request->GetTransactionFields().taskId != response->GetTransactionFields().taskId))
++                return;
++            const uint32_t jettyNum = request->GetJettyNum();
++            const uint32_t wqeId = request->GetTaskId();
++            // Terminal target errors do not enter the success completion path.
++            // Cancel all remaining retry records before the transaction owner
++            // retires the WQE and invokes its failure completion callback.
++            std::erase_if(m_retransmissionRecords,
++                [jettyNum, wqeId](const auto& entry) {
++                    return entry.second.jettyNum == jettyNum && entry.second.wqeId == wqeId;
++                });
++            GetTransactionOwner()->CompleteWqeOperation(jettyNum, wqeId, UbWorkOutcome::FAILED);
++            return;
++        }
++        if (response->GetResponseStatus() != 0 || response->GetResponseInfo() != 0) return;
+         const uint32_t expectedPayload = request->HasTransactionResolved()
+                                              ? request->GetTransactionResolved().responsePayloadBytes
+                                              : request->GetResponseBytes();
+@@ -2584,6 +2629,8 @@
+     const uint32_t oldCompleteUna = context->GetCompleteUna();
+     if (outstandingIt == transactionState->outstandingSegments.end())
+     {
++        if (response != nullptr &&
++            (response->GetResponseStatus() != 0 || response->GetResponseInfo() != 0)) return;
+         if (response != nullptr && response->GetType() == UbTransactionOpcode::TAACK)
+             context->MarkTaAck(taSsn);
+         return;

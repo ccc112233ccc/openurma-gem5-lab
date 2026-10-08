@@ -9,6 +9,13 @@ new context. See [lifetime acceptance](../../docs/validation/ctp-request-context
 for fast failure contracts, official-driver evidence and remaining1 MiB timing
 gaps; these changes do not constitute complete error/replay recovery support.
 
+Patch0011 maps validated target `RmaError` to a CTP Remote Abort response
+(WRITE TAACK or empty READ_RESPONSE), terminates the matching source WQE once,
+and caches the error response for replay without repeating DMA. Reverse peer
+identity is checked independently of physical port. See
+[error-path acceptance](../../docs/validation/ctp-remote-abort-20261009.md);
+this does not fix premature retry timers or establish large-message bandwidth.
+
 The production boundary is `ub-net-adapter.cc`. It connects independent UDMA
 device processes through the simulator-neutral UB-NET v1 ABI and uses native
 ns-3-UB `UbSwitch`, `UbPort`, and `UbLink` objects for routing, serialization,

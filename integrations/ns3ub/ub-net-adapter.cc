@@ -548,6 +548,7 @@ class UbNetFabric {
                   << " native_wqes_completed=" << native_wqes_completed_
                   << " native_wqes_failed=" << native_wqes_failed_
                   << " target_dma_drained_after_terminal=" << target_dma_drained_after_terminal_
+                  << " target_dma_errors=" << target_dma_errors_
                   << " pending_target_dma=" << pending_target_executions_.size()
                   << " native_late_response_received=" << native_late_response_received_
                   << " native_target_after_terminal=" << native_target_after_terminal_
@@ -843,7 +844,8 @@ class UbNetFabric {
     {
         const auto value = static_cast<ubnet::UdmaOperation>(operation);
         return value == ubnet::UdmaOperation::WriteAck ||
-               value == ubnet::UdmaOperation::ReadResponse;
+               value == ubnet::UdmaOperation::ReadResponse ||
+               value == ubnet::UdmaOperation::RmaError;
     }
 
     void AcceptWqeChunk(std::size_t source,
@@ -1138,17 +1140,19 @@ class UbNetFabric {
         const auto& expected = pending->second;
         const bool read = static_cast<ubnet::UdmaOperation>(expected.request.operation) ==
                           ubnet::UdmaOperation::ReadRequest;
+        const bool target_error = static_cast<ubnet::UdmaOperation>(wire.operation) ==
+                                  ubnet::UdmaOperation::RmaError;
         const auto expected_operation = read ? ubnet::UdmaOperation::ReadResponse :
                                               ubnet::UdmaOperation::WriteAck;
         if (target != expected.target || frame.source_eid != expected.target_eid ||
             frame.destination_eid != expected.source_eid ||
-            wire.operation != static_cast<std::uint8_t>(expected_operation) ||
+            (!target_error && wire.operation != static_cast<std::uint8_t>(expected_operation)) ||
             wire.source_jetty != expected.request.destination_jetty ||
             wire.destination_jetty != expected.request.source_jetty ||
             wire.tpn != expected.request.tpn ||
             wire.transfer_length != expected.request.transfer_length ||
             wire.payload_offset != expected.request.payload_offset ||
-            payload.size() != (read ? expected.request.transfer_length : 0))
+            payload.size() != (read && !target_error ? expected.request.transfer_length : 0))
             throw std::runtime_error("mismatched external target DMA completion");
         auto task = native_tasks_.find(pending->second.task_id);
         if (task != native_tasks_.end()) {
@@ -1157,7 +1161,7 @@ class UbNetFabric {
                 segment->second.bytes != expected.request.transfer_length ||
                 segment->second.offset != expected.request.payload_offset)
                 throw std::runtime_error("target DMA completion lost its native segment");
-            if (read) segment->second.read_payload = std::move(payload);
+            if (read && !target_error) segment->second.read_payload = std::move(payload);
         } else {
             // The target accepted this DMA before source termination. Drain its
             // callback independently; CTP rejects a later response without an
@@ -1166,7 +1170,15 @@ class UbNetFabric {
         }
         UbTargetCompletion completion = pending->second.completion;
         pending_target_executions_.erase(pending);
-        completion(UbWorkExecutionResult{});
+        UbWorkExecutionResult result{};
+        if (target_error) {
+            // UB-NET currently reports a generic remote execution failure,
+            // not a recoverable Page Fault or a specific permission syndrome.
+            ++target_dma_errors_;
+            result.outcome = UbWorkOutcome::FAILED;
+            result.protocolStatus = UbTransactionProtocolStatus::REMOTE_ABORT;
+        }
+        completion(result);
     }
 
     void OnNativeSegmentComplete(std::uint32_t node_id, std::uint32_t task_id,
@@ -1428,6 +1440,7 @@ class UbNetFabric {
     std::uint64_t terminal_history_evictions_{};
     std::map<TargetExecutionKey, PendingTargetExecution> pending_target_executions_;
     std::uint64_t target_dma_drained_after_terminal_{};
+    std::uint64_t target_dma_errors_{};
     std::uint64_t native_late_response_received_{};
     std::uint64_t native_target_after_terminal_{};
     std::uint64_t native_scheduler_runs_{};
