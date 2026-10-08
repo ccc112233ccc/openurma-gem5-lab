@@ -84,6 +84,8 @@ struct Options {
     bool drop_first_ctp_read_response{false};
     bool drop_all_ctp_requests{false};
     bool inject_ctp_cnp_after_first_segment{false};
+    std::uint64_t ctp_recovery_interval_ps{0};
+    std::uint64_t ctp_recovery_step_bps{0};
 };
 
 EndpointOption ParseEndpoint(const std::string& value)
@@ -146,10 +148,16 @@ Options ParseOptions(int argc, char** argv)
             options.drop_all_ctp_requests = true;
         } else if (arg == "--inject-ctp-cnp-after-first-segment") {
             options.inject_ctp_cnp_after_first_segment = true;
+        } else if (arg == "--ctp-recovery-interval-ps" && i + 1 < argc) {
+            options.ctp_recovery_interval_ps = ParseUnsigned(argv[++i], "CTP recovery interval");
+        } else if (arg == "--ctp-recovery-step-bps" && i + 1 < argc) {
+            options.ctp_recovery_step_bps = ParseUnsigned(argv[++i], "CTP recovery step");
         } else {
             throw std::runtime_error("unknown or incomplete option: " + arg);
         }
     }
+    if ((options.ctp_recovery_interval_ps == 0) != (options.ctp_recovery_step_bps == 0))
+        throw std::runtime_error("CTP recovery requires both interval and additive step");
     if (options.endpoints.size() < 2)
         throw std::runtime_error("at least two endpoints are required");
     if (options.ports == 0 || options.ports > 16)
@@ -494,6 +502,7 @@ class UbNetFabric {
                   << ctp_congestion_rate_cuts
                   << " ctp_native_segment_send_span_ps="
                   << (last_native_segment_send_ps_ - first_native_segment_send_ps_)
+                  << " ctp_second_segment_gap_ps=" << second_native_segment_gap_ps_
                   << '\n';
     }
 
@@ -571,6 +580,8 @@ class UbNetFabric {
             service->SetMaxRetransmissionAttempts(options_.ctp_max_retransmissions);
             const std::uint64_t line_rate_bps = options_.rate_gbps * 1000000000ULL;
             service->SetCongestionLineRate(line_rate_bps);
+            service->SetCongestionRecovery(PicoSeconds(options_.ctp_recovery_interval_ps),
+                                           options_.ctp_recovery_step_bps);
             service->SetCongestionMinimumRate(
                 std::max<std::uint64_t>(1, line_rate_bps / 1024));
             service->SetDropNextTaAckForTest(options_.drop_first_ctp_taack);
@@ -904,6 +915,8 @@ class UbNetFabric {
             Simulator::Now().GetPicoSeconds());
         if (ctp_request_segments_ == 1)
             first_native_segment_send_ps_ = send_ps;
+        if (ctp_request_segments_ == 2)
+            second_native_segment_gap_ps_ = send_ps - first_native_segment_send_ps_;
         last_native_segment_send_ps_ = send_ps;
         ++forwarded_;
         payload_bytes_ += logical_bytes;
@@ -1217,6 +1230,7 @@ class UbNetFabric {
     std::uint64_t ctp_taacks_{};
     std::uint64_t ctp_read_responses_{};
     std::uint64_t first_native_segment_send_ps_{};
+    std::uint64_t second_native_segment_gap_ps_{};
     std::uint64_t last_native_segment_send_ps_{};
     bool ctp_cnp_injected_{};
     std::uint64_t ctp_max_payload_{};
@@ -1259,6 +1273,7 @@ int main(int argc, char** argv)
                      "[--drop-first-ctp-request] [--drop-first-ctp-taack] "
                      "[--drop-first-ctp-read-response] "
                      "[--inject-ctp-cnp-after-first-segment] "
+                     "[--ctp-recovery-interval-ps N --ctp-recovery-step-bps N] "
                      "[--drop-all-ctp-requests]\n";
         return 1;
     }

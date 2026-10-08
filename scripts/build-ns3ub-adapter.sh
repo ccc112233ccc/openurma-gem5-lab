@@ -32,6 +32,7 @@ ctp_duplicate_patch="$runtime_lab/integrations/ns3ub/patches/0002-ctp-write-dupl
 ctp_failure_patch="$runtime_lab/integrations/ns3ub/patches/0003-ctp-retry-exhaustion.patch"
 ctp_read_replay_patch="$runtime_lab/integrations/ns3ub/patches/0004-ctp-read-response-replay.patch"
 ctp_cnp_pacing_patch="$runtime_lab/integrations/ns3ub/patches/0005-ctp-cnp-pacing.patch"
+ctp_recovery_patch="$runtime_lab/integrations/ns3ub/patches/0006-ctp-recovery-shared-wakeup.patch"
 simbricks_base_source="$runtime_lab/components/udma-device-sim/simbricks_base_portable.c"
 expected_source_revision=d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b
 
@@ -70,6 +71,8 @@ ubsim_exec git -C "$source_root" apply --check "$ctp_read_replay_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_read_replay_patch"
 ubsim_exec git -C "$source_root" apply --check "$ctp_cnp_pacing_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_cnp_pacing_patch"
+ubsim_exec git -C "$source_root" apply --check "$ctp_recovery_patch"
+ubsim_exec git -C "$source_root" apply "$ctp_recovery_patch"
 ubsim_exec rm -f "$source_root/scratch/ub-gem5-adapter.cc" \
     "$source_root/src/unified-bus/model/ub-external-adapter-protocol.h"
 ubsim_exec mkdir -p "$source_root/scratch/ubsim-ub-net"
@@ -101,10 +104,11 @@ ubsim_exec cmake -S "$source_root" -B "$cache_dir" \
     -DNS3_OUTPUT_DIRECTORY="$output_dir"
 
 ubsim_exec cmake --build "$cache_dir" \
-    --target scratch_ub-net-adapter \
+    --target scratch_ub-net-adapter scratch_ctp-recovery-contract \
     -j "${UBSIM_BUILD_JOBS:-8}"
 
 ubsim_exec test -x "$output_dir/scratch/ns3.44-ub-net-adapter"
+ubsim_exec "$output_dir/scratch/ns3.44-ctp-recovery-contract"
 
 if [[ "$UBSIM_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
     # The UB-NET contract peer is portable too.  Reuse the checked-in Darwin

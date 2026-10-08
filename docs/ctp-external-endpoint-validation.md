@@ -188,6 +188,7 @@ lossless CBFC under the included large bidirectional bursts. Focused process
 coverage now validates NO/RO/SO propagation, the RO-before-SO constraint, and
 request-loss and lost-TAACK recovery for WRITE, plus an initiator-visible
 ACK-timeout completion after retry exhaustion. READ-response loss now has the
-same focused duplicate-suppression and replay coverage. CNP/congestion behavior
-remains the next protocol validation stage. Reliability recovery is not
+same focused duplicate-suppression and replay coverage. Injected CNP now has
+an A/B pacing contract and optional additive recovery has a native rate-law
+test; switch-generated congestion feedback remains outstanding. Reliability recovery is not
 claimed by the asynchronous full-system functional matrix.

@@ -1,0 +1,128 @@
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -186,7 +186,8 @@
+     void RecordCnpForTest(const UbCtpEntityKey& key);
+     void SetCongestionLineRate(uint64_t bitsPerSecond);
+     void SetCongestionMinimumRate(uint64_t bitsPerSecond);
+-    uint64_t GetCongestionRate(const UbCtpEntityKey& key) const;
++    uint64_t GetCongestionRate(const UbCtpEntityKey& key);
++    void SetCongestionRecovery(Time interval, uint64_t additiveBitsPerSecond);
+     uint64_t GetCongestionRateCutCount() const;
+     uint32_t GetQueueCount() const;
+     uint32_t GetCongestionStateCountForTest() const;
+@@ -392,12 +393,16 @@
+         uint32_t signals{0};
+         uint64_t rateBitsPerSecond{0};
+         Time nextSend{Seconds(0)};
++        Time lastRecovery{Seconds(0)};
++        std::set<UbCtpEntityKey> waiters;
+         EventId wakeEvent;
+     };
+     std::map<UbCtpCongestionKey, CongestionState> m_congestionStates;
+     uint64_t m_congestionLineRateBitsPerSecond{400000000000ULL};
+     uint64_t m_congestionMinimumRateBitsPerSecond{1000000000ULL};
+     uint64_t m_congestionRateCutCount{0};
++    Time m_congestionRecoveryInterval{Seconds(0)};
++    uint64_t m_congestionRecoveryStep{0};
+     TracedCallback<uint32_t,
+                    uint32_t,
+                    uint32_t,
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -2011,12 +2011,15 @@
+ void
+ UbCtpTransportService::RecordCnpForTest(const UbCtpEntityKey& key)
+ {
++    GetCongestionRate(key);
+     auto& state = m_congestionStates[MakeCongestionKey(key)];
+     ++state.signals;
+     if (state.rateBitsPerSecond == 0)
+         state.rateBitsPerSecond = m_congestionLineRateBitsPerSecond;
+-    state.rateBitsPerSecond = std::max(m_congestionMinimumRateBitsPerSecond,
++    state.rateBitsPerSecond = std::max(std::min(m_congestionMinimumRateBitsPerSecond,
++                                               m_congestionLineRateBitsPerSecond),
+                                        state.rateBitsPerSecond / 2);
++    state.lastRecovery = Simulator::Now();
+     ++m_congestionRateCutCount;
+ }
+ 
+@@ -2035,9 +2038,26 @@
+ }
+ 
+ uint64_t
+-UbCtpTransportService::GetCongestionRate(const UbCtpEntityKey& key) const
++UbCtpTransportService::GetCongestionRate(const UbCtpEntityKey& key)
+ {
+     auto state = m_congestionStates.find(MakeCongestionKey(key));
++    if (state != m_congestionStates.end() && m_congestionRecoveryStep != 0)
++    {
++        auto& value = state->second;
++        const int64_t periods = (Simulator::Now() - value.lastRecovery).GetTimeStep() /
++                                m_congestionRecoveryInterval.GetTimeStep();
++        if (periods > 0)
++        {
++            const uint64_t headroom = m_congestionLineRateBitsPerSecond -
++                std::min(value.rateBitsPerSecond, m_congestionLineRateBitsPerSecond);
++            const uint64_t needed = headroom / m_congestionRecoveryStep +
++                (headroom % m_congestionRecoveryStep != 0);
++            value.rateBitsPerSecond = static_cast<uint64_t>(periods) >= needed
++                ? m_congestionLineRateBitsPerSecond
++                : value.rateBitsPerSecond + periods * m_congestionRecoveryStep;
++            value.lastRecovery += m_congestionRecoveryInterval * periods;
++        }
++    }
+     return state == m_congestionStates.end() || state->second.rateBitsPerSecond == 0
+                ? m_congestionLineRateBitsPerSecond
+                : state->second.rateBitsPerSecond;
+@@ -2047,6 +2067,18 @@
+ UbCtpTransportService::GetCongestionRateCutCount() const
+ {
+     return m_congestionRateCutCount;
++}
++
++void
++UbCtpTransportService::SetCongestionRecovery(Time interval, uint64_t additiveBitsPerSecond)
++{
++    NS_ABORT_MSG_IF(interval < Seconds(0) ||
++                    (additiveBitsPerSecond != 0 && interval.IsZero()),
++                    "CTP recovery requires a positive interval, or zero step to disable");
++    m_congestionRecoveryInterval = interval;
++    m_congestionRecoveryStep = additiveBitsPerSecond;
++    for (auto& [key, state] : m_congestionStates)
++        state.lastRecovery = Simulator::Now();
+ }
+ 
+ uint32_t
+@@ -2075,6 +2107,7 @@
+     auto state = m_congestionStates.find(congestionKey);
+     if (state == m_congestionStates.end() || state->second.nextSend <= Simulator::Now())
+         return false;
++    state->second.waiters.insert(entityKey);
+     if (!state->second.wakeEvent.IsPending())
+     {
+         state->second.wakeEvent = Simulator::Schedule(
+@@ -2091,6 +2124,7 @@
+ UbCtpTransportService::AdvanceCongestionPacing(const UbCtpEntityKey& packetKey,
+                                                uint32_t bytes)
+ {
++    GetCongestionRate(packetKey);
+     auto state = m_congestionStates.find(MakeCongestionKey(packetKey));
+     if (state == m_congestionStates.end() || state->second.rateBitsPerSecond == 0)
+         return;
+@@ -2107,9 +2141,13 @@
+                                                   UbCtpCongestionKey congestionKey)
+ {
+     auto state = m_congestionStates.find(congestionKey);
+-    if (state != m_congestionStates.end())
+-        state->second.wakeEvent = EventId();
+-    TryContinueJettyTransmission(entityKey);
++    if (state == m_congestionStates.end())
++        return;
++    state->second.wakeEvent = EventId();
++    auto waiters = std::move(state->second.waiters);
++    state->second.waiters.clear();
++    for (const auto& waiter : waiters)
++        TryContinueJettyTransmission(waiter);
+ }
+ 
+ const UbLifecycleResourceIdentity&

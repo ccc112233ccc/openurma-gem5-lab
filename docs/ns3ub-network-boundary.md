@@ -136,7 +136,17 @@ READ-response loss now also has a focused replay contract. Congestion feedback,
 larger-scale MTP profiling and optional MPI partitioning inside ns-3-UB remain
 future work. The first congestion-feedback stage is present: a received CTP
 CNP halves the destination/EID/VL rate and gates later data fragments on
-virtual time without delaying ACK or CNP control traffic. Rate recovery and a
-full switch-generated CNP path remain to complete that feature. A focused
-process contract already injects one CNP at the native endpoint and proves a
-rate cut plus virtual-time spacing across later segments.
+virtual time without delaying ACK or CNP control traffic. Optional additive
+rate recovery is configured with `--ctp-recovery-interval-ps` and
+`--ctp-recovery-step-bps` (both required; disabled by default). This is an
+experimental model policy, not a claim of normative UB/DCQCN behavior.
+Recovery is calculated from elapsed virtual time when the rate is used, with
+no periodic idle timer. Shared destination/EID/VL pacing wakes all waiting
+source Entities, not only the first waiter.
+
+The focused A/B process contract measures the first-to-second data-fragment
+gap, excluding the later SO ordering wait: 0 ps without CNP and 256,000 ps
+with an injected CNP at a configured 2-Gbit/s line rate. A separate native
+test covers recovery epochs, floor/cap, shared state and VL isolation.
+A full switch-generated CNP path and end-to-end congestion/recovery workload
+remain to be implemented and validated; current CNP feedback is injected.
