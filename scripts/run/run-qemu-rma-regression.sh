@@ -13,6 +13,7 @@ Runs the functional SEND/READ/WRITE, SQ-wrap, outstanding, and large-message
 fragmentation matrix against an already shell-ready dual-QEMU environment.
 QEMU conservative synchronization is disabled, so reported perftest timing is
 functional evidence only and is not a virtual-time performance result.
+Set UBSIM_RMA_SUITE=outstanding512 for the explicit depth-512 stress matrix.
 EOF
     exit 0
 fi
@@ -46,5 +47,6 @@ python3 "$lab/tools/run_modular_rma_regression.py" \
     --lab "$lab" --run-root "$run_root" --output "$output" \
     --uart0 "${UBSIM_QEMU_UART0:-3560}" \
     --uart1 "${UBSIM_QEMU_UART1:-3570}" \
-    --timeout "${UBSIM_RMA_TIMEOUT:-300}" --suite full --simulator qemu
+    --timeout "${UBSIM_RMA_TIMEOUT:-300}" \
+    --suite "${UBSIM_RMA_SUITE:-full}" --simulator qemu
 echo "QEMU RMA regression results: $output"

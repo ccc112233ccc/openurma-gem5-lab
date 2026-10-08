@@ -37,6 +37,38 @@ SYNC_SMOKE_CASES = [
     ("send_bw_128_sync", "send_bw", 128, 16, 16, 16, False, None),
 ]
 
+# Explicit queue depth is essential: -l controls batching, not queue capacity.
+# Submitted operation count is 4x configured capacity, not a hardware wrap counter.
+OUTSTANDING_CASES = [
+    (f"{verb}_4096_depth512_{mode}", verb, 4096, 2048, batch, moderation,
+     True, None)
+    for verb in ("send_bw", "write_bw", "read_bw")
+    for mode, batch, moderation in (("single", 1, 1), ("batch16", 16, 16),
+                                     ("batch512", 512, 512))
+]
+
+
+def validate_depth_output(output: str, depth: int, size: int,
+                          iterations: int) -> list[str]:
+    """Require both guests' actual depth and a complete bandwidth result row.
+
+    This proves configured queue capacity, not a measured in-flight high-water
+    mark; fast completions can keep the latter below the configured limit.
+    """
+    sections = re.split(r"(?m)^--- UART \d+ ---\s*$", output)[1:]
+    errors = []
+    if len(sections) != 2:
+        errors.append("expected two UART transcripts")
+    for index, section in enumerate(sections):
+        depths = re.findall(r"JFS depth\s*:\s*(\d+)", section)
+        if depths != [str(depth)]:
+            errors.append(f"node{index}: expected JFS depth {depth}, got {depths}")
+        number = r"\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+        row = rf"(?m)^\s*{size}\s+{iterations}\s+{number}\s+{number}\s+{number}\s*$"
+        if len(re.findall(row, section)) != 1:
+            errors.append(f"node{index}: missing or duplicate complete bandwidth result")
+    return errors
+
 GEM5_TICK_RE = re.compile(r"(?m)^(\d+):")
 
 
@@ -58,7 +90,7 @@ def tick_delta(before: int | None, after: int | None) -> int | None:
 def command(verb: str, size: int, iterations: int, post_list: int,
             cq_mod: int, port: int, server: str | None,
             bidirectional: bool, dist_sync: bool,
-            all_exponent: int | None) -> str:
+            all_exponent: int | None, queue_depth: int | None = None) -> str:
     parts = [
         "LD_LIBRARY_PATH=/lib:/usr/lib", "urma_perftest", verb,
         "-d", "udma0", "--eid_idx", "0", "--ctp",
@@ -66,6 +98,8 @@ def command(verb: str, size: int, iterations: int, post_list: int,
         "-n", str(iterations), "-l", str(post_list), "-Q", str(cq_mod),
         "-p", "0",
     ]
+    if queue_depth is not None:
+        parts.extend(["-T", str(queue_depth), "-R", str(queue_depth)])
     parts.extend(
         [f"-a{all_exponent}"] if all_exponent is not None
         else ["-s", str(size)]
@@ -92,7 +126,7 @@ def main() -> int:
         help="guest simulator; QEMU functional runs do not expose gem5 tick timing",
     )
     parser.add_argument(
-        "--suite", choices=("full", "sync-smoke"), default="full",
+        "--suite", choices=("full", "sync-smoke", "outstanding512"), default="full",
         help="full functional stress without a fine-grained fence, or a small synchronized ROI smoke suite",
     )
     args = parser.parse_args()
@@ -103,16 +137,18 @@ def main() -> int:
     suite_started = time.perf_counter()
     records = []
     dist_sync = args.suite == "sync-smoke"
-    cases = SYNC_SMOKE_CASES if dist_sync else FULL_CASES
+    cases = {"full": FULL_CASES, "sync-smoke": SYNC_SMOKE_CASES,
+             "outstanding512": OUTSTANDING_CASES}[args.suite]
+    queue_depth = 512 if args.suite == "outstanding512" else None
     for index, (label, verb, size, iterations, post_list, cq_mod,
                 bidirectional, all_exponent) in enumerate(cases):
         port = 21300 + index
         server_command = command(verb, size, iterations, post_list, cq_mod,
                                  port, None, bidirectional, dist_sync,
-                                 all_exponent)
+                                 all_exponent, queue_depth)
         client_command = command(verb, size, iterations, post_list, cq_mod,
                                  port, "10.0.0.1", bidirectional, dist_sync,
-                                 all_exponent)
+                                 all_exponent, queue_depth)
         raw = args.output / f"{index:02d}-{label}.uart.txt"
         ticks_before = (
             [
@@ -144,12 +180,17 @@ def main() -> int:
         ]
         valid_tick_deltas = [value for value in tick_deltas if value is not None]
         raw.write_text(result.stdout)
+        validation_errors = (validate_depth_output(result.stdout, queue_depth,
+                             size, iterations) if queue_depth else [])
         record = {
             "case": label, "verb": verb, "size_bytes": size,
             "iterations": iterations, "post_list": post_list,
             "cq_mod": cq_mod, "bidirectional": bidirectional,
+            "queue_depth": queue_depth,
             "all_exponent": all_exponent,
             "wall_seconds": elapsed, "returncode": result.returncode,
+            "validation_errors": validation_errors,
+            "accepted": result.returncode == 0 and not validation_errors,
             "node0_sim_ticks": tick_deltas[0],
             "node1_sim_ticks": tick_deltas[1],
             "simulated_elapsed_ns_max": (
@@ -160,7 +201,8 @@ def main() -> int:
             "raw_output": raw.name,
         }
         records.append(record)
-        print(f"[{label}] rc={result.returncode} wall={elapsed:.3f}s", flush=True)
+        print(f"[{label}] rc={result.returncode} wall={elapsed:.3f}s"
+              f" validation_errors={validation_errors}", flush=True)
     suite_wall = time.perf_counter() - suite_started
     report = {
         "simulator": args.simulator,
@@ -180,14 +222,16 @@ def main() -> int:
     with (args.output / "results.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=[
             "case", "verb", "size_bytes", "iterations", "post_list",
-            "cq_mod", "bidirectional", "all_exponent", "wall_seconds", "returncode",
+            "cq_mod", "queue_depth", "bidirectional", "all_exponent", "wall_seconds", "returncode",
+            "accepted", "validation_errors",
             "node0_sim_ticks", "node1_sim_ticks",
             "simulated_elapsed_ns_max", "raw_output",
         ], extrasaction="ignore")
         writer.writeheader()
         writer.writerows(records)
     print(f"suite_wall_seconds={suite_wall:.3f}")
-    return 0 if all(record["returncode"] == 0 for record in records) else 1
+    return 0 if all(record["returncode"] == 0 and not record["validation_errors"]
+                    for record in records) else 1
 
 
 if __name__ == "__main__":

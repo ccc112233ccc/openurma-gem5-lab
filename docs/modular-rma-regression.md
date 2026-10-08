@@ -36,9 +36,11 @@ Measured on 2026-09-28 on the M2 development host:
 | `write_bw_1m_frag` | 1 MiB | 5 / 1 | 37.437 s | PASS |
 | `read_bw_1m_frag` | 1 MiB | 5 / 1 | 37.911 s | PASS |
 
-All ten cases passed in **179.138 seconds**.  `send_bw_128_wrap` advances the
-SQ producer/consumer indices through multiple ring wraps.  The 4 KiB
-bidirectional cases maintain 16 outstanding WQEs.  The 64 KiB and 1 MiB cases
+All ten cases passed in **179.138 seconds**. Historical names `wrap` and
+`out16` overstate what these commands establish: they did not specify JFS
+depth, and `-l 16` is batch size, not an outstanding limit. These results do
+not independently prove multiple ring wraps or 16 concurrent WQEs.
+The 64 KiB and 1 MiB cases
 exercise asynchronous multi-packet READ/WRITE fragmentation in both
 directions.
 
@@ -61,6 +63,27 @@ overflow the finite switch queue; ingress is now paced by the configured
 400 Gbit/s serialization time.
 
 ## Checkpoint and profiling
+
+### Explicit depth-512 functional stress
+
+On a shell-ready dual-QEMU functional environment:
+
+```bash
+UBSIM_RMA_SUITE=outstanding512 ./lab qemu-rma-regression experiments/depth512
+```
+
+This suite runs bidirectional SEND/WRITE/READ at 4096 B with `-T 512 -R 512`,
+2048 iterations and post-list/CQ-moderation pairs 1/1, 16/16 and 512/512.
+It checks both UART transcripts for actual `JFS depth : 512` and one complete
+4096 B / 2048-iteration bandwidth row, in addition to guest exit status.
+The operation count exceeds the configured queue capacity four times, but
+hardware WQEBB producer/consumer wrap counters and actual in-flight high-water
+marks are separate evidence still to collect. This is a queue-capacity stress
+test, not a claim of 512 simultaneously active hardware requests or verified
+payload contents. No-sync bandwidth figures are not timing acceptance results.
+
+The older `full` suite still checks guest exit status only; per-size transcript
+validation and independent payload verification remain follow-up work.
 
 `./lab checkpoint NAME` stops both guests at the same pseudo operation, waits
 for both architectural checkpoints, drains both UDMA processes, and stores the

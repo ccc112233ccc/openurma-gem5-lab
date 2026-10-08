@@ -46,6 +46,29 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Coverage matrix
 
+### Performance-scope increment: explicit depth512 (2026-10-08)
+
+Nine dual-QEMU no-sync full-system cases passed: official perftest SEND/WRITE/
+READ bidirectional bandwidth at 4096 B, `-T512 -R512 -n2048`, each with post-list/
+CQ-moderation pairs 1/1, 16/16 and 512/512. Each guest printed JFS depth512 and
+one complete matching result row; all guest exit statuses were zero. Suite wall
+time was **29.753 s**, wrapper **32.03 s**, launch command **0.64 s** (launch
+return, not shell-ready duration). No model rebuild was required for this
+regression-only increment. Evidence:
+`experiments/perf-depth512-20261008-validated/report.json` and per-case UART logs.
+
+Independent reviewer accepted the narrower depth512 functional claim and ran
+the five parser/command tests: **5/5**, **0.04 s** (main run **0.06 s**). Negative
+tests reject missing UARTs, clamped depth and incomplete result rows. Reports
+now expose validation errors separately from guest exit status, including CSV.
+
+This does not establish actual 512-request hardware concurrency, measured ring
+wrap counts, payload correctness or synchronized bandwidth. Historical `out16`
+labels described batch size, not queue depth; the regression guide corrects the
+earlier concurrency/wrap claims. Next performance evidence should add in-flight
+and WQEBB producer/consumer counters, full-scan output completeness and payload
+verification before interpreting bandwidth scaling.
+
 Here **partial** means a real implementation with explicit limits;
 **completion-only** means command success is not evidence of device behavior.
 Paths below are repository-relative.
