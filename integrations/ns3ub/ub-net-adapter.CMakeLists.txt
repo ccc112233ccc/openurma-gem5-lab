@@ -23,6 +23,14 @@ target_include_directories(scratch_ub-net-adapter PRIVATE
 target_compile_features(scratch_ub-net-adapter PRIVATE cxx_std_17)
 
 build_exec(
+  EXECNAME ctp-feedback-contract
+  EXECNAME_PREFIX scratch_
+  SOURCE_FILES ${ubsim_lab_root}/integrations/ns3ub/tests/ctp-feedback.cc
+  LIBRARIES_TO_LINK ${libunified-bus} ${libcore} ${libnetwork}
+  EXECUTABLE_DIRECTORY_PATH ${CMAKE_OUTPUT_DIRECTORY}/scratch/
+)
+
+build_exec(
   EXECNAME ctp-recovery-contract
   EXECNAME_PREFIX scratch_
   SOURCE_FILES ${ubsim_lab_root}/integrations/ns3ub/tests/ctp-recovery.cc

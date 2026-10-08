@@ -190,5 +190,8 @@ request-loss and lost-TAACK recovery for WRITE, plus an initiator-visible
 ACK-timeout completion after retry exhaustion. READ-response loss now has the
 same focused duplicate-suppression and replay coverage. Injected CNP now has
 an A/B pacing contract and optional additive recovery has a native rate-law
-test; switch-generated congestion feedback remains outstanding. Reliability recovery is not
+test. Native three-host tests additionally cover switch queue FECN marking,
+receiver-generated CNP, data-queue pacing, shared Entities and recovery.
+These congestion scenarios have not yet been repeated with full-system
+URMA applications. Reliability recovery is not
 claimed by the asynchronous full-system functional matrix.

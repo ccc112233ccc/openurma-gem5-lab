@@ -19,6 +19,7 @@
 
 #include "protocol/ub_net/if.h"
 #include "protocol/ub_net/udma_wire.h"
+#include "integrations/ns3ub/ctp-queue-feedback.h"
 
 #include <algorithm>
 #include <atomic>
@@ -86,6 +87,8 @@ struct Options {
     bool inject_ctp_cnp_after_first_segment{false};
     std::uint64_t ctp_recovery_interval_ps{0};
     std::uint64_t ctp_recovery_step_bps{0};
+    std::uint64_t ctp_mark_threshold_bytes{0};
+    std::uint64_t ctp_cnp_interval_ps{1000000};
 };
 
 EndpointOption ParseEndpoint(const std::string& value)
@@ -148,6 +151,10 @@ Options ParseOptions(int argc, char** argv)
             options.drop_all_ctp_requests = true;
         } else if (arg == "--inject-ctp-cnp-after-first-segment") {
             options.inject_ctp_cnp_after_first_segment = true;
+        } else if (arg == "--ctp-mark-threshold-bytes" && i + 1 < argc) {
+            options.ctp_mark_threshold_bytes = ParseUnsigned(argv[++i], "CTP queue threshold");
+        } else if (arg == "--ctp-cnp-interval-ps" && i + 1 < argc) {
+            options.ctp_cnp_interval_ps = ParseUnsigned(argv[++i], "CTP CNP interval");
         } else if (arg == "--ctp-recovery-interval-ps" && i + 1 < argc) {
             options.ctp_recovery_interval_ps = ParseUnsigned(argv[++i], "CTP recovery interval");
         } else if (arg == "--ctp-recovery-step-bps" && i + 1 < argc) {
@@ -435,6 +442,7 @@ class UbNetFabric {
         std::uint64_t duplicate_read_response_replays = 0;
         std::uint64_t injected_read_response_drops = 0;
         std::uint64_t ctp_congestion_rate_cuts = 0;
+        std::uint64_t ctp_cnp_sent = 0, ctp_cnp_suppressed = 0, ctp_wire_waits = 0;
         std::uint64_t injected_ctp_request_drops = 0;
         for (const auto& node : endpoint_nodes_) {
             Ptr<UbController> controller = node->GetObject<UbController>();
@@ -450,6 +458,9 @@ class UbNetFabric {
             injected_read_response_drops +=
                 service->GetInjectedReadResponseDropCount();
             ctp_congestion_rate_cuts += service->GetCongestionRateCutCount();
+            ctp_cnp_sent += service->GetCnpSentCount();
+            ctp_cnp_suppressed += service->GetCnpSuppressedCount();
+            ctp_wire_waits += service->GetWirePacingWaitCount();
             injected_ctp_request_drops += service->GetInjectedRequestDropCount();
         }
         std::cerr << "[NS3_UB_NET_STATS] forwarded=" << forwarded_
@@ -503,6 +514,11 @@ class UbNetFabric {
                   << " ctp_native_segment_send_span_ps="
                   << (last_native_segment_send_ps_ - first_native_segment_send_ps_)
                   << " ctp_second_segment_gap_ps=" << second_native_segment_gap_ps_
+                  << " ctp_queue_marks=" << ctp_feedback_->marked
+                  << " ctp_cnp_sent=" << ctp_cnp_sent
+                  << " ctp_cnp_suppressed=" << ctp_cnp_suppressed
+                  << " ctp_wire_pacing_waits=" << ctp_wire_waits
+                  << " ctp_peak_queue_bytes=" << ctp_feedback_->peakBytes
                   << '\n';
     }
 
@@ -580,6 +596,7 @@ class UbNetFabric {
             service->SetMaxRetransmissionAttempts(options_.ctp_max_retransmissions);
             const std::uint64_t line_rate_bps = options_.rate_gbps * 1000000000ULL;
             service->SetCongestionLineRate(line_rate_bps);
+            service->SetCnpFeedbackInterval(PicoSeconds(options_.ctp_cnp_interval_ps));
             service->SetCongestionRecovery(PicoSeconds(options_.ctp_recovery_interval_ps),
                                            options_.ctp_recovery_step_bps);
             service->SetCongestionMinimumRate(
@@ -624,6 +641,9 @@ class UbNetFabric {
             }
         }
         switch_->Init();
+        ctp_feedback_ = CreateObject<UbCtpQueueFeedback>();
+        ctp_feedback_->Configure(switch_, options_.ctp_mark_threshold_bytes);
+        switch_->SetCongestionCtrl(ctp_feedback_);
         for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
             std::vector<std::uint16_t> outputs;
             for (std::uint32_t port = 0; port < options_.ports; ++port)
@@ -1230,6 +1250,7 @@ class UbNetFabric {
     std::uint64_t ctp_taacks_{};
     std::uint64_t ctp_read_responses_{};
     std::uint64_t first_native_segment_send_ps_{};
+    Ptr<UbCtpQueueFeedback> ctp_feedback_;
     std::uint64_t second_native_segment_gap_ps_{};
     std::uint64_t last_native_segment_send_ps_{};
     bool ctp_cnp_injected_{};
@@ -1274,6 +1295,7 @@ int main(int argc, char** argv)
                      "[--drop-first-ctp-read-response] "
                      "[--inject-ctp-cnp-after-first-segment] "
                      "[--ctp-recovery-interval-ps N --ctp-recovery-step-bps N] "
+                     "[--ctp-mark-threshold-bytes N] [--ctp-cnp-interval-ps N] "
                      "[--drop-all-ctp-requests]\n";
         return 1;
     }

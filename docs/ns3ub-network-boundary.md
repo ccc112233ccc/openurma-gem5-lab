@@ -148,5 +148,15 @@ The focused A/B process contract measures the first-to-second data-fragment
 gap, excluding the later SO ordering wait: 0 ps without CNP and 256,000 ps
 with an injected CNP at a configured 2-Gbit/s line rate. A separate native
 test covers recovery epochs, floor/cap, shared state and VL isolation.
-A full switch-generated CNP path and end-to-end congestion/recovery workload
-remain to be implemented and validated; current CNP feedback is injected.
+Queue-triggered feedback is now available via `--ctp-mark-threshold-bytes`:
+the switch marks native CNA16 FECN above the configured egress backlog; the
+receiver returns CTP CNP through its control queue and the reverse fabric.
+`--ctp-cnp-interval-ps` bounds feedback frequency per reverse Entity key.
+Both admission and actual data-queue dequeue honor the shared congestion
+rate; ACK/CNP bypass the pacing gate. Marking is disabled by default.
+
+The three-host native contract compares disabled feedback, two-source
+contention with feedback, and single-source no-congestion operation. Each
+source has two Entities sharing the destination/VL state. See
+[queue feedback validation](validation/ctp-queue-feedback.md) for parameters,
+results, model-policy boundaries and remaining full-system validation.

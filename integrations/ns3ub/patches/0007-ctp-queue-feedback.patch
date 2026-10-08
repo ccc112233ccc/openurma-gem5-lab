@@ -1,0 +1,214 @@
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -19,6 +19,7 @@
+ 
+ #include <cstdint>
+ #include <deque>
++#include <functional>
+ #include <map>
+ #include <optional>
+ #include <queue>
+@@ -106,6 +107,12 @@
+ 
+     IngressQueueType GetIngressQueueType() override;
+     bool IsEmpty() override;
++    bool IsLimited() override {
++        return m_ackQueue.empty() && m_cnpQueue.empty() && !m_dataQueue.empty() &&
++               wireLimited && wireLimited();
++    }
++    std::function<bool()> wireLimited;
++    std::function<void(uint32_t)> wireSent;
+     Ptr<Packet> GetNextPacket() override;
+     uint32_t GetNextPacketSize() override;
+     void EnqueueData(Ptr<Packet> packet);
+@@ -188,6 +195,10 @@
+     void SetCongestionMinimumRate(uint64_t bitsPerSecond);
+     uint64_t GetCongestionRate(const UbCtpEntityKey& key);
+     void SetCongestionRecovery(Time interval, uint64_t additiveBitsPerSecond);
++    void SetCnpFeedbackInterval(Time interval) { m_cnpFeedbackInterval = interval; }
++    uint64_t GetCnpSentCount() const { return m_cnpSent; }
++    uint64_t GetCnpSuppressedCount() const { return m_cnpSuppressed; }
++    uint64_t GetWirePacingWaitCount() const { return m_wirePacingWaits; }
+     uint64_t GetCongestionRateCutCount() const;
+     uint32_t GetQueueCount() const;
+     uint32_t GetCongestionStateCountForTest() const;
+@@ -396,6 +407,9 @@
+         Time lastRecovery{Seconds(0)};
+         std::set<UbCtpEntityKey> waiters;
+         EventId wakeEvent;
++        Time nextWireSend{Seconds(0)};
++        EventId wireWakeEvent;
++        std::set<uint32_t> wirePorts;
+     };
+     std::map<UbCtpCongestionKey, CongestionState> m_congestionStates;
+     uint64_t m_congestionLineRateBitsPerSecond{400000000000ULL};
+@@ -403,6 +417,13 @@
+     uint64_t m_congestionRateCutCount{0};
+     Time m_congestionRecoveryInterval{Seconds(0)};
+     uint64_t m_congestionRecoveryStep{0};
++    Time m_cnpFeedbackInterval{MicroSeconds(1)};
++    std::map<UbCtpEntityKey, Time> m_lastCnp;
++    uint64_t m_cnpSent{0}, m_cnpSuppressed{0};
++    uint64_t m_wirePacingWaits{0};
++    bool IsWireLimited(UbCtpEntityKey key, uint32_t port);
++    void AdvanceWirePacing(UbCtpEntityKey key, uint32_t bytes);
++    void SendCongestionFeedback(const UbCtpEntityKey& key, uint32_t ingressPort);
+     TracedCallback<uint32_t,
+                    uint32_t,
+                    uint32_t,
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -358,6 +358,7 @@
+     }
+ 
+     Ptr<Packet> packet = queue->front();
++    if (queue == &m_dataQueue && wireSent) wireSent(packet->GetSize());
+     queue->pop();
+     if (!IsEmpty())
+     {
+@@ -828,6 +829,8 @@
+     }
+ 
+     Ptr<UbCtpTxQueue> queue = CreateObject<UbCtpTxQueue>();
++    queue->wireLimited = [this, key, outPort] { return IsWireLimited(key, outPort); };
++    queue->wireSent = [this, key](uint32_t bytes) { AdvanceWirePacing(key, bytes); };
+     UbCtpEntityState& state = GetOrCreateEntityState(key);
+     queue->SetOutPortId(outPort);
+     queue->SetInPortId(outPort);
+@@ -1662,6 +1665,8 @@
+         return false;
+     }
+     const auto taOpcode = static_cast<UbTransactionOpcode>(taHeader.GetUbTransactionOpcode());
++    if (cnaHeader.GetMode() == 4 && cnaHeader.GetFecn() != 0)
++        SendCongestionFeedback(localKey, receivePort);
+     const bool isResponse = taOpcode == UbTransactionOpcode::READ_RESPONSE ||
+                             taOpcode == UbTransactionOpcode::ATOMIC_RESPONSE;
+     if (isResponse)
+@@ -2081,6 +2086,77 @@
+         state.lastRecovery = Simulator::Now();
+ }
+ 
++bool
++UbCtpTransportService::IsWireLimited(UbCtpEntityKey key, uint32_t port)
++{
++    auto it = m_congestionStates.find(MakeCongestionKey(key));
++    if (it == m_congestionStates.end() || it->second.nextWireSend <= Simulator::Now())
++        return false;
++    auto& state = it->second;
++    ++m_wirePacingWaits;
++    state.wirePorts.insert(port);
++    if (!state.wireWakeEvent.IsPending()) {
++        const auto ck = MakeCongestionKey(key);
++        state.wireWakeEvent = Simulator::Schedule(state.nextWireSend - Simulator::Now(),
++            [this, ck] {
++                auto it = m_congestionStates.find(ck);
++                if (it == m_congestionStates.end()) return;
++                it->second.wireWakeEvent = EventId();
++                auto ports = std::move(it->second.wirePorts);
++                it->second.wirePorts.clear();
++                for (auto p : ports) DynamicCast<UbPort>(m_node->GetDevice(p))->TriggerTransmit();
++            });
++    }
++    return true;
++}
++
++void
++UbCtpTransportService::AdvanceWirePacing(UbCtpEntityKey key, uint32_t bytes)
++{
++    const auto rate = GetCongestionRate(key);
++    auto it = m_congestionStates.find(MakeCongestionKey(key));
++    if (it == m_congestionStates.end()) return;
++    const uint64_t ps = (static_cast<uint64_t>(bytes) * 8000000000000ULL + rate - 1) / rate;
++    it->second.nextWireSend = Simulator::Now() + PicoSeconds(ps);
++}
++
++void
++UbCtpTransportService::SendCongestionFeedback(const UbCtpEntityKey& key, uint32_t ingressPort)
++{
++    auto last = m_lastCnp.find(key);
++    if (last != m_lastCnp.end() && Simulator::Now() - last->second < m_cnpFeedbackInterval)
++    {
++        ++m_cnpSuppressed;
++        return;
++    }
++    m_lastCnp[key] = Simulator::Now();
++    Ptr<Packet> packet = Create<Packet>();
++    UbCompactEidHeader eid;
++    eid.SetSourceEid(key.srcEntityId);
++    eid.SetDestinationEid(key.dstEntityId);
++    packet->AddHeader(eid);
++    UbCompactUpiHeader upi;
++    upi.SetUpi(0);
++    packet->AddHeader(upi);
++    UbCtpHeader ctp;
++    ctp.SetTPOpcode(CtpOpcode::CTP_CNP);
++    ctp.SetNlp(UB_CTPH_NLP_UPI16_EID40_TAH);
++    packet->AddHeader(ctp);
++    UbCna16NetworkHeader cna;
++    cna.SetScna(utils::NodeIdToCna16(m_node->GetId(), ingressPort));
++    cna.SetDcna(utils::NodeIdToCna16(key.dstNodeId));
++    cna.SetServiceLevel(key.vl);
++    cna.SetNlp(UB_CNA_NLP_CTPH);
++    packet->AddHeader(cna);
++    UbDataLink::AddPacketHeader(packet, false, false, key.vl, key.vl,
++        RoutingType::PER_FLOW_SHORTEST_PATHS, UbDatalinkHeaderConfig::PACKET_CNA16);
++    auto queue = GetOrCreateQueue(key, ingressPort, key.vl);
++    RegisterQueueIfNeeded(queue, ingressPort, key.vl);
++    queue->EnqueueCnp(packet);
++    ++m_cnpSent;
++    DynamicCast<UbPort>(m_node->GetDevice(ingressPort))->TriggerTransmit();
++}
++
+ uint32_t
+ UbCtpTransportService::GetQueueCount() const
+ {
+@@ -2590,6 +2666,7 @@
+         (void)key;
+         if (state.wakeEvent.IsPending())
+             state.wakeEvent.Cancel();
++        if (state.wireWakeEvent.IsPending()) state.wireWakeEvent.Cancel();
+     }
+     m_congestionStates.clear();
+ 
+@@ -2601,6 +2678,8 @@
+         {
+             continue;
+         }
++        queue->wireLimited = {};
++        queue->wireSent = {};
+         if (m_registeredQueues.find(queue) != m_registeredQueues.end() && sw != nullptr &&
+             sw->GetAllocator() != nullptr)
+         {
+--- a/src/unified-bus/model/protocol/ub-header.cc
++++ b/src/unified-bus/model/protocol/ub-header.cc
+@@ -1943,7 +1943,15 @@
+ {
+     i.WriteU16(m_scna);
+     i.WriteU16(m_dcna);
+-    uint16_t ccField = ((m_mode & 0x7) << 13) | (m_ccFields.raw13 & 0x1FFF);
++    // The union members are C++ structs, not packed wire bitfields.
++    uint16_t bits = 0;
++    if (m_mode == 2)
++        bits = (GetLocation() << 12) | ((GetTimestamp() & 0x3ff) << 2) | GetFecn();
++    else if (m_mode == 4)
++        bits = (GetLocation() << 12) | GetFecn();
++    else
++        bits = m_ccFields.raw13 & 0x1fff;
++    uint16_t ccField = ((m_mode & 0x7) << 13) | bits;
+     i.WriteU16(ccField);
+     i.WriteU8(m_lb);
+     uint8_t b7 = ((m_serviceLevel & 0x0F) << 4) | ((m_management & 0x01) << 3) | (m_nlp & 0x07);
+@@ -1956,7 +1964,12 @@
+     m_dcna = i.ReadU16();
+     uint16_t ccField = i.ReadU16();
+     m_mode = (ccField >> 13) & 0x7;
+-    m_ccFields.raw13 = ccField & 0x1FFF;
++    m_ccFields = {};
++    if (m_mode == 2 || m_mode == 4) {
++        SetLocation((ccField >> 12) & 1);
++        if (m_mode == 2) SetTimestamp((ccField >> 2) & 0x3ff);
++        SetFecn(ccField & 3);
++    } else m_ccFields.raw13 = ccField & 0x1fff;
+     m_lb = i.ReadU8();
+     uint8_t b7 = i.ReadU8();
+     m_serviceLevel = (b7 >> 4) & 0x0F;
