@@ -137,6 +137,16 @@ struct Fixture {
         frame.destination_jetty = 9; frame.bytes = {'u', 'b', '!'};
         model.Receive(std::move(frame));
     }
+    void ReserveInjectedRequest() {
+        // These interval/error tests inject PendingRma directly rather than
+        // fetch a descriptor. Mirror the issue reservation that the real SQ
+        // path now creates, without relaxing any DMA/lifetime assertions.
+        auto& sq = model.jetty_contexts_.at(9);
+        sq.busy = true;
+        sq.target_producer = 1;
+        model.sq_pipelines_[9] = std::make_shared<d::UdmaModel::SqPipeline>();
+        model.ReserveSq(9, 1, false);
+    }
 };
 
 int main() {
@@ -216,7 +226,7 @@ int main() {
         request.jetty_id = 9; request.producer = 1; request.wqebbs = 1;
         request.opcode = 6; request.byte_count = 12;
         request.local_address = Payload; request.completion = true;
-        f.model.jetty_contexts_.at(9).busy = true;
+        f.ReserveInjectedRequest();
         const auto response = [](unsigned ta, unsigned offset, unsigned length) {
             d::Frame frame{};
             frame.operation = d::Frame::Operation::ReadResponse;
@@ -278,7 +288,7 @@ int main() {
         request.jetty_id = 9; request.producer = 1; request.wqebbs = 1;
         request.opcode = 6; request.byte_count = 4; request.completion = true;
         request.local_address = std::numeric_limits<std::uint64_t>::max() - 3;
-        f.model.jetty_contexts_.at(9).busy = true;
+        f.ReserveInjectedRequest();
         const auto page = request.local_address & ~std::uint64_t{4095};
         f.model.iotlb_[(std::uint64_t{1} << 63) | (page >> 12)] = page;
         d::Frame frame{};
@@ -296,7 +306,7 @@ int main() {
         auto& request = f.model.pending_rma_[123];
         request.jetty_id = 9; request.producer = 1; request.wqebbs = 1;
         request.opcode = 3; request.byte_count = 12; request.completion = true;
-        f.model.jetty_contexts_.at(9).busy = true;
+        f.ReserveInjectedRequest();
         d::Frame ack{};
         ack.operation = d::Frame::Operation::WriteAck;
         ack.request_id = 123; ack.transfer_length = 4; ack.transaction_offset = 4;
@@ -324,7 +334,7 @@ int main() {
         request.opcode = 6; request.byte_count = 9;
         request.local_address = Payload;
         request.completion = true;
-        f.model.jetty_contexts_.at(9).busy = true;
+        f.ReserveInjectedRequest();
         f.host.delayed_write = Payload;
         d::Frame response{};
         response.operation = d::Frame::Operation::ReadResponse;

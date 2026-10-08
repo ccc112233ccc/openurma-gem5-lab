@@ -48,5 +48,5 @@ python3 "$lab/tools/run_modular_rma_regression.py" \
     --uart0 "${UBSIM_QEMU_UART0:-3560}" \
     --uart1 "${UBSIM_QEMU_UART1:-3570}" \
     --timeout "${UBSIM_RMA_TIMEOUT:-300}" \
-    --suite "${UBSIM_RMA_SUITE:-full}" --simulator qemu
+    --suite "${UBSIM_RMA_SUITE:-full}" --simulator qemu --fail-fast
 echo "QEMU RMA regression results: $output"

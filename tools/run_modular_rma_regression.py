@@ -135,6 +135,8 @@ def main() -> int:
     parser.add_argument("--uart0", type=int, default=3460)
     parser.add_argument("--uart1", type=int, default=3470)
     parser.add_argument("--timeout", type=float, default=1800)
+    parser.add_argument("--fail-fast", action="store_true",
+                        help="stop after a failed case instead of reusing possibly wedged guests")
     parser.add_argument(
         "--simulator", choices=("gem5", "qemu"), default="gem5",
         help="guest simulator; QEMU functional runs do not expose gem5 tick timing",
@@ -219,6 +221,8 @@ def main() -> int:
         records.append(record)
         print(f"[{label}] rc={result.returncode} wall={elapsed:.3f}s"
               f" validation_errors={validation_errors}", flush=True)
+        if args.fail_fast and not record["accepted"]:
+            break
     suite_wall = time.perf_counter() - suite_started
     report = {
         "simulator": args.simulator,
@@ -230,6 +234,8 @@ def main() -> int:
         ),
         "gem5_tick_period_ps": 1 if args.simulator == "gem5" else None,
         "suite_wall_seconds": suite_wall,
+        "expected_case_count": len(cases),
+        "completed_case_count": len(records),
         "cases": records,
     }
     (args.output / "report.json").write_text(
@@ -246,7 +252,7 @@ def main() -> int:
         writer.writeheader()
         writer.writerows(records)
     print(f"suite_wall_seconds={suite_wall:.3f}")
-    return 0 if all(record["returncode"] == 0 and not record["validation_errors"]
+    return 0 if len(records) == len(cases) and all(record["returncode"] == 0 and not record["validation_errors"]
                     for record in records) else 1
 
 

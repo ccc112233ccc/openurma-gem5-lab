@@ -257,6 +257,32 @@ class UdmaModel {
                          std::uint64_t value);
     void ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
                    std::vector<std::uint8_t> direct = {});
+    void ProcessSqOnce(std::uint32_t jetty_id, std::uint32_t producer,
+                       std::vector<std::uint8_t> direct);
+    struct SqCompletion {
+        std::uint32_t wqebbs{};
+        std::uint16_t index{};
+        std::uint8_t opcode{};
+        std::uint32_t bytes{};
+        std::uint64_t immediate{};
+        bool enabled{};
+        bool ready{};
+        std::uint8_t status{};
+    };
+    struct SqPipeline {
+        std::uint64_t issue{};
+        bool fetching{};
+        bool dispatching{};
+        bool retiring{};
+        bool publishing{};
+        bool ordered{};
+        bool kick{};
+        std::deque<SqCompletion> completions;
+    };
+    std::unordered_map<std::uint32_t, std::shared_ptr<SqPipeline>> sq_pipelines_;
+    void ReleaseSqFetch(std::uint32_t id, bool resume);
+    void ReserveSq(std::uint32_t id, std::uint32_t wqebbs, bool ordered);
+    void RetireSq(std::uint32_t id);
     void ContinueSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
                        std::vector<std::uint8_t> raw,
                        std::uint32_t remaining_wqebbs,

@@ -96,8 +96,35 @@ depth/decode rejects. Local READ/WRITE pending peak was **1**, not 512:
 This establishes a model serialization bottleneck, not a physical UB limit.
 These counters are process-lifetime observations, not saved architectural state;
 the RMA peak excludes SEND, remote-service work and CQE publication.
-Next work is a bounded multi-WQE pipeline with ordered retirement and safe
-resource lifetime handling, followed by the same counter-backed regression.
+The subsequent pipeline increment separates issue from retirement: normal
+operations may await multiple remote completions, while CQEs retire in SQ
+order. Strong placement/fence operations conservatively drain prior work and
+block following issue until retirement. Runtime cursors/FIFOs are external to
+the checkpointed queue layout and recreated from retired consumers on restore.
+Descriptor/payload fetching is still sequential per Jetty; this is not an
+unlimited execution engine.
+
+On the same nine-case functional gate, the pipeline completed in **25.943 s**
+and observed RMA peaks **68 / 85**, versus the earlier **1 / 1**. Each node
+still retired all 18,432 WQEBBs and recorded 18 ring crossings with no SQ
+depth/decode rejects or UBASE errors. Evidence lives under
+`experiments/perf-pipeline512-20261008/`. This single no-sync run establishes
+concurrency and functional progress, not a synchronized bandwidth result or a
+claim that 512 requests were simultaneously active.
+
+For a freshly launched run containing only the nine depth512 cases, stop the
+simulators normally, preserve both UDMA logs, and validate their final profiles:
+
+```bash
+python3 tools/check_udma_profile.py \
+  experiments/RUN/udma-node0.log experiments/RUN/udma-node1.log \
+  --expected-wqes 18432 --min-rma-peak 2
+```
+
+This fails on missing profiles, incomplete WQE retirement, depth/decode errors,
+absence of real ring crossings, or a still-serialized RMA peak. The minimum of
+two proves concurrency exists, not that the full configured window is utilized.
+Logs spanning additional cases need a corresponding expected operation count.
 
 `./lab checkpoint NAME` stops both guests at the same pseudo operation, waits
 for both architectural checkpoints, drains both UDMA processes, and stores the

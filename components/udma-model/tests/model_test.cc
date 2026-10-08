@@ -914,7 +914,8 @@ int main()
     assert(official_model.WriteMmio(jetty_page + 0x80, 4, 10));
     // First CQE is below moderation threshold; the second needs a CEQ and
     // must fail notification rather than DMA into the destroyed buffer.
-    assert(official_model.sq_completions() == completions_before_destroyed_ceq + 1);
+    // Both CQEs are already visible: notification failure cannot replay a WQE.
+    assert(official_model.sq_completions() == completions_before_destroyed_ceq + 2);
     assert(official_model.ubase_errors() == errors_before_lifecycle + 1);
     bool saw_cqe = false;
     for (std::size_t i = dma_before_destroyed_ceq; i < host.dma_write_addresses.size(); ++i) {

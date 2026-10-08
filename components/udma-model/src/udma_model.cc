@@ -1092,7 +1092,10 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
                     jetty->second.receive_queue == tag;
             }), receive_frames_.end());
     }
-    if (command == DestroyJfsContext) jetty_contexts_.erase(tag);
+    if (command == DestroyJfsContext) {
+        jetty_contexts_.erase(tag);
+        sq_pipelines_.erase(tag);
+    }
     if (command == DestroyJfcContext) {
         if (jfc_contexts_.count(tag))
             jfc_query_contexts_[tag] = BuildJfcQueryContext(tag);
@@ -1449,9 +1452,12 @@ UdmaModel::HandleJettyMmio(std::uint64_t offset, std::uint32_t length,
                 jetty.direct_valid = 0;
                 jetty.direct_pending = true;
                 const std::uint32_t low = abi::Load32(jetty.direct_wqe.data()) & 0xffffU;
+                const auto pipeline = sq_pipelines_.find(id);
+                const auto issue = pipeline == sq_pipelines_.end() ? jetty.consumer :
+                    pipeline->second->issue;
                 std::uint32_t producer =
-                    (static_cast<std::uint32_t>(jetty.consumer) & ~0xffffU) | low;
-                if (producer < jetty.consumer) producer += 0x10000U;
+                    (static_cast<std::uint32_t>(issue) & ~0xffffU) | low;
+                if (producer < static_cast<std::uint32_t>(issue)) producer += 0x10000U;
                 ProcessSq(id, producer,
                     std::vector<std::uint8_t>(jetty.direct_wqe.begin(),
                                               jetty.direct_wqe.end()));
@@ -1475,6 +1481,34 @@ void
 UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
                      std::vector<std::uint8_t> direct)
 {
+    const auto found = jetty_contexts_.find(jetty_id);
+    if (found == jetty_contexts_.end()) return;
+    auto& slot = sq_pipelines_[jetty_id];
+    if (!slot) {
+        slot = std::make_shared<SqPipeline>();
+        slot->issue = found->second.consumer;
+    }
+    const auto state = slot;
+    if (static_cast<std::int32_t>(producer - found->second.target_producer) > 0)
+        found->second.target_producer = producer;
+    if (!direct.empty() && direct.size() == abi::kWqebbBytes) {
+        std::copy(direct.begin(), direct.end(), found->second.direct_wqe.begin());
+        found->second.direct_pending = true;
+    }
+    state->kick = true;
+    if (state->dispatching) return;
+    state->dispatching = true;
+    while (state->kick) {
+        state->kick = false;
+        ProcessSqOnce(jetty_id, producer, {});
+    }
+    state->dispatching = false;
+}
+
+void
+UdmaModel::ProcessSqOnce(std::uint32_t jetty_id, std::uint32_t producer,
+                         std::vector<std::uint8_t> direct)
+{
     if (draining_queue_command_ == 0x07 && draining_queue_id_ == jetty_id) {
         MaybeCompleteQueueDestroy();
         return;
@@ -1495,8 +1529,9 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
         std::copy(direct.begin(), direct.end(), jetty.direct_wqe.begin());
         jetty.direct_pending = true;
     }
-    if (jetty.busy) return;
-    if (jetty.consumer == jetty.target_producer) {
+    const auto state = sq_pipelines_.at(jetty_id);
+    if (state->fetching || state->ordered) return;
+    if (static_cast<std::uint32_t>(state->issue) == jetty.target_producer) {
         jetty.direct_pending = false;
         return;
     }
@@ -1507,7 +1542,8 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
         return;
     }
     jetty.busy = true;
-    if (jetty.direct_pending && jetty.consumer + 1 == jetty.target_producer) {
+    state->fetching = true;
+    if (jetty.direct_pending && static_cast<std::uint32_t>(state->issue + 1) == jetty.target_producer) {
         jetty.direct_pending = false;
         HandleSqWqe(jetty_id, target_producer,
             std::vector<std::uint8_t>(jetty.direct_wqe.begin(),
@@ -1515,7 +1551,7 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
         return;
     }
     const std::uint64_t address = jetty.queue_iova +
-        (jetty.consumer & (jetty.depth - 1U)) * abi::kWqebbBytes;
+        (state->issue & (jetty.depth - 1U)) * abi::kWqebbBytes;
     ++sq_dma_reads_;
     ReadToken(jetty.token, address, abi::kWqebbBytes,
         [this, jetty_id, target_producer]
@@ -1524,8 +1560,7 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
                 std::cerr << "udma-model: SQ DMA read failed jetty="
                           << jetty_id << " ok=" << ok
                           << " bytes=" << raw.size() << '\n';
-                auto found = jetty_contexts_.find(jetty_id);
-                if (found != jetty_contexts_.end()) found->second.busy = false;
+                ReleaseSqFetch(jetty_id, false);
                 ++ubase_errors_;
                 MaybeCompleteQueueDestroy();
                 return;
@@ -1536,17 +1571,17 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
             std::copy(raw.begin(), raw.end(), first.begin());
             const std::uint32_t wqebbs = abi::SqWqe(first).wqebb_count();
             const std::uint32_t outstanding = target_producer -
-                static_cast<std::uint32_t>(found->second.consumer);
+                static_cast<std::uint32_t>(sq_pipelines_.at(jetty_id)->issue);
             if (!wqebbs || wqebbs > outstanding ||
                 wqebbs > found->second.depth) {
-                found->second.busy = false;
+                ReleaseSqFetch(jetty_id, false);
                 ++sq_decode_rejects_;
                 ++ubase_errors_;
                 MaybeCompleteQueueDestroy();
                 return;
             }
             ContinueSqWqe(jetty_id, target_producer, std::move(raw), wqebbs - 1,
-                (static_cast<std::uint32_t>(found->second.consumer) + 1) &
+                (static_cast<std::uint32_t>(sq_pipelines_.at(jetty_id)->issue) + 1) &
                     (found->second.depth - 1U));
         });
 }
@@ -1575,8 +1610,7 @@ UdmaModel::ContinueSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         (bool ok, std::vector<std::uint8_t> continuation) mutable {
             if (!ok || continuation.size() !=
                     std::size_t(contiguous) * abi::kWqebbBytes) {
-                auto found = jetty_contexts_.find(jetty_id);
-                if (found != jetty_contexts_.end()) found->second.busy = false;
+                ReleaseSqFetch(jetty_id, false);
                 ++ubase_errors_;
                 MaybeCompleteQueueDestroy();
                 return;
@@ -1596,8 +1630,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
                        std::vector<std::uint8_t> raw)
 {
     auto fail = [this, jetty_id]() {
-        auto found = jetty_contexts_.find(jetty_id);
-        if (found != jetty_contexts_.end()) found->second.busy = false;
+        ReleaseSqFetch(jetty_id, false);
         ++ubase_errors_;
         MaybeCompleteQueueDestroy();
     };
@@ -1608,7 +1641,8 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
     std::copy_n(raw.begin(), bytes.size(), bytes.begin());
     const abi::SqWqe wqe(bytes);
     QueueContext& jetty = found->second;
-    const bool expected_owner = ((jetty.consumer / jetty.depth) & 1U) == 0;
+    const auto state = sq_pipelines_.at(jetty_id);
+    const bool expected_owner = ((state->issue / jetty.depth) & 1U) == 0;
     const std::uint32_t decoded_wqebbs = wqe.wqebb_count();
     const bool owner_valid = wqe.owner() == expected_owner;
     const bool length_valid =
@@ -1633,6 +1667,13 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
                   << " decoded_wqebbs=" << decoded_wqebbs
                   << '\n';
         return fail();
+    }
+    // Strong placement and fenced operations cannot pass older requests.
+    // Retry this descriptor when the older completion retires.
+    const bool ordered = wqe.place_order() == 2 || (wqe.flags() & 8U);
+    if (ordered && !state->completions.empty()) {
+        ReleaseSqFetch(jetty_id, false);
+        return;
     }
     ++sq_wqes_;
     const auto route = tp_routes_.find(wqe.tpn());
@@ -1662,7 +1703,8 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         // The official provider interprets CQE entry_idx as the last WQEBB
         // consumed by the completed WQE, then advances CI to entry_idx + 1.
         const std::uint16_t completed_index = static_cast<std::uint16_t>(
-            (jetty.consumer + decoded_wqebbs - 1U) & (jetty.depth - 1U));
+            (state->issue + decoded_wqebbs - 1U) & (jetty.depth - 1U));
+        ReserveSq(jetty_id, decoded_wqebbs, ordered);
         pending_rma_[request_id] = PendingRma{
             jetty_id, producer, decoded_wqebbs, completed_index,
             wqe.opcode(), local.length,
@@ -1689,12 +1731,15 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
             if (request == pending_rma_.end()) { ++ubase_errors_; return; }
             request->second.failed = true;
             if (request->second.response_dma) { ++ubase_errors_; return; }
+            const auto pending = request->second;
             pending_rma_.erase(request_id);
-            auto found = jetty_contexts_.find(jetty_id);
-            if (found != jetty_contexts_.end()) found->second.busy = false;
+            CompleteSq(jetty_id, pending.producer, pending.wqebbs,
+                       pending.completed_index, pending.opcode, pending.byte_count,
+                       pending.immediate, pending.completion, 1);
             ++ubase_errors_;
             MaybeCompleteQueueDestroy();
         });
+        ReleaseSqFetch(jetty_id, true);
         return;
     }
     if (wqe.inline_payload()) {
@@ -1712,8 +1757,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         [this, jetty_id, producer, raw = std::move(raw), expected = sge.length]
         (bool ok, std::vector<std::uint8_t> payload) mutable {
             if (!ok || payload.size() != expected) {
-                auto found = jetty_contexts_.find(jetty_id);
-                if (found != jetty_contexts_.end()) found->second.busy = false;
+                ReleaseSqFetch(jetty_id, false);
                 ++ubase_errors_;
                 MaybeCompleteQueueDestroy();
                 return;
@@ -1760,7 +1804,8 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
     // for inline WQEs spanning two or more blocks: the provider reconstructs
     // its SQ consumer as entry_idx + 1.
     const std::uint16_t completed_index = static_cast<std::uint16_t>(
-        (jetty.consumer + wqebbs - 1U) & (jetty.depth - 1U));
+        (sq_pipelines_.at(jetty_id)->issue + wqebbs - 1U) & (jetty.depth - 1U));
+    ReserveSq(jetty_id, wqebbs, wqe.place_order() == 2 || (wqe.flags() & 8U));
     std::uint64_t request_id = 0;
     if (wqe.opcode() == 3) {
         request_id = next_rma_request_++;
@@ -1779,8 +1824,8 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
         (bool ok) {
             if (!ok) {
                 if (request_id) pending_rma_.erase(request_id);
-                auto found = jetty_contexts_.find(jetty_id);
-                if (found != jetty_contexts_.end()) found->second.busy = false;
+                CompleteSq(jetty_id, producer, wqebbs, completed_index, opcode,
+                           count, immediate, completion, 1);
                 ++ubase_errors_;
                 MaybeCompleteQueueDestroy();
                 return;
@@ -1789,41 +1834,101 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
             CompleteSq(jetty_id, producer, wqebbs, completed_index, opcode, count,
                        immediate, completion);
         });
+    ReleaseSqFetch(jetty_id, true);
 }
 
 void
-UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
+UdmaModel::ReserveSq(std::uint32_t id, std::uint32_t wqebbs, bool ordered)
+{
+    const auto state = sq_pipelines_.at(id);
+    const auto depth = jetty_contexts_.at(id).depth;
+    SqCompletion entry{};
+    entry.wqebbs = wqebbs;
+    entry.index = static_cast<std::uint16_t>((state->issue + wqebbs - 1) & (depth - 1));
+    state->completions.push_back(entry);
+    state->issue += wqebbs;
+    state->ordered = ordered;
+}
+
+void
+UdmaModel::ReleaseSqFetch(std::uint32_t id, bool resume)
+{
+    const auto found = jetty_contexts_.find(id);
+    const auto pipeline = sq_pipelines_.find(id);
+    if (found == jetty_contexts_.end() || pipeline == sq_pipelines_.end()) return;
+    pipeline->second->fetching = false;
+    found->second.busy = !pipeline->second->completions.empty();
+    const auto producer = found->second.target_producer;
+    MaybeCompleteQueueDestroy();
+    if (resume) ProcessSq(id, producer);
+}
+
+void
+UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t /*producer*/,
                       std::uint32_t wqebbs, std::uint16_t completed_index,
                       std::uint8_t opcode, std::uint32_t byte_count,
                       std::uint64_t immediate, bool completion_enabled,
                       std::uint8_t status)
 {
-    auto finish = [this, jetty_id, producer, wqebbs](bool ok) {
-        auto found = jetty_contexts_.find(jetty_id);
-        if (found == jetty_contexts_.end()) return;
-        if (!ok) {
-            found->second.busy = false;
-            ++ubase_errors_;
+    const auto pipeline = sq_pipelines_.find(jetty_id);
+    if (pipeline == sq_pipelines_.end()) { ++ubase_errors_; return; }
+    // No WQEBB slot can be reused before retirement, so its final ring index
+    // identifies exactly one entry in this bounded, unretired window.
+    auto& entries = pipeline->second->completions;
+    const auto entry = std::find_if(entries.begin(), entries.end(),
+        [completed_index](const auto& e) { return e.index == completed_index; });
+    if (entry == entries.end() || entry->ready || entry->wqebbs != wqebbs) {
+        ++ubase_errors_;
+        return;
+    }
+    *entry = SqCompletion{wqebbs, completed_index, opcode, byte_count,
+                          immediate, completion_enabled, true, status};
+    RetireSq(jetty_id);
+}
+
+void
+UdmaModel::RetireSq(std::uint32_t id)
+{
+    const auto state = sq_pipelines_.at(id);
+    if (state->retiring) return;
+    state->retiring = true;
+    while (!state->publishing && !state->completions.empty() &&
+           state->completions.front().ready) {
+        const auto entry = state->completions.front();
+        const auto found = jetty_contexts_.find(id);
+        if (found == jetty_contexts_.end()) break;
+        state->publishing = true;
+        auto finish = [this, id, state, entry](bool ok) {
+            if (!ok) {
+                // Keep ownership on a failed CQ DMA: no successful CQE was
+                // published and releasing its queue could cause use-after-free.
+                ++ubase_errors_;
+                return;
+            }
+            const auto found = jetty_contexts_.find(id);
+            if (found == jetty_contexts_.end()) return;
+            auto& queue = found->second;
+            sq_consumer_wraps_ += ((queue.consumer % queue.depth) +
+                                   std::uint64_t(entry.wqebbs)) / queue.depth;
+            sq_wqebbs_retired_ += entry.wqebbs;
+            queue.consumer += entry.wqebbs;
+            ++sq_completions_;
+            state->completions.pop_front();
+            state->publishing = false;
+            if (state->completions.empty()) state->ordered = false;
+            queue.busy = state->fetching || !state->completions.empty();
+            const auto producer = queue.target_producer;
+            RetireSq(id);
             MaybeCompleteQueueDestroy();
-            return;
-        }
-        const auto depth = found->second.depth;
-        if (depth)
-            sq_consumer_wraps_ +=
-                ((found->second.consumer % depth) + std::uint64_t(wqebbs)) / depth;
-        sq_wqebbs_retired_ += wqebbs;
-        found->second.consumer += wqebbs;
-        ++sq_completions_;
-        found->second.busy = false;
-        ProcessSq(jetty_id, producer);
-    };
-    const auto found = jetty_contexts_.find(jetty_id);
-    if (found == jetty_contexts_.end()) return;
-    if (!completion_enabled) return finish(true);
-    WriteCqe(found->second.completion_queue, false, found->second.is_jetty,
-             opcode, completed_index, jetty_id, byte_count,
-             found->second.user_queue, immediate, std::move(finish), 0, 0, 0,
-             status);
+            ProcessSq(id, producer);
+        };
+        if (!entry.enabled) finish(true);
+        else WriteCqe(found->second.completion_queue, false, found->second.is_jetty,
+                      entry.opcode, entry.index, id, entry.bytes,
+                      found->second.user_queue, entry.immediate, std::move(finish),
+                      0, 0, 0, entry.status);
+    }
+    state->retiring = false;
 }
 
 void
@@ -1955,7 +2060,14 @@ UdmaModel::WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
                     }
                     found->second.pending_completions = 0;
                     found->second.moderation_deadline_ps = 0;
-                    EmitCompletionEvent(jfc_id, std::move(completion));
+                    // The CQE is already visible and its producer committed.
+                    // Failed notification must not replay the WQE or publish
+                    // the same CQE twice. Still wait for accepted event DMA.
+                    EmitCompletionEvent(jfc_id,
+                        [this, completion = std::move(completion)](bool event_ok) mutable {
+                            if (!event_ok) ++ubase_errors_;
+                            completion(true);
+                        });
                 });
         });
 }
@@ -2917,6 +3029,9 @@ UdmaModel::LoadState(std::istream& input)
     completion_events_.clear();
     mailbox_events_.clear();
     jfc_publications_.clear();
+    // Quiescent SQ issue cursors equal the restored retired consumers.
+    // Reconstruct lazily; never retain runtime cursors from an earlier image.
+    sq_pipelines_.clear();
     aeq_in_flight_ = 0;
     draining_eq_command_ = draining_queue_command_ = 0;
     pending_eq_destroy_ = pending_jfc_destroy_ = pending_queue_destroy_ = {};

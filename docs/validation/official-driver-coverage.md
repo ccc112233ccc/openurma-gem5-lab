@@ -44,7 +44,56 @@ and exhaustive driver unload/reload. Completion-only command counts are not a
 completion target. Existing safety guards remain; data corruption, stalls or
 misleading performance results on an in-scope path still require fixes.
 
-## Performance observation increment (2026-10-08)
+## Multi-WQE pipeline acceptance (2026-10-08)
+
+Implemented bounded per-Jetty SQ issue separate from ordered retirement. Local
+descriptor/payload fetching remains sequential, but READ response/WRITE ACK
+waiting no longer blocks issue of independent later WQEs. Hardware WQEBB depth
+bounds the unretired window. CQEs retire in issue order, including errors and
+non-signaled operations; strong placement/fence conservatively drain/block.
+Runtime FIFO/cursors are not checkpointed and are discarded on destroy/restore;
+the serialized QueueContext layout and checkpoint version are unchanged.
+
+Independent descriptor-level tests cover reverse WRITE ACKs, reversed READ DMA
+completion with payload checks, multi-block WQEs and three ring generations,
+strong/fence gates, error/success ordering and destroy/checkpoint ownership.
+True CQ DMA failure remains fail-closed: no unsafe resource release, but no
+general recovery claim. A CQE that was successfully published must retire even
+if CEQ notification subsequently fails; notification failure is separately
+counted. This fixes the previous possibility of replaying an already-sent WQE.
+
+First native pass found two failures (8/10), not ignored: the existing CEQ test
+now expects both already-published CQEs to retire; four white-box pending-RMA
+fixtures now reserve the matching SQ entry. All original DMA/error assertions
+remain. Final native build **4.68 s**, **10/10 tests in 4.54 s**; initial build
+**5.41 s**. Eight Python profile/parser tests passed in **0.03 s**.
+
+Full-system official provider/driver results on dual QEMU, no-sync:
+
+| Gate | Result | Suite / wrapper wall seconds | Evidence directory |
+| --- | --- | --- | --- |
+| depth512, SEND/READ/WRITE × batch/CQ 1,16,512 | 9/9 | 25.943 / 28.24 | `experiments/perf-pipeline512-20261008/` |
+| latency/bandwidth, 4 KiB/64 KiB/1 MiB RMA, 2 B–1 MiB scan | 12/12 | 28.532 / 30.81 | `experiments/perf-pipeline-full-20261008/` |
+
+Launch commands took **0.64 / 0.62 s** (not shell-ready time). Both environments
+were stopped after collection. Saved UDMA profiles for the isolated depth512
+gate show **68 / 85** local RMA peak (formerly 1 / 1), **18432** decoded and
+completed WQEs per endpoint, **18432** retired blocks, **18** hardware wraps,
+and zero SQ depth/decode rejects or UBASE errors. `check_udma_profile.py`
+automatically checks these gates, including peak >1; the old serialized logs
+correctly fail that requirement. These are whole-run aggregate peaks, not
+per-case concurrency measurements; actual peak512 is not claimed. Full-suite scan
+checks all 20 expected rows on both endpoints, not just exit status. QEMU
+regression now stops on the first failed case and records incomplete case count
+instead of repeatedly waiting on possibly wedged guests.
+
+Remaining priorities: full-system payload-integrity evidence; controlled
+concurrency/window and multi-Jetty experiments; synchronized measurement and
+configuration sensitivity. Functional no-sync wall-time changes are not modeled
+hardware speedup. Local payload-DMA error recovery remains limited; do not
+represent this change as implementing every failure/recovery path.
+
+## Performance observation increment (2026-10-08, before pipeline)
 
 Added process-lifetime counters `rma_pending_peak`, `sq_wqebbs_retired` and
 `sq_consumer_wraps` to the UDMA profile. They observe existing behavior without
