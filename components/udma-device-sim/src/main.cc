@@ -29,9 +29,11 @@ namespace net_proto = ubsim::proto::net;
 namespace {
 
 std::atomic<bool> running{true};
+volatile std::sig_atomic_t progress_requested = 0;
 constexpr std::size_t kPollBatch = 256;
 
 void Stop(int) { running.store(false); }
+void RequestProgress(int) { progress_requested = 1; }
 
 struct Options {
     std::string host_socket;
@@ -143,6 +145,15 @@ class HostPort final : public device::HostInterface {
     std::uint64_t AsyncTimestampJumps() const { return async_timestamp_jumps_; }
     std::uint64_t AsyncTimestampJumpPs() const { return async_timestamp_jump_ps_; }
     bool PendingEmpty() const { return pending_.empty(); }
+    void DumpPending(std::ostream& output) const {
+        std::size_t reads = 0, writes = 0;
+        for (const auto& [id, pending] : pending_) {
+            (void)id;
+            if (pending.is_read) ++reads; else ++writes;
+        }
+        output << "[UB_HOST_PENDING] reads=" << reads << " writes=" << writes
+               << " now_ps=" << now_ << '\n';
+    }
 
     void FinishFence() { prepare_seen_ = false; }
 
@@ -838,6 +849,11 @@ int Run(const Options& options)
            !(SimbricksBaseIfInTerminated(&host_if.base) &&
              SimbricksBaseIfInTerminated(&net_if.base))) {
         ++loop_iterations;
+        if (progress_requested) {
+            progress_requested = 0;
+            host.DumpPending(std::cerr);
+            model.DumpProgress(std::cerr);
+        }
         model.AdvanceTime(now);
         bool progress = false;
         // Bound each drain pass.  In synchronized mode a peer can keep the
@@ -987,6 +1003,8 @@ int Run(const Options& options)
               << " last_unknown_queue_offset=0x" << std::hex
               << model.last_unknown_queue_offset() << std::dec
               << " ubase_errors=" << model.ubase_errors() << '\n';
+    host.DumpPending(std::cerr);
+    model.DumpProgress(std::cerr);
     if (!options.state_out.empty()) {
         if (!SaveDeviceState(options.state_out, host, network, model)) {
             std::cerr << "udma-device-sim: device was not quiescent; state not saved\n";
@@ -1018,6 +1036,7 @@ int main(int argc, char** argv)
     }
     std::signal(SIGINT, Stop);
     std::signal(SIGTERM, Stop);
+    std::signal(SIGUSR1, RequestProgress);
     try {
         return Run(options);
     } catch (const std::exception& error) {

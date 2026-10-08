@@ -5,7 +5,23 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from dual_serial_command import SHELL_PROMPT_PATTERN, connect_until_ready
+from dual_serial_command import SHELL_PROMPT_PATTERN, connect_until_ready, run_one
+
+
+class ConsoleEofTests(unittest.TestCase):
+    def test_eof_is_not_reported_as_timeout(self) -> None:
+        for replies, phase in (([b""], "before command"),
+                               ([b"(ubsim-node0) ~ # ", b""], "awaiting command completion")):
+            with self.subTest(phase=phase):
+                sock = mock.MagicMock()
+                sock.__enter__.return_value = sock
+                sock.recv.side_effect = replies
+                results = {}
+                with mock.patch("dual_serial_command.connect_until_ready", return_value=sock):
+                    run_one(3560, "true", 180, 0, None, mock.Mock(), results)
+                self.assertIn(phase, results[3560])
+                self.assertIn("(EOF)", results[3560])
+                self.assertNotIn("within 180s", results[3560])
 
 
 class PromptPatternTests(unittest.TestCase):

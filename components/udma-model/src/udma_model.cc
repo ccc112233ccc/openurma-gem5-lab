@@ -2890,6 +2890,53 @@ UdmaModel::NextEventTime() const
     return next;
 }
 
+void
+UdmaModel::DumpProgress(std::ostream& output) const
+{
+    output << "[UDMA_PROGRESS] now_ps=" << now_ps_
+           << " sq_wqes=" << sq_wqes_
+           << " sq_completions=" << sq_completions_
+           << " quiescent=" << IsQuiescent()
+           << " pending_rma=" << pending_rma_.size()
+           << " read_dma_queues=" << read_response_dma_.size()
+           << " remote_services=" << remote_services_in_flight_
+           << " completion_events=" << completion_events_.size()
+           << " event_busy=" << completion_event_busy_
+           << " receive_busy=" << receive_busy_
+           << " destroy_pending=" << bool(pending_queue_destroy_) << '\n';
+    for (const auto& [id, state] : sq_pipelines_) {
+        const auto queue = jetty_contexts_.find(id);
+        if (queue == jetty_contexts_.end()) continue;
+        if (!state->fetching && state->completions.empty() &&
+            state->issue == queue->second.target_producer) continue;
+        output << "[UDMA_SQ_PROGRESS] id=" << id
+               << " depth=" << queue->second.depth
+               << " target=" << queue->second.target_producer
+               << " issue=" << state->issue
+               << " retired=" << queue->second.consumer
+               << " fetching=" << state->fetching
+               << " publishing=" << state->publishing
+               << " ordered=" << state->ordered
+               << " entries=" << state->completions.size()
+               << " ready=" << std::count_if(state->completions.begin(),
+                    state->completions.end(), [](const auto& c) { return c.ready; })
+               << " head_ready=" << (!state->completions.empty() && state->completions.front().ready)
+               << " jfc=" << queue->second.completion_queue << '\n';
+    }
+    for (const auto& [id, state] : jfc_publications_) {
+        if (!state->running && state->pending.empty()) continue;
+        const auto queue = jfc_contexts_.find(id);
+        output << "[UDMA_JFC_PROGRESS] id=" << id
+               << " running=" << state->running
+               << " queued=" << state->pending.size();
+        if (queue != jfc_contexts_.end())
+            output << " producer=" << queue->second.producer
+                   << " last_consumer=" << queue->second.consumer
+                   << " cqe_dma=" << queue->second.cqe_write_pending;
+        output << '\n';
+    }
+}
+
 bool
 UdmaModel::IsQuiescent() const
 {

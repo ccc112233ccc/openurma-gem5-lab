@@ -171,6 +171,11 @@ int main() {
         f.Post(0, 6, 2);
         f.Reply(1); f.Reply(0);
         assert(f.host.pending.size() == 1);
+        std::ostringstream progress;
+        f.model.DumpProgress(progress);
+        assert(progress.str().find("publishing=1") != std::string::npos);
+        assert(progress.str().find("[UDMA_JFC_PROGRESS]") != std::string::npos);
+        assert(f.host.pending.size() == 1 && f.host.entries.empty());
         f.Destroy();
         auto done = std::move(f.host.pending.front()); f.host.pending.pop_front();
         done(false);
@@ -231,6 +236,12 @@ int main() {
         f.host.hold_payload = true;
         f.Post(0, 6, 8);
         for (unsigned i = 0; i < 8; ++i) f.Reply(i);
+        assert(f.host.pending.size() == 8 && f.host.entries.empty());
+        std::ostringstream progress, repeated;
+        f.model.DumpProgress(progress);
+        f.model.DumpProgress(repeated);
+        assert(progress.str() == repeated.str());
+        assert(progress.str().find("entries=8 ready=0 head_ready=0") != std::string::npos);
         assert(f.host.pending.size() == 8 && f.host.entries.empty());
         f.Destroy();
         for (unsigned i = 8; i-- > 0;) {

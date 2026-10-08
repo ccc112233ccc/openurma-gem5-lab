@@ -177,6 +177,8 @@ class UdmaModel {
     // unsynchronized mode instead of polling virtual time in fixed quanta.
     std::uint64_t NextEventTime() const;
     bool IsQuiescent() const;
+    // Read-only snapshot for stalled completion/lifecycle diagnosis.
+    void DumpProgress(std::ostream& output) const;
     void RebaseTime(std::uint64_t now_ps = 0);
     bool SaveState(std::ostream& output) const;
     bool LoadState(std::istream& input);

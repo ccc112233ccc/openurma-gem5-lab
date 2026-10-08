@@ -74,7 +74,7 @@ def run_one(
                         prompt_kicked = True
                     continue
                 if not data:
-                    break
+                    raise ConnectionError(f"UART {port} closed before command (EOF)")
                 chunks.append(data)
                 if b"terminal already attached" in data:
                     raise RuntimeError("terminal already attached; detach it with ~. first")
@@ -110,7 +110,7 @@ def run_one(
                 except socket.timeout:
                     continue
                 if not data:
-                    break
+                    raise ConnectionError(f"UART {port} closed while awaiting command completion (EOF)")
                 chunks.append(data)
                 text = b"".join(chunks)
                 new_text = text[pre_send_len:]

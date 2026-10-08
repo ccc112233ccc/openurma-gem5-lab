@@ -49,11 +49,24 @@ misleading performance results on an in-scope path still require fixes.
 Latest range request: [2–4096 B READ results](read-2b-4096b-20261008.md).
 Seven sizes64–4096 B have valid single-direction readings (0.015792–1.010911
 GB/s) in two sessions.2 B failed and cleanup stalled;4–32 B were not run.
-The first64–4096 session stalled at1024 B despite ns-3 completing all81920
+The first64–4096 session ended without a1024 B result despite ns-3 completing all81920
 requests; UDMA retired81509 and could not checkpoint. A fresh session passed
 1024/2048/4096. Completion-tail progress across repeated workloads is therefore
 an additional open timing/reliability gate; do not label the grouped results
 as a single successful continuous scan or infer a CTP sequence-wrap cause.
+Independent review found this attempt ended at148.321 s before its180 s
+deadline, with SIGTERM/console EOF; the old UART helper mislabeled EOF as a
+timeout. The411 unretired requests are a shutdown snapshot, not proof of a
+permanent deadlock. UART EOF classification is now distinct, and shutdown
+diagnostics expose SQ readiness/publication, active JFC queues and pending host
+DMA. These observations do not change model scheduling or waive timing gates.
+The diagnostic rerun genuinely timed out at1024 B after180.211 s (330.535 s
+total). It completed64–512 B, then ended with866 ready SQ entries awaiting CQ
+publication, one host DMA read, no pending RMA and an almost empty CQ.
+See the linked READ record for exact counters. Narrow the investigation to
+host-side completion publication and synchronized progress; neither a lost
+DMA nor permanent deadlock is established yet. SIGUSR1 now supports live
+read-only progress samples on subsequent launches.
 
 Latest requested READ evidence:
 [single-direction scan and aligned control](requested-read-scan-20261008.md).

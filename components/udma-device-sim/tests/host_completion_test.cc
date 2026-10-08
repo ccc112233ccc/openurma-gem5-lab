@@ -5,6 +5,7 @@
 #undef main
 #include <array>
 #include <cassert>
+#include <sstream>
 
 namespace {
 struct HostPortTestAccess {
@@ -67,6 +68,19 @@ struct Fixture {
 }
 
 int main() {
+    {
+        Fixture f;
+        f.Request(true);
+        std::ostringstream pending;
+        f.host.DumpPending(pending);
+        assert(pending.str().find("reads=1 writes=0") != std::string::npos);
+        assert(f.callbacks == 0 && HostPortTestAccess::Pending(f.host) == 1);
+        RequestProgress(SIGUSR1);
+        assert(progress_requested == 1 && running.load());
+        progress_requested = 0;
+        f.Complete(true);
+        assert(f.callbacks == 1 && f.host.PendingEmpty());
+    }
     for (bool read : {false, true}) {
         {
             Fixture f; f.Request(read); f.Complete(read);
