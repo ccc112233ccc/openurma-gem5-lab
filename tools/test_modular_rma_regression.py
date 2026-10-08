@@ -3,11 +3,21 @@ import unittest
 from pathlib import Path
 
 from tools.run_modular_rma_regression import (
-    last_gem5_tick, tick_delta, command, validate_depth_output, OUTSTANDING_CASES,
+    last_gem5_tick, tick_delta, command, validate_depth_output, validate_bw_scan,
+    OUTSTANDING_CASES,
 )
 
 
 class DepthTests(unittest.TestCase):
+    def test_scan_requires_all_sizes_once_on_both_nodes(self):
+        rows = "".join(f"{1 << p} 64 0.00 1.00 0.01\n" for p in range(1, 21))
+        text = "--- UART 3560 ---\n" + rows + "--- UART 3570 ---\n" + rows
+        self.assertEqual(validate_bw_scan(text, 20, 64), [])
+        for invalid in (text.replace("16 64 0.00 1.00 0.01\n", ""),
+                        text + "1048576 64 0.00 1.00 0.01\n",
+                        text.replace("64 0.00", "32 0.00"), ""):
+            self.assertTrue(validate_bw_scan(invalid, 20, 64))
+
     def transcript(self, depth=512):
         return "".join(f"--- UART {port} ---\nJFS depth : {depth}\n"
                        "4096 2048 0.00 12.34 0.001234\n"

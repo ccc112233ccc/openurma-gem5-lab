@@ -69,6 +69,20 @@ def validate_depth_output(output: str, depth: int, size: int,
             errors.append(f"node{index}: missing or duplicate complete bandwidth result")
     return errors
 
+
+def validate_bw_scan(output: str, exponent: int, iterations: int) -> list[str]:
+    """Check every expected size on each endpoint, not merely process exit."""
+    sections = re.split(r"(?m)^--- UART \d+ ---\s*$", output)[1:]
+    errors = [] if len(sections) == 2 else ["expected two UART transcripts"]
+    number = r"\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+    pattern = rf"(?m)^\s*(\d+)\s+(\d+)\s+{number}\s+{number}\s+{number}\s*$"
+    expected = [(str(1 << power), str(iterations))
+                for power in range(1, exponent + 1)]
+    for index, section in enumerate(sections):
+        if re.findall(pattern, section) != expected:
+            errors.append(f"node{index}: incomplete, duplicated or unexpected scan rows")
+    return errors
+
 GEM5_TICK_RE = re.compile(r"(?m)^(\d+):")
 
 
@@ -182,6 +196,8 @@ def main() -> int:
         raw.write_text(result.stdout)
         validation_errors = (validate_depth_output(result.stdout, queue_depth,
                              size, iterations) if queue_depth else [])
+        if all_exponent is not None and verb.endswith("_bw"):
+            validation_errors.extend(validate_bw_scan(result.stdout, all_exponent, iterations))
         record = {
             "case": label, "verb": verb, "size_bytes": size,
             "iterations": iterations, "post_list": post_list,

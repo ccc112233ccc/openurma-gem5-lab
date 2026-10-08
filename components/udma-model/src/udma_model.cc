@@ -1667,6 +1667,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
             jetty_id, producer, decoded_wqebbs, completed_index,
             wqe.opcode(), local.length,
             0, wqe.completion(), jetty.payload_token, local.address, 0, {}};
+        rma_pending_peak_ = std::max<std::uint64_t>(rma_pending_peak_, pending_rma_.size());
         Frame frame{};
         frame.sequence = next_sequence_++;
         frame.source_eid = config_.endpoint_eid + jetty.eid_index * 0x10000U;
@@ -1768,6 +1769,7 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
         pending_rma_[request_id] = PendingRma{
             jetty_id, producer, wqebbs, completed_index, wqe.opcode(), count,
             wqe.immediate(), wqe.completion(), 0, 0, 0, {}};
+        rma_pending_peak_ = std::max<std::uint64_t>(rma_pending_peak_, pending_rma_.size());
     }
     network_.Send(std::move(frame),
         [this, jetty_id, producer, completed_index, opcode = wqe.opcode(),
@@ -1805,6 +1807,11 @@ UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
             MaybeCompleteQueueDestroy();
             return;
         }
+        const auto depth = found->second.depth;
+        if (depth)
+            sq_consumer_wraps_ +=
+                ((found->second.consumer % depth) + std::uint64_t(wqebbs)) / depth;
+        sq_wqebbs_retired_ += wqebbs;
         found->second.consumer += wqebbs;
         ++sq_completions_;
         found->second.busy = false;

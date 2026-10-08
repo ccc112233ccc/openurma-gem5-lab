@@ -189,6 +189,12 @@ class UdmaModel {
     std::uint64_t sq_dma_reads() const { return sq_dma_reads_; }
     std::uint64_t sq_wqes() const { return sq_wqes_; }
     std::uint64_t sq_completions() const { return sq_completions_; }
+    // Process-lifetime observations, not checkpointed architectural state.
+    // RMA peak counts local READ/WRITE requests awaiting remote completion;
+    // it excludes SEND, remote service requests and completion publication.
+    std::uint64_t rma_pending_peak() const { return rma_pending_peak_; }
+    std::uint64_t sq_wqebbs_retired() const { return sq_wqebbs_retired_; }
+    std::uint64_t sq_consumer_wraps() const { return sq_consumer_wraps_; }
     std::uint64_t sq_depth_rejects() const { return sq_depth_rejects_; }
     std::uint64_t sq_decode_rejects() const { return sq_decode_rejects_; }
     std::uint64_t unknown_queue_writes() const { return unknown_queue_writes_; }
@@ -528,6 +534,9 @@ class UdmaModel {
     std::uint64_t sq_dma_reads_{0};
     std::uint64_t sq_wqes_{0};
     std::uint64_t sq_completions_{0};
+    std::uint64_t rma_pending_peak_{0};
+    std::uint64_t sq_wqebbs_retired_{0};
+    std::uint64_t sq_consumer_wraps_{0};
     std::uint64_t sq_depth_rejects_{0};
     std::uint64_t sq_decode_rejects_{0};
     std::uint64_t unknown_queue_writes_{0};

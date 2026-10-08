@@ -44,6 +44,45 @@ and exhaustive driver unload/reload. Completion-only command counts are not a
 completion target. Existing safety guards remain; data corruption, stalls or
 misleading performance results on an in-scope path still require fixes.
 
+## Performance observation increment (2026-10-08)
+
+Added process-lifetime counters `rma_pending_peak`, `sq_wqebbs_retired` and
+`sq_consumer_wraps` to the UDMA profile. They observe existing behavior without
+changing scheduling or checkpoint format. RMA peak is device-wide local
+READ/WRITE requests, excluding SEND, remote service and CQE publication.
+Wrap counts use actual hardware queue depth and retired WQEBBs, not WQE count.
+
+The nine official depth512 cases passed with the new binary in **30.224 s**
+(wrapper **32.51 s**, launcher **0.64 s**, initial build **5.25 s**). Both nodes:
+
+| Counter | Value |
+| --- | ---: |
+| decoded WQEs / completions / retired WQEBBs | 18432 / 18432 / 18432 |
+| hardware SQ consumer wraps | 18 |
+| local RMA pending peak | 1 |
+| SQ depth/decode rejects and UBASE errors | 0 |
+
+Evidence: `experiments/perf-counters-20261008/`, including saved per-node UDMA
+profiles and UART reports. Official `udma_u_jfs.c` allocates two WQEBBs per
+configured depth entry for this max-SGE/inline configuration, so `-T512`
+allocates 1024 hardware blocks; these one-block WQEs cause 18, not 36, wraps.
+
+Independent review confirmed that `ProcessSq` keeps each Jetty busy until
+`CompleteSq` finishes publication. READ waits for response DMA, WRITE for ACK;
+the peak of one is therefore a model serialization bottleneck, not hardware
+evidence that queue depth512 provides concurrency. Next implementation priority
+is decoupled bounded SQ issue and ordered retirement, preserving CQE indices,
+owner handling, error propagation and destroy/checkpoint quiescence. Re-run
+counter-backed depth512 and fragmentation tests after that change.
+
+Independent tests add a four-block ring with multi-block WQEs crossing the
+boundary, an exact-boundary completion, and two Jettys holding WRITE ACKs to
+prove peak2 is observed and retained after drain. Final build **2.11 s**;
+native **9/9 PASS in 0.63 s**. Python **6/6 PASS in 0.05 s** includes new scan
+missing/duplicate/wrong-iteration rejection. Both endpoints of the saved
+2 B–1 MiB scan were re-parsed successfully; that was transcript validation,
+not a fresh scan execution. Payload-integrity coverage remains open.
+
 ## Coverage matrix
 
 ### Performance-scope increment: explicit depth512 (2026-10-08)

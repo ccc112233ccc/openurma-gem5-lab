@@ -82,8 +82,22 @@ marks are separate evidence still to collect. This is a queue-capacity stress
 test, not a claim of 512 simultaneously active hardware requests or verified
 payload contents. No-sync bandwidth figures are not timing acceptance results.
 
-The older `full` suite still checks guest exit status only; per-size transcript
-validation and independent payload verification remain follow-up work.
+The `full` suite's bandwidth scan also requires the complete ordered sequence
+of 20 sizes (2 B through 1 MiB) with matching iteration counts on both guests.
+Missing, duplicate or unexpected rows fail acceptance even with exit status 0.
+Other legacy non-scan cases still primarily check guest exit status.
+Independent payload verification remains follow-up work.
+
+On 2026-10-08, the nine depth512 cases passed again in 30.224 s with hardware
+observations enabled. Each endpoint retired 18,432 WQEBBs across 18 actual
+hardware consumer ring crossings, with 18,432 WQEs/completions and zero SQ
+depth/decode rejects. Local READ/WRITE pending peak was **1**, not 512:
+`ProcessSq` holds the Jetty busy through remote completion and CQE publication.
+This establishes a model serialization bottleneck, not a physical UB limit.
+These counters are process-lifetime observations, not saved architectural state;
+the RMA peak excludes SEND, remote-service work and CQE publication.
+Next work is a bounded multi-WQE pipeline with ordered retirement and safe
+resource lifetime handling, followed by the same counter-backed regression.
 
 `./lab checkpoint NAME` stops both guests at the same pseudo operation, waits
 for both architectural checkpoints, drains both UDMA processes, and stores the

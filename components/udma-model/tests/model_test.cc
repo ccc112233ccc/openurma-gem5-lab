@@ -671,6 +671,7 @@ int main()
     }
     const device::Frame write_frame = network.frames.back();
     assert(write_frame.operation == device::Frame::Operation::Write);
+    assert(official_model.rma_pending_peak() == 1);
     assert(write_frame.order_type == 1); // official SQE place_odr=RO
     official_model.Receive(write_frame);
     assert(host.Load(write_target) == std::vector<std::uint8_t>({'r','m','a','!'}));
@@ -706,6 +707,8 @@ int main()
     official_model.Receive(read_response);
     assert(host.Load(read_target) == std::vector<std::uint8_t>({'r','m','a','!'}));
     assert(host.Contains(cq_iova + 192));
+    assert(official_model.rma_pending_peak() == 1);
+    assert(official_model.sq_wqebbs_retired() == 3);
     assert(host.irq_pulses == 4 && host.Load(msi_address)[0] == 0x42);
 
     // A busy device can observe several monotonically increasing doorbells
@@ -767,6 +770,7 @@ int main()
         std::uint16_t(inline_write_cqe[4]) |
         (std::uint16_t(inline_write_cqe[5]) << 8);
     assert(inline_write_entry == 6); // final block of the slot-5/6 WQE
+    assert(official_model.sq_wqebbs_retired() == 7);
 
     std::array<std::uint8_t, 64> after_multi_wqebb = send_wqe;
     const std::uint32_t after_multi_flags =
@@ -974,6 +978,76 @@ int main()
     assert(restored_multi_ceq.LoadState(multi_ceq_checkpoint));
     assert(!restored_multi_ceq.ceq_enabled(0) && restored_multi_ceq.ceq_enabled(1));
     std::cout << "udma-model multi-CEQ routing, independent destroy, MSI and checkpoint: PASS\n";
+    // Count retired WQEBBs, not WQEs: the two-block descriptors below cross
+    // a four-slot SQ boundary, and owner toggles must still be respected.
+    constexpr std::uint64_t small_sq = 0x210000;
+    constexpr std::uint64_t other_sq = 0x220000;
+    const auto create_small_jetty = [&](std::uint32_t id, std::uint64_t address) {
+        auto context = jetty_context;
+        store32(context, 0, (1U << 19) | (2U << 8)); // four WQEBBs
+        store32(context, 4, static_cast<std::uint32_t>(address));
+        host.Store(jetty_context_iova, context);
+        auto command = create_jetty;
+        store32(command, 16, (id << 8) | 0x04);
+        mailbox(command);
+    };
+    create_small_jetty(10, small_sq);
+    create_small_jetty(11, other_sq);
+    constexpr std::uint64_t small_page = 0x00200000 + 0x1000 + 10 * 0x1000;
+    constexpr std::uint64_t other_page = 0x00200000 + 0x1000 + 11 * 0x1000;
+    const auto retired_before = official_model.sq_wqebbs_retired();
+    const auto wraps_before = official_model.sq_consumer_wraps();
+    const auto completions_before_wrap = official_model.sq_completions();
+    const auto post_small_send = [&](std::uint32_t consumer, unsigned blocks) {
+        std::vector<std::uint8_t> raw(blocks * 64, 0);
+        const auto owner = ((consumer / 4) & 1U) ? 0U : (1U << 31);
+        store32(raw, 0, consumer | (0x40U << 16) | owner); // no CQE
+        store32(raw, 4, (blocks == 2 ? 32U : 3U) << 22);
+        store32(raw, 8, tp_id);
+        store32(raw, 12, remote_jetty);
+        for (unsigned i = 48; i < (blocks == 2 ? 80U : 51U); ++i)
+            raw[i] = static_cast<std::uint8_t>(i);
+        for (unsigned i = 0; i < blocks; ++i)
+            host.Store(small_sq + ((consumer + i) % 4) * 64,
+                {raw.begin() + i * 64, raw.begin() + (i + 1) * 64});
+        assert(official_model.WriteMmio(small_page + 0x80, 4, consumer + blocks));
+    };
+    post_small_send(0, 1);
+    post_small_send(1, 1);
+    post_small_send(2, 1);
+    assert(official_model.sq_consumer_wraps() == wraps_before);
+    post_small_send(3, 2); // descriptor itself spans slots 3 and 0
+    assert(official_model.sq_consumer_wraps() == wraps_before + 1);
+    post_small_send(5, 2);
+    post_small_send(7, 1); // exact boundary also counts as a wrap
+    assert(official_model.sq_consumer_wraps() == wraps_before + 2);
+    assert(official_model.sq_wqebbs_retired() == retired_before + 8);
+    assert(official_model.sq_completions() == completions_before_wrap + 6);
+
+    // Holding one WRITE ACK per Jetty demonstrates device-level concurrency;
+    // this does not claim more than one active WQE within either Jetty.
+    auto pending_write = write_wqe;
+    const std::uint32_t pending_flags = 8U | (0x01U << 16) | (1U << 31);
+    std::memcpy(pending_write.data(), &pending_flags, 4);
+    host.Store(small_sq, {pending_write.begin(), pending_write.end()});
+    assert(official_model.WriteMmio(small_page + 0x80, 4, 9));
+    const auto first_pending_write = network.frames.back();
+    assert(official_model.sq_wqebbs_retired() == retired_before + 8);
+    host.Store(other_sq, {pending_write.begin(), pending_write.end()});
+    assert(official_model.WriteMmio(other_page + 0x80, 4, 1));
+    const auto second_pending_write = network.frames.back();
+    assert(first_pending_write.request_id != second_pending_write.request_id);
+    assert(official_model.rma_pending_peak() == 2);
+    official_model.Receive(first_pending_write);
+    const auto first_pending_ack = network.frames.back();
+    official_model.Receive(second_pending_write);
+    const auto second_pending_ack = network.frames.back();
+    official_model.Receive(first_pending_ack);
+    official_model.Receive(second_pending_ack);
+    assert(official_model.sq_wqebbs_retired() == retired_before + 10);
+    assert(official_model.sq_consumer_wraps() == wraps_before + 2);
+    assert(official_model.rma_pending_peak() == 2); // high-water mark survives drain
+    std::cout << "udma-model retired WQEBBs, SQ wraps and device RMA peak: PASS\n";
     auto duplicate_jfc=create_jfc;
     mailbox(duplicate_jfc,17);
     auto bad_context=create_jfc;
