@@ -198,7 +198,7 @@ class UdmaModel {
     }
     std::uint64_t ubase_errors() const { return ubase_errors_; }
     std::size_t jfc_count() const { return jfc_contexts_.size(); }
-    bool ceq_enabled() const { return ceq_iova_ != 0 && ceq_depth_ != 0; }
+    bool ceq_enabled(std::uint32_t id = 0) const { return ceqs_.count(id) != 0; }
     bool aeq_enabled() const { return aeq_iova_ != 0 && aeq_depth_ != 0; }
     std::size_t jfr_count() const { return jfr_contexts_.size(); }
     std::size_t jetty_count() const { return jetty_contexts_.size(); }
@@ -273,6 +273,22 @@ class UdmaModel {
                   std::uint32_t remote_eid = 0, std::uint32_t tpn = 0,
                   std::uint8_t status = 0);
     void EmitCompletionEvent(std::uint32_t jfc_id, Completion completion);
+    void WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
+                     std::uint8_t opcode, std::uint16_t entry_index,
+                     std::uint32_t local_id, std::uint32_t byte_count,
+                     std::uint64_t user_data, std::uint64_t immediate,
+                     Completion completion, std::uint32_t remote_id,
+                     std::uint32_t remote_eid, std::uint32_t tpn,
+                     std::uint8_t status);
+    void ProcessJfcPublications(std::uint32_t jfc_id);
+    bool JfcPublicationBusy(std::uint32_t jfc_id) const;
+    struct JfcPublicationQueue {
+        std::deque<std::function<void(Completion)>> pending;
+        bool running{};
+        bool dispatching{};
+    };
+    std::unordered_map<std::uint32_t, std::shared_ptr<JfcPublicationQueue>>
+        jfc_publications_;
     void ProcessCompletionEvent();
     void RaiseInterrupt(std::uint32_t vector, Completion completion);
     struct MsiState {
@@ -282,6 +298,15 @@ class UdmaModel {
         Completion completion;
     };
     void ProcessReceiveQueue();
+    void ReleaseReceive();
+    void MaybeCompleteQueueDestroy();
+    bool ResourceQueueBusy(std::uint8_t command, std::uint32_t id) const;
+    std::optional<std::uint32_t> active_receive_jfr_;
+    std::optional<std::uint32_t> active_receive_jetty_;
+    std::uint8_t draining_queue_command_{};
+    std::uint32_t draining_queue_id_{};
+    std::function<void()> pending_queue_destroy_;
+    std::unordered_map<std::uint32_t, std::uint32_t> read_response_dma_;
     void ReceiveSend(std::shared_ptr<Frame> frame);
     void ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
                     std::uint32_t rqe_index, std::uint32_t sge_index,
@@ -344,6 +369,8 @@ class UdmaModel {
         std::size_t in_flight{};
         std::size_t max_outstanding{1};
         bool done{};
+        bool failed{};
+        bool advancing{};
         std::vector<std::uint8_t> bytes;
         ReadCompletion completion;
     };
@@ -355,6 +382,8 @@ class UdmaModel {
         std::size_t in_flight{};
         std::size_t max_outstanding{1};
         bool done{};
+        bool failed{};
+        bool advancing{};
         std::vector<std::uint8_t> bytes;
         Completion completion;
     };
@@ -415,6 +444,7 @@ class UdmaModel {
         std::uint64_t consumer{};
         bool is_jetty{true};
         bool busy{};
+        bool cqe_write_pending{};
         bool direct_pending{};
         std::uint32_t target_producer{};
         std::uint32_t max_sge{1};
@@ -429,20 +459,45 @@ class UdmaModel {
     std::uint64_t aeq_iova_{};
     std::uint32_t aeq_depth_{};
     std::uint32_t aeq_producer_{};
+    std::uint32_t aeq_vector_{};
     std::uint32_t aeq_in_flight_{};
+    struct PendingMailboxEvent {
+        std::uint16_t sequence{};
+        Completion completion;
+    };
+    std::deque<PendingMailboxEvent> mailbox_events_;
+    void ProcessMailboxEvent();
+    void MaybeCompleteJfcDestroy();
+    std::optional<std::uint32_t> draining_jfc_id_;
+    std::function<void()> pending_jfc_destroy_;
     void MaybeCompleteEqDestroy();
+    bool CeqBusy(std::uint32_t id) const;
     std::uint8_t draining_eq_command_{};
+    std::uint32_t draining_eq_id_{};
     std::function<void()> pending_eq_destroy_;
-    std::uint64_t ceq_iova_{};
-    std::uint32_t ceq_depth_{};
-    std::uint32_t ceq_producer_{};
+    struct EventQueueContext {
+        std::uint64_t iova{};
+        std::uint32_t depth{};
+        std::uint32_t producer{};
+        std::uint32_t vector{};
+    };
+    std::unordered_map<std::uint32_t, EventQueueContext> ceqs_;
+    std::unordered_map<std::uint32_t, std::uint32_t> jfc_ceqs_;
     struct PendingCompletionEvent {
         std::uint32_t jfc_id{};
+        std::uint32_t ceq_id{};
         Completion completion;
     };
     std::deque<PendingCompletionEvent> completion_events_;
     bool completion_event_busy_{};
+    std::uint32_t active_ceq_id_{};
+    std::uint32_t active_event_jfc_id_{};
     std::unordered_map<std::uint32_t, QueueContext> jfc_contexts_;
+    // Retain the last drained image after DESTROY: official UDMA queries the
+    // context to verify pi == wr_cqe_idx before releasing its queue buffer.
+    std::unordered_map<std::uint32_t, std::array<std::uint8_t, 128>> jfc_query_contexts_;
+    std::array<std::uint8_t, 128> BuildJfcQueryContext(std::uint32_t id) const;
+    void QueryJfcContext(std::uint32_t id, ReadCompletion completion);
     std::unordered_map<std::uint32_t, QueueContext> jfr_contexts_;
     std::unordered_map<std::uint32_t, QueueContext> jetty_contexts_;
     struct TpRoute {
@@ -490,6 +545,9 @@ class UdmaModel {
         std::uint64_t local_address{};
         std::uint32_t completed_bytes{};
         std::unordered_map<std::uint32_t, bool> completed_tassns;
+        std::uint32_t response_dma{};
+        std::uint32_t accepted_bytes{};
+        bool failed{};
     };
     std::unordered_map<std::uint64_t, PendingRma> pending_rma_;
 };

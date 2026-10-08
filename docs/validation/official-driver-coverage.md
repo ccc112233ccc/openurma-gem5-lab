@@ -28,9 +28,9 @@ Paths below are repository-relative.
 | UMMU translation | `oe66/drivers/iommu/hisilicon`, `deps/ummu` | token lookup, page walk, IOTLB; native translated queues/payload and invalid-token tests | Partial: current ARM64 table formats; not complete UMMU fault reporting/permissions coverage |
 | UBCORE / UBURMA | `oe66/drivers/ub/urma/ubcore`, `uburma` | Official guest software routes requests to provider/driver | Software execution is not independent proof for each ioctl |
 | UDMA JFS/Jetty context | `oe66/drivers/ub/urma/hw/udma/udma_cmd.h`, `udma_jetty.c` | Mailbox create 0x04, query 0x06, destroy 0x07 | Create/DMA path covered; query is synthesized, full modify/flush/in-flight teardown not verified |
-| UDMA JFC | `udma_jfc.c`, command header | Create 0x24, modify 0x25, destroy 0x27; CQE/moderation tests | Partial modify masks; new 16-cycle destroy/recreate test exercises CSQ wrap |
+| UDMA JFC | `udma_jfc.c`, command header | Create 0x24, modify 0x25, query 0x26, destroy 0x27; serialized CQE publication and drain | Partial modify masks; query preserves post-destroy state for official destroy-done polling |
 | UDMA JFR | `udma_jfr.c`, command header | Create 0x54, destroy 0x57; SEND receive DMA tests | Full modify/query and in-flight teardown not verified |
-| AEQ / CEQ | command header and UBASE event setup | Create 0x34/0x44, destroy 0x37/0x47; mailbox/completion event DMA | **Single modeled AEQ/CEQ**. Destroy drains accepted events and MSI; busy replacement rejects. Not full driver teardown verification |
+| AEQ / CEQ | command header and UBASE event setup | One official AEQ (ID 0), per-ID CEQs; JFC CEQN routing and context irq_num | Serialized event publication, independent CEQ destruction; queue-full/consumer-doorbell behavior still incomplete |
 | CtrlQ QoS/SEID | `udma_ctrlq*`, UBASE control envelope | Services 4:1/2, 2:1/0x15 in `BuildCtrlqResponse` | Template responses; SEID query is not proof of complete security-entity behavior |
 | CtrlQ TP | `udma_ctrlq_tp.h/.c` | GET_LIST 0x21, ACTIVE 0x22, DEACTIVE 0x23, REMOVE 0x13; exhaustion/reclaim/reuse tests | REMOVE supports inactive routes with no pending RMA; CHECK/SET_ATTR/GET_ATTR not implemented |
 | Official provider SEND / SEND_IMM / WRITE / READ | `sources/umdk/src/urma/hw/udma/udma_u_jfs.c` | `SqWqe`, `ProcessSq`, receive paths; native and historical full-system RMA tests | Implemented subset; SQ opcodes accepted are 0, 1, 3, 6 |
@@ -126,7 +126,7 @@ python3 tools/audit_command_coverage.py --json
 The tool reads selected pinned UBASE/UDMA enums, including both mailbox headers,
 and assigns conservative, manually reviewed categories. It counts aliases as
 symbols, not unique operations. It is neither exhaustive across all UB modules
-nor dynamic verification. Current results: UBASE 86 symbols (78 completion-only,
+nor dynamic verification. Results at that earlier stage: UBASE 86 symbols (78 completion-only,
 6 partial, 2 dispatch); mailbox 74 (52 completion-only, 22 partial); CtrlQ TP 8
 (4 partial, 4 rejected); CtrlQ device 6 (1 partial, 5 rejected).
 
@@ -194,6 +194,79 @@ can still occur would recreate the freed-buffer hazard; that fault requires
 transport quiescence/reset, not an invented successful completion. Therefore
 full guest unload safety and fault recovery remain unverified.
 
+## Fifth implementation: independent review and integrated lifecycle work
+
+Implementation and independent acceptance now run together. Review exposed
+shared-producer races and early DMA-error completion that single-queue tests
+did not exercise. The working acceptance gates are:
+
+| Gate | Implemented contract | Evidence / remaining boundary |
+|---|---|---|
+| Multiple CEQs | JFC DW2 CEQN selects per-ID ring; EQ DW6 irq_num selects MSI | Native SEND routing; destroying A does not wait for delayed B, success/failure branches |
+| AEQ concurrency | Event publication is serialized through DMA and MSI | Two event-enabled mailboxes retain distinct sequences and ring slots; only official AEQ ID 0 supported |
+| Shared JFC | Per-ID CQE publication queue owns producer until final callback | Independent delayed-DMA tests with distinct local IDs, success/failure and destroy |
+| Timer notifications | JFC destruction also drains its pending CEQ events | Independent delayed moderation notification test; prevents stale event on reused JFC ID |
+| JFS/JFR lifetime | Closing stops new work; started SQ/RX operations drain before erase | Native delayed SQ read, SEND completion, WRITE ACK, RX payload/CQE and ID reuse; not complete WQE flush semantics |
+| Token DMA errors | Stop new fragments, wait for accepted translation/DMA before final error | 16 read/write scenarios, including failure ordering and 16 MiB synchronous callbacks without recursive stack growth |
+| JFC query | Preserve official context and return modeled producer/write progress; keep destroyed snapshot | Independent live/in-flight/post-destroy query, checkpoint, ID reuse and error tests passed |
+| Command audit | Distinct opcode counts, aliases preserved; declaration fingerprints fail closed on changes | Python unit tests; source review is explicitly not execution evidence |
+| Guest dataplane | Dual native QEMU, official provider/driver, no-sync | Final integrated binary: 12/12 RMA cases passed, suite 29.203 s (wrapper 31.48 s) |
+
+Two unsupported diagnostic requests (GET_CQE_AUX_INFO 0x4213 and
+GET_AE_AUX_INFO 0x4214) now return EOPNOTSUPP instead of empty success. Official
+`udma_ctl.c` callers check command failure before consuming the response.
+
+Checkpoint state is now **version 2**, including per-ID CEQ/JFC mappings and
+JFC query snapshots. Version 1 is rejected rather than misinterpreted. Existing
+gem5 ready checkpoints must pass complete compatibility checks; a coordinated
+replacement must be made once if none is compatible. Native QEMU functional
+verification does not restore old model checkpoints.
+
+The first QEMU attempt reached both guest shells, but ending its parent tool
+session reaped the background processes. The measured dataplane run kept launch
+and regression in one supervised session. Docker was unavailable; no Docker
+restart or gem5 cold boot was required.
+
+The following are **not** implied by these tests: arbitrary UB-module support,
+full guest driver unload/reload, lost-callback/transport-reset recovery, hardware
+performance calibration, or a full multi-Entity/multiport matrix.
+
+Final coordinated clean build: **5.03 s**. All **6 CTests passed in 3.00 s**;
+all **7 Python audit tests passed in 0.16 s**. Independent acceptance found no
+new P1 in the implemented paths. The READ-error regression includes two
+outstanding response DMAs: remote error or local DMA failure cannot return an
+error CQE or finish resource destruction before the last write finishes.
+
+Final QEMU evidence is under
+`experiments/official-coverage-qemu-20261008-b/` (local generated artifacts):
+`results.csv`, twelve UART transcripts and the model manifest. Cases cover
+SEND latency/bandwidth, SQ wrap, 4 KiB SEND, READ/WRITE latency, bidirectional
+4 KiB outstanding=16, 64 KiB/1 MiB fragmentation and a single-process
+2 B–1 MiB inline64 WRITE bandwidth scan. All command return codes were zero;
+UDMA logs contained no error/timeout entries. These are functional results.
+
+The current distinct-opcode audit still reports **76 UBASE and 32 mailbox
+completion-only commands**. `--check` now rejects changed enum declarations
+until their namespace is reviewed; this is not a hardware-implementation check.
+
+### Next autonomous acceptance priorities
+
+1. Track remote READ/WRITE service DMA in checkpoint quiescence and resource
+   lifetime; review found these can currently be omitted from `IsQuiescent()`.
+2. Validate READ response interval coverage, not just TA uniqueness and total
+   bytes: distinct TAs with overlapping offsets must not falsely complete.
+3. Define cancellation/reset with transport quiescence for missing callbacks
+   or ACKs. Never time out successfully while a DMA can still land.
+4. Expand complete driver unload/reload, multi-Entity/multiport and error-path
+   full-system evidence after those native contracts pass.
+5. Continue removing completion-only operations by official caller semantics;
+   explicit unsupported errors are not equivalent to implemented features.
+
+The thread has an hourly continuation automation (`ubsim`) to advance this
+list with separate implementation/acceptance agents, save local milestones,
+and report meaningful results or decisions. This is a continuation mechanism,
+not a declaration that item 2 is complete.
+
 ## Next priority gaps
 
 1. Enumerate every UBASE/mailbox/CtrlQ command into explicit implemented,
@@ -202,8 +275,8 @@ full guest unload safety and fault recovery remain unverified.
    define recovery for unreadable queues and unwritable completions.
 3. Audit remaining service-specific input fields, flags and semantics beyond
    the new minimum-length checks.
-4. Model per-ID event queues and safe in-flight teardown/reuse. The singleton
-   CEQ fix does not solve deferred-DMA generation checks or multiple CEQs.
+4. Complete event-queue consumer/fullness semantics and remaining in-flight
+   teardown/reuse cases beyond the per-ID CEQ and serialized publication work.
 5. Extend TP removal to safe per-TP in-flight teardown and add attribute
    operations; then verify multi-Jetty/multi-Entity state isolation.
 6. Run bounded full-system driver lifecycle tests from a compatible ready

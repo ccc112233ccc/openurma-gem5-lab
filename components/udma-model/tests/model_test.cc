@@ -333,6 +333,7 @@ int main()
     constexpr std::uint64_t aeq_context_iova = 0x80000;
     constexpr std::uint64_t aeq_iova = 0x90000;
     std::vector<std::uint8_t> aeq_context(64, 0);
+    store32(aeq_context, 24, 1);
     store32(aeq_context, 8, static_cast<std::uint32_t>(aeq_iova));
     host.Store(aeq_context_iova, aeq_context);
     std::vector<std::uint8_t> create_aeq(32, 0);
@@ -459,6 +460,7 @@ int main()
     constexpr std::uint64_t ceq_iova = 0xf0000;
     std::vector<std::uint8_t> ceq_context(64, 0);
     store32(ceq_context, 8, static_cast<std::uint32_t>(ceq_iova));
+    store32(ceq_context, 24, 2); // official EQ irq_num field
     host.Store(ceq_context_iova, ceq_context);
     std::vector<std::uint8_t> create_ceq(32, 0);
     create_ceq[0] = 0x00; create_ceq[1] = 0x70; create_ceq[3] = 1;
@@ -853,12 +855,19 @@ int main()
     std::istringstream busy_restore("not consumed while DMA is outstanding");
     assert(!official_model.LoadState(busy_restore));
     assert(busy_restore.tellg() == 0);
+    auto queued_mailbox = create_aeq;
+    store32(queued_mailbox, 16, 0); // write-context command, event-enabled completion
+    store32(queued_mailbox, 20, (1U << 16) | 0x1235);
+    mailbox(queued_mailbox);
+    assert(host.pending_writes.size() == 1); // second event is queued, not same-slot DMA
     auto destroy_aeq = create_aeq;
     store32(destroy_aeq, 16, 0x37);
     store32(destroy_aeq, 20, 0); // official EQ teardown uses polling
     mailbox(create_aeq, 16);
     assert(official_model.aeq_enabled());
     drain_destroy(destroy_aeq);
+    assert(host.Load(aeq_iova)[12] == 0x34);
+    assert(host.Load(aeq_iova + 64)[12] == 0x35);
     assert(!official_model.aeq_enabled());
     const auto old_aeq_writes = host.dma_write_addresses.size();
     auto recreated_aeq = create_aeq;
@@ -928,6 +937,43 @@ int main()
     drain_destroy(destroy_ceq);
     assert(!official_model.ceq_enabled());
     std::cout << "udma-model CEQ in-flight destroy/replacement guard: PASS\n";
+    // Two CEQ IDs own independent rings and use the official irq_num field.
+    mailbox(create_ceq);
+    auto ceq1_context = ceq_context;
+    constexpr std::uint64_t ceq1_iova = 0x1c0000;
+    store32(ceq1_context, 8, ceq1_iova);
+    store32(ceq1_context, 24, 3);
+    host.Store(ceq_context_iova, ceq1_context);
+    auto create_ceq1 = create_ceq;
+    store32(create_ceq1, 16, (1U << 8) | 0x44);
+    mailbox(create_ceq1);
+    assert(official_model.ceq_enabled(0) && official_model.ceq_enabled(1));
+    destroy(0x27, 7);
+    auto jfc1_context = jfc_context;
+    store32(jfc1_context, 8, (1U << 24) | 9); // CEQN=1, original token
+    host.Store(jfc_context_iova, jfc1_context);
+    mailbox(create_jfc);
+    const auto submit_pair = [&](unsigned index) {
+        for (unsigned i = index; i < index + 2; ++i) {
+            auto wqe = send_wqe;
+            const auto flags = i | (0x60U << 16) | (1U << 31);
+            std::memcpy(wqe.data(), &flags, 4);
+            host.Store(sq_iova + i * 64, {wqe.begin(), wqe.end()});
+        }
+        assert(official_model.WriteMmio(jetty_page + 0x80, 4, index + 2));
+    };
+    submit_pair(12);
+    assert(host.Load(ceq1_iova)[0] == 7 && host.Load(msi_address)[0] == 0x43);
+    destroy(0x47, 0);
+    assert(!official_model.ceq_enabled(0) && official_model.ceq_enabled(1));
+    submit_pair(14);
+    assert(host.Load(ceq1_iova + 64)[0] == 7);
+    std::stringstream multi_ceq_checkpoint(std::ios::in | std::ios::out | std::ios::binary);
+    assert(official_model.SaveState(multi_ceq_checkpoint));
+    device::UdmaModel restored_multi_ceq(host, network, official_config);
+    assert(restored_multi_ceq.LoadState(multi_ceq_checkpoint));
+    assert(!restored_multi_ceq.ceq_enabled(0) && restored_multi_ceq.ceq_enabled(1));
+    std::cout << "udma-model multi-CEQ routing, independent destroy, MSI and checkpoint: PASS\n";
     auto duplicate_jfc=create_jfc;
     mailbox(duplicate_jfc,17);
     auto bad_context=create_jfc;
@@ -950,6 +996,12 @@ int main()
     mailbox(probe,22);
     probe[3]=1;
     mailbox(probe);
+    probe[0]=0x13; probe[1]=0x42;
+    mailbox(probe,95);
+    probe[0]=0x14;
+    mailbox(probe,95);
+    probe[0]=7; probe[1]=0;
+    mailbox(probe); // diagnostics cannot poison the following command
     // Control-path failures must complete with Linux errno and leave CSQ usable.
     const auto control = [&](std::vector<std::uint8_t> request, std::uint16_t expected) {
         std::uint64_t head{}, tail{};

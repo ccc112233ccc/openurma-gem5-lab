@@ -757,6 +757,10 @@ UdmaModel::HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor)
     const auto head = ubase_command_queue_registers_[0x14 / 4] % depth;
     const auto pending = (ubase_target_producer_ % depth + depth - head) % depth;
     if (count > pending) return RejectUbase(std::move(descriptor), 1, 22);
+    // Official user_ctl diagnostics propagate failure before inspecting data.
+    // No auxiliary CQE/AE hardware state is modeled: never fabricate success.
+    if (opcode == 0x4213 || opcode == 0x4214)
+        return RejectUbase(std::move(descriptor), count, 95);
     if (opcode == 0x7000) {
         HandleUbaseMailbox(std::move(descriptor), count);
         return;
@@ -1024,13 +1028,17 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
     const std::uint32_t tag =
         LoadLe<std::uint32_t>(descriptor.data() + 16) >> 8;
 
+    // Official UBASE creates one AEQ (eqn 0); do not alias other IDs to it.
+    if ((command == 0x34 || command == 0x37) && tag != 0)
+        return RejectUbase(std::move(descriptor), descriptor_count, 95);
     const bool eq_busy = (command == 0x34 || command == 0x37) ?
-        aeq_in_flight_ != 0 : (completion_event_busy_ || !completion_events_.empty());
+        (aeq_in_flight_ != 0 || !mailbox_events_.empty()) : CeqBusy(tag);
     // Keep ownership of CSQ until old event writes and interrupts finish.
     // The official driver frees EQ memory even on mailbox failure, so EBUSY
     // is not a safe completion for destruction.
     if ((command == 0x37 || command == 0x47) && eq_busy) {
         draining_eq_command_ = command;
+        draining_eq_id_ = tag;
         pending_eq_destroy_ = [this, descriptor = std::move(descriptor),
                                descriptor_count]() mutable {
             HandleUbaseMailbox(std::move(descriptor), descriptor_count);
@@ -1040,32 +1048,79 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
     if ((command == 0x34 || command == 0x44) && eq_busy)
         return RejectUbase(std::move(descriptor), descriptor_count, 16);
 
-    const bool needs_context = command == QueryJfsContext || command == 0x34 ||
+    if (command == DestroyJfcContext && JfcPublicationBusy(tag)) {
+        draining_jfc_id_ = tag;
+        pending_jfc_destroy_ = [this, descriptor = std::move(descriptor),
+                                descriptor_count]() mutable {
+            HandleUbaseMailbox(std::move(descriptor), descriptor_count);
+        };
+        return;
+    }
+
+    const bool needs_context = command == QueryJfsContext || command == 0x26 || command == 0x34 ||
         command == 0x44 || command == 0x04 || command == 0x24 ||
         command == 0x54 || command == 0x25;
     if (needs_context && !context_iova)
         return RejectUbase(std::move(descriptor), descriptor_count, 22);
     if (command == QueryJfsContext && !jetty_contexts_.count(tag))
         return RejectUbase(std::move(descriptor), descriptor_count, 2);
+    if (command == 0x26 && !jfc_query_contexts_.count(tag))
+        return RejectUbase(std::move(descriptor), descriptor_count, 2);
     if ((command == 0x04 && jetty_contexts_.count(tag)) ||
         (command == 0x24 && jfc_contexts_.count(tag)) ||
         (command == 0x54 && jfr_contexts_.count(tag)))
         return RejectUbase(std::move(descriptor), descriptor_count, 17);
 
+    if ((command == DestroyJfsContext || command == DestroyJfrContext) &&
+        ResourceQueueBusy(command, tag)) {
+        draining_queue_command_ = command;
+        draining_queue_id_ = tag;
+        pending_queue_destroy_ = [this, descriptor = std::move(descriptor),
+                                  descriptor_count]() mutable {
+            HandleUbaseMailbox(std::move(descriptor), descriptor_count);
+        };
+        return;
+    }
+    if (command == DestroyJfsContext || command == DestroyJfrContext) {
+        // Queued packets have not acquired resource ownership yet. Never
+        // deliver an old packet to a resource re-created with the same ID.
+        receive_frames_.erase(std::remove_if(receive_frames_.begin(),
+            receive_frames_.end(), [this, command, tag](const Frame& frame) {
+                if (command == 0x07) return frame.destination_jetty == tag;
+                const auto jetty = jetty_contexts_.find(frame.destination_jetty);
+                return jetty != jetty_contexts_.end() &&
+                    jetty->second.receive_queue == tag;
+            }), receive_frames_.end());
+    }
     if (command == DestroyJfsContext) jetty_contexts_.erase(tag);
-    if (command == DestroyJfcContext) jfc_contexts_.erase(tag);
+    if (command == DestroyJfcContext) {
+        if (jfc_contexts_.count(tag))
+            jfc_query_contexts_[tag] = BuildJfcQueryContext(tag);
+        jfc_contexts_.erase(tag);
+        jfc_ceqs_.erase(tag);
+    }
     if (command == DestroyJfrContext) jfr_contexts_.erase(tag);
     if (command == 0x37) {
         aeq_iova_ = 0;
         aeq_depth_ = 0;
         aeq_producer_ = 0;
     }
-    // The current model exposes one CEQ. Destroy must revoke the DMA target,
-    // not merely acknowledge the mailbox while retaining the guest buffer.
     if (command == DestroyCeqContext) {
-        ceq_iova_ = 0;
-        ceq_depth_ = 0;
-        ceq_producer_ = 0;
+        ceqs_.erase(tag);
+    }
+
+    if (command == 0x26) {
+        QueryJfcContext(tag,
+            [this, context_iova, descriptor = std::move(descriptor), descriptor_count]
+            (bool ok, std::vector<std::uint8_t> context) mutable {
+                if (!ok) return RejectUbase(std::move(descriptor), descriptor_count, 5);
+                WriteIoVirtual(context_iova, std::move(context),
+                    [this, descriptor = std::move(descriptor), descriptor_count](bool written) mutable {
+                        if (!written) return RejectUbase(std::move(descriptor), descriptor_count, 5);
+                        ApplyUbaseMailbox(std::move(descriptor), descriptor_count, {});
+                    });
+            });
+        return;
     }
 
     if (command == QueryJfsContext && context_iova) {
@@ -1125,10 +1180,10 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
             aeq_iova_ = iova;
             aeq_depth_ = 1U << (shift + 6);
             aeq_producer_ = 0;
+            aeq_vector_ = dw(6) & 0xffffU;
         } else {
-            ceq_iova_ = iova;
-            ceq_depth_ = 1U << (shift + 6);
-            ceq_producer_ = 0;
+            if (tag > 255) return RejectUbase(std::move(descriptor), descriptor_count, 22);
+            ceqs_[tag] = EventQueueContext{iova, 1U << (shift + 6), 0, dw(6) & 0xffffU};
         }
     } else if (command == 0x24 && context.size() >= 128) {
         const std::uint32_t shift = ((dw(0) >> 4) & 0xfU) + 6U;
@@ -1145,6 +1200,8 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
         if (!queue.queue_iova || !queue.index_iova || !queue.depth)
             return RejectUbase(std::move(descriptor), descriptor_count, 22);
         jfc_contexts_[tag] = queue;
+        std::copy_n(context.begin(), 128, jfc_query_contexts_[tag].begin());
+        jfc_ceqs_[tag] = dw(2) >> 24;
     } else if (command == 0x25 && context.size() >= 256) {
         auto found = jfc_contexts_.find(tag);
         if (found == jfc_contexts_.end())
@@ -1214,8 +1271,29 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
 void
 UdmaModel::EmitMailboxEvent(std::uint16_t sequence, Completion completion)
 {
+    if (draining_eq_command_ == 0x37) {
+        completion(false);
+        return;
+    }
+    mailbox_events_.push_back({sequence, std::move(completion)});
+    ProcessMailboxEvent();
+}
+
+void
+UdmaModel::ProcessMailboxEvent()
+{
+    if (aeq_in_flight_) return;
+    if (mailbox_events_.empty()) {
+        MaybeCompleteEqDestroy();
+        return;
+    }
+    auto pending = std::move(mailbox_events_.front());
+    mailbox_events_.pop_front();
+    const auto sequence = pending.sequence;
+    auto completion = std::move(pending.completion);
     if (!aeq_iova_ || !aeq_depth_ || (aeq_depth_ & (aeq_depth_ - 1))) {
         completion(false);
+        ProcessMailboxEvent();
         return;
     }
     std::vector<std::uint8_t> event(64, 0);
@@ -1232,17 +1310,17 @@ UdmaModel::EmitMailboxEvent(std::uint16_t sequence, Completion completion)
             if (ok) {
                 ++aeq_producer_;
                 ubase_command_source_ |= 1U << 1;
-                RaiseInterrupt(1,
+                RaiseInterrupt(aeq_vector_,
                     [this, completion = std::move(completion)](bool interrupt_ok) mutable {
                         --aeq_in_flight_;
                         completion(interrupt_ok);
-                        MaybeCompleteEqDestroy();
+                        ProcessMailboxEvent();
                     });
                 return;
             }
             --aeq_in_flight_;
             completion(false);
-            MaybeCompleteEqDestroy();
+            ProcessMailboxEvent();
         });
 }
 
@@ -1250,12 +1328,102 @@ void
 UdmaModel::MaybeCompleteEqDestroy()
 {
     if (!pending_eq_destroy_) return;
-    if (draining_eq_command_ == 0x37 && aeq_in_flight_) return;
-    if (draining_eq_command_ == 0x47 &&
-        (completion_event_busy_ || !completion_events_.empty())) return;
+    if (draining_eq_command_ == 0x37 &&
+        (aeq_in_flight_ || !mailbox_events_.empty())) return;
+    if (draining_eq_command_ == 0x47 && CeqBusy(draining_eq_id_)) return;
     auto complete = std::move(pending_eq_destroy_);
     pending_eq_destroy_ = {};
     draining_eq_command_ = 0;
+    complete();
+}
+
+std::array<std::uint8_t, 128>
+UdmaModel::BuildJfcQueryContext(std::uint32_t id) const
+{
+    auto image = jfc_query_contexts_.at(id);
+    const auto found = jfc_contexts_.find(id);
+    if (found == jfc_contexts_.end()) return image;
+    const auto& queue = found->second;
+    // Official udma_jfc_ctx: DW4.pi, DW5.ci and DW18.wr_cqe_idx are 22 bits.
+    // The serial publication engine reserves at most one DMA slot at a time.
+    const auto set_bits = [&image](std::size_t word, std::uint32_t mask,
+                                  std::uint32_t value) {
+        const auto previous = LoadLe<std::uint32_t>(image.data() + word * 4);
+        const auto next = (previous & ~mask) | (value & mask);
+        for (std::size_t byte = 0; byte < 4; ++byte)
+            image[word * 4 + byte] = static_cast<std::uint8_t>(next >> (byte * 8));
+    };
+    set_bits(4, 0x003fffffU, static_cast<std::uint32_t>(queue.producer + queue.cqe_write_pending));
+    set_bits(4, 0xffc00000U, queue.moderation_count << 22);
+    set_bits(5, 0x003fffffU, static_cast<std::uint32_t>(queue.consumer));
+    set_bits(5, 0x01c00000U, queue.moderation_period << 22);
+    set_bits(18, 0x003fffffU, static_cast<std::uint32_t>(queue.producer));
+    return image;
+}
+
+void
+UdmaModel::QueryJfcContext(std::uint32_t id, ReadCompletion completion)
+{
+    if (!jfc_query_contexts_.count(id)) return completion(false, {});
+    const auto found = jfc_contexts_.find(id);
+    if (found == jfc_contexts_.end()) {
+        // Never DMA into an already destroyed queue's record-doorbell page.
+        const auto image = BuildJfcQueryContext(id);
+        return completion(true, {image.begin(), image.end()});
+    }
+    ReadToken(found->second.token, found->second.index_iova, 4,
+        [this, id, completion = std::move(completion)]
+        (bool ok, std::vector<std::uint8_t> bytes) mutable {
+            const auto current = jfc_contexts_.find(id);
+            if (!ok || bytes.size() != 4 || current == jfc_contexts_.end())
+                return completion(false, {});
+            current->second.consumer = LoadLe<std::uint32_t>(bytes.data()) & 0x003fffffU;
+            const auto image = BuildJfcQueryContext(id);
+            completion(true, {image.begin(), image.end()});
+        });
+}
+
+void
+UdmaModel::MaybeCompleteJfcDestroy()
+{
+    if (!pending_jfc_destroy_ || JfcPublicationBusy(*draining_jfc_id_)) return;
+    auto complete = std::move(pending_jfc_destroy_);
+    pending_jfc_destroy_ = {};
+    draining_jfc_id_.reset();
+    complete();
+}
+
+bool
+UdmaModel::CeqBusy(std::uint32_t id) const
+{
+    return (completion_event_busy_ && active_ceq_id_ == id) ||
+        std::any_of(completion_events_.begin(), completion_events_.end(),
+                    [id](const auto& event) { return event.ceq_id == id; });
+}
+
+bool
+UdmaModel::ResourceQueueBusy(std::uint8_t command, std::uint32_t id) const
+{
+    if (command == 0x57)
+        return active_receive_jfr_ && *active_receive_jfr_ == id;
+    const auto found = jetty_contexts_.find(id);
+    return (found != jetty_contexts_.end() && found->second.busy) ||
+        (active_receive_jetty_ && *active_receive_jetty_ == id) ||
+        read_response_dma_.count(id) ||
+        std::any_of(pending_rma_.begin(), pending_rma_.end(),
+                    [id](const auto& item) { return item.second.jetty_id == id; });
+}
+
+void
+UdmaModel::MaybeCompleteQueueDestroy()
+{
+    if (!pending_queue_destroy_ ||
+        ResourceQueueBusy(draining_queue_command_, draining_queue_id_)) return;
+    // The active WQE has drained; unfetched SQ work is abandoned by destroy.
+    // This does not implement the hardware's optional flushed-WQE CQEs.
+    auto complete = std::move(pending_queue_destroy_);
+    pending_queue_destroy_ = {};
+    draining_queue_command_ = 0;
     complete();
 }
 
@@ -1267,6 +1435,8 @@ UdmaModel::HandleJettyMmio(std::uint64_t offset, std::uint32_t length,
     for (auto& [id, jetty] : jetty_contexts_) {
         if (offset >= jetty.device_page_offset &&
             offset + length <= jetty.device_page_offset + abi::kWqebbBytes) {
+            if (draining_queue_command_ == 0x07 && draining_queue_id_ == id)
+                return false;
             ++jetty_mmio_writes_;
             const std::uint32_t begin =
                 static_cast<std::uint32_t>(offset - jetty.device_page_offset);
@@ -1290,6 +1460,8 @@ UdmaModel::HandleJettyMmio(std::uint64_t offset, std::uint32_t length,
         }
         if (offset == jetty.device_page_offset + abi::kDoorbellOffset &&
             length == 4) {
+            if (draining_queue_command_ == 0x07 && draining_queue_id_ == id)
+                return false;
             ++jetty_mmio_writes_;
             ++sq_doorbells_;
             ProcessSq(id, static_cast<std::uint32_t>(value));
@@ -1303,6 +1475,10 @@ void
 UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
                      std::vector<std::uint8_t> direct)
 {
+    if (draining_queue_command_ == 0x07 && draining_queue_id_ == jetty_id) {
+        MaybeCompleteQueueDestroy();
+        return;
+    }
     auto found = jetty_contexts_.find(jetty_id);
     if (found == jetty_contexts_.end()) return;
     QueueContext& jetty = found->second;
@@ -1351,6 +1527,7 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
                 auto found = jetty_contexts_.find(jetty_id);
                 if (found != jetty_contexts_.end()) found->second.busy = false;
                 ++ubase_errors_;
+                MaybeCompleteQueueDestroy();
                 return;
             }
             auto found = jetty_contexts_.find(jetty_id);
@@ -1365,6 +1542,7 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
                 found->second.busy = false;
                 ++sq_decode_rejects_;
                 ++ubase_errors_;
+                MaybeCompleteQueueDestroy();
                 return;
             }
             ContinueSqWqe(jetty_id, target_producer, std::move(raw), wqebbs - 1,
@@ -1400,6 +1578,7 @@ UdmaModel::ContinueSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
                 auto found = jetty_contexts_.find(jetty_id);
                 if (found != jetty_contexts_.end()) found->second.busy = false;
                 ++ubase_errors_;
+                MaybeCompleteQueueDestroy();
                 return;
             }
             raw.insert(raw.end(), continuation.begin(), continuation.end());
@@ -1420,6 +1599,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         auto found = jetty_contexts_.find(jetty_id);
         if (found != jetty_contexts_.end()) found->second.busy = false;
         ++ubase_errors_;
+        MaybeCompleteQueueDestroy();
     };
     auto found = jetty_contexts_.find(jetty_id);
     if (found == jetty_contexts_.end() || raw.size() < abi::kWqebbBytes)
@@ -1504,10 +1684,15 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         frame.transfer_length = local.length;
         network_.Send(std::move(frame), [this, request_id, jetty_id](bool ok) {
             if (ok) return;
+            const auto request = pending_rma_.find(request_id);
+            if (request == pending_rma_.end()) { ++ubase_errors_; return; }
+            request->second.failed = true;
+            if (request->second.response_dma) { ++ubase_errors_; return; }
             pending_rma_.erase(request_id);
             auto found = jetty_contexts_.find(jetty_id);
             if (found != jetty_contexts_.end()) found->second.busy = false;
             ++ubase_errors_;
+            MaybeCompleteQueueDestroy();
         });
         return;
     }
@@ -1529,6 +1714,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
                 auto found = jetty_contexts_.find(jetty_id);
                 if (found != jetty_contexts_.end()) found->second.busy = false;
                 ++ubase_errors_;
+                MaybeCompleteQueueDestroy();
                 return;
             }
             SubmitSqPayload(jetty_id, producer, std::move(raw),
@@ -1594,6 +1780,7 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
                 auto found = jetty_contexts_.find(jetty_id);
                 if (found != jetty_contexts_.end()) found->second.busy = false;
                 ++ubase_errors_;
+                MaybeCompleteQueueDestroy();
                 return;
             }
             if (opcode == 3) return;
@@ -1612,7 +1799,12 @@ UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
     auto finish = [this, jetty_id, producer, wqebbs](bool ok) {
         auto found = jetty_contexts_.find(jetty_id);
         if (found == jetty_contexts_.end()) return;
-        if (!ok) { found->second.busy = false; ++ubase_errors_; return; }
+        if (!ok) {
+            found->second.busy = false;
+            ++ubase_errors_;
+            MaybeCompleteQueueDestroy();
+            return;
+        }
         found->second.consumer += wqebbs;
         ++sq_completions_;
         found->second.busy = false;
@@ -1629,6 +1821,75 @@ UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
 
 void
 UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
+                    std::uint8_t opcode, std::uint16_t entry_index,
+                    std::uint32_t local_id, std::uint32_t byte_count,
+                    std::uint64_t user_data, std::uint64_t immediate,
+                    Completion completion, std::uint32_t remote_id,
+                    std::uint32_t remote_eid, std::uint32_t tpn,
+                    std::uint8_t status)
+{
+    // Producer ownership spans the consumer read, CQE DMA and notification.
+    // Different Jettys sharing one JFC must not choose the same producer slot.
+    if (draining_jfc_id_ && *draining_jfc_id_ == jfc_id)
+        return completion(false);
+    auto& slot = jfc_publications_[jfc_id];
+    if (!slot) slot = std::make_shared<JfcPublicationQueue>();
+    slot->pending.emplace_back(
+        [this, jfc_id, receive, jetty, opcode, entry_index, local_id,
+         byte_count, user_data, immediate, remote_id, remote_eid, tpn, status,
+         completion = std::move(completion)](Completion released) mutable {
+            WriteCqeNow(jfc_id, receive, jetty, opcode, entry_index,
+                local_id, byte_count, user_data, immediate,
+                [completion = std::move(completion),
+                 released = std::move(released)](bool ok) mutable {
+                    // Remain busy through the caller callback: it may submit
+                    // another WQE or request destruction reentrantly.
+                    completion(ok);
+                    released(ok);
+                }, remote_id, remote_eid, tpn, status);
+        });
+    ProcessJfcPublications(jfc_id);
+}
+
+bool
+UdmaModel::JfcPublicationBusy(std::uint32_t jfc_id) const
+{
+    if ((completion_event_busy_ && active_event_jfc_id_ == jfc_id) ||
+        std::any_of(completion_events_.begin(), completion_events_.end(),
+                    [jfc_id](const auto& event) { return event.jfc_id == jfc_id; }))
+        return true;
+    const auto found = jfc_publications_.find(jfc_id);
+    return found != jfc_publications_.end() &&
+        (found->second->running || !found->second->pending.empty());
+}
+
+void
+UdmaModel::ProcessJfcPublications(std::uint32_t jfc_id)
+{
+    const auto found = jfc_publications_.find(jfc_id);
+    if (found == jfc_publications_.end()) return;
+    const auto state = found->second;
+    if (state->dispatching || state->running) return;
+    state->dispatching = true;
+    // Synchronous HostInterface callbacks drain iteratively, not recursively.
+    while (!state->running && !state->pending.empty()) {
+        auto issue = std::move(state->pending.front());
+        state->pending.pop_front();
+        state->running = true;
+        issue([this, jfc_id, state](bool) {
+            state->running = false;
+            if (!state->dispatching) ProcessJfcPublications(jfc_id);
+        });
+    }
+    state->dispatching = false;
+    if (!state->running && state->pending.empty()) {
+        jfc_publications_.erase(jfc_id);
+        MaybeCompleteJfcDestroy();
+    }
+}
+
+void
+UdmaModel::WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
                     std::uint8_t opcode, std::uint16_t entry_index,
                     std::uint32_t local_id, std::uint32_t byte_count,
                     std::uint64_t user_data, std::uint64_t immediate,
@@ -1660,10 +1921,14 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                 remote_id, remote_eid, tpn, status);
             const std::uint64_t address = jfc.queue_iova +
                 (jfc.producer & (jfc.depth - 1U)) * abi::kCqeBytes;
+            jfc.consumer = consumer;
+            jfc.cqe_write_pending = true;
             WriteToken(jfc.token, address,
                 std::vector<std::uint8_t>(cqe.begin(), cqe.end()),
                 [this, jfc_id, completion = std::move(completion)](bool write_ok) mutable {
                     auto found = jfc_contexts_.find(jfc_id);
+                    if (found != jfc_contexts_.end())
+                        found->second.cqe_write_pending = false;
                     if (!write_ok || found == jfc_contexts_.end())
                         return completion(false);
                     ++found->second.producer;
@@ -1693,11 +1958,17 @@ UdmaModel::EmitCompletionEvent(std::uint32_t jfc_id, Completion completion)
 {
     // Already accepted events drain; later notifications cannot extend the
     // lifetime of a queue whose destroy command has been accepted.
-    if (draining_eq_command_ == 0x47) {
+    const auto mapping = jfc_ceqs_.find(jfc_id);
+    if (mapping == jfc_ceqs_.end()) {
         completion(false);
         return;
     }
-    completion_events_.push_back({jfc_id, std::move(completion)});
+    const auto ceq_id = mapping->second;
+    if (draining_eq_command_ == 0x47 && draining_eq_id_ == ceq_id) {
+        completion(false);
+        return;
+    }
+    completion_events_.push_back({jfc_id, ceq_id, std::move(completion)});
     ProcessCompletionEvent();
 }
 
@@ -1711,33 +1982,42 @@ UdmaModel::ProcessCompletionEvent()
     }
     PendingCompletionEvent pending = std::move(completion_events_.front());
     completion_events_.pop_front();
-    if (!ceq_iova_ || !ceq_depth_ || (ceq_depth_ & (ceq_depth_ - 1))) {
+    const auto found = ceqs_.find(pending.ceq_id);
+    if (found == ceqs_.end()) {
         pending.completion(false);
         ProcessCompletionEvent();
         return;
     }
     completion_event_busy_ = true;
+    active_ceq_id_ = pending.ceq_id;
+    active_event_jfc_id_ = pending.jfc_id;
+    auto& ceq = found->second;
     std::vector<std::uint8_t> event(64, 0);
     std::uint32_t word = pending.jfc_id & 0xfffffU;
-    if (!(ceq_producer_ & ceq_depth_)) word |= 1U << 31;
+    if (!(ceq.producer & ceq.depth)) word |= 1U << 31;
     StoreLe<std::uint32_t>(event, 0, word);
-    const std::uint32_t slot = ceq_producer_ & (ceq_depth_ - 1);
-    WriteIoVirtual(ceq_iova_ + std::uint64_t(slot) * 64,
+    const std::uint32_t slot = ceq.producer & (ceq.depth - 1);
+    WriteIoVirtual(ceq.iova + std::uint64_t(slot) * 64,
                             std::move(event),
-        [this, completion = std::move(pending.completion)](bool ok) mutable {
+        [this, ceq_id = pending.ceq_id, vector = ceq.vector,
+         completion = std::move(pending.completion)](bool ok) mutable {
             if (ok) {
-                ++ceq_producer_;
-                RaiseInterrupt(2,
+                ++ceqs_.at(ceq_id).producer;
+                RaiseInterrupt(vector,
                     [this, completion = std::move(completion)]
                     (bool interrupt_ok) mutable {
                         completion_event_busy_ = false;
                         completion(interrupt_ok);
+                        MaybeCompleteEqDestroy();
+                        MaybeCompleteJfcDestroy();
                         ProcessCompletionEvent();
                     });
                 return;
             }
             completion_event_busy_ = false;
             completion(false);
+            MaybeCompleteEqDestroy();
+            MaybeCompleteJfcDestroy();
             ProcessCompletionEvent();
         });
 }
@@ -2160,13 +2440,12 @@ UdmaModel::ReadToken(std::uint32_t token, std::uint64_t address,
 void
 UdmaModel::ContinueTokenRead(std::shared_ptr<TokenReadState> state)
 {
-    if (state->done) return;
-    if (state->completed_bytes == state->length) {
-        state->done = true;
-        return state->completion(true, std::move(state->bytes));
-    }
+    if (state->done || state->advancing) return;
+    // Synchronous host callbacks update state; the outer pump resumes issuing.
+    // On failure, drain all accepted translations/DMA before releasing buffers.
+    state->advancing = true;
     const std::size_t limit = state->max_outstanding;
-    while (!state->done && state->in_flight < limit &&
+    while (!state->failed && state->in_flight < limit &&
            state->next_offset < state->length) {
         const std::size_t offset = state->next_offset;
         const std::uint64_t current = state->address + offset;
@@ -2177,26 +2456,33 @@ UdmaModel::ContinueTokenRead(std::shared_ptr<TokenReadState> state)
         TranslateToken(state->token, current, false,
             [this, state, offset, chunk]
             (bool ok, std::uint64_t physical) mutable {
-                if (state->done) return;
-                if (!ok || !physical) {
-                    state->done = true;
-                    return state->completion(false, {});
+                if (state->failed || !ok || !physical) {
+                    state->failed = true;
+                    --state->in_flight;
+                    return ContinueTokenRead(std::move(state));
                 }
                 host_.DmaRead(physical, chunk,
                     [this, state, offset, chunk]
                     (bool read_ok, std::vector<std::uint8_t> bytes) mutable {
-                        if (state->done) return;
                         if (!read_ok || bytes.size() != chunk) {
-                            state->done = true;
-                            return state->completion(false, {});
+                            state->failed = true;
+                        } else if (!state->failed) {
+                            std::copy(bytes.begin(), bytes.end(),
+                                      state->bytes.begin() + offset);
+                            state->completed_bytes += chunk;
                         }
-                        std::copy(bytes.begin(), bytes.end(),
-                                  state->bytes.begin() + offset);
                         --state->in_flight;
-                        state->completed_bytes += chunk;
                         ContinueTokenRead(std::move(state));
                     });
             });
+    }
+    state->advancing = false;
+    if (!state->in_flight &&
+        (state->failed || state->completed_bytes == state->length)) {
+        state->done = true;
+        auto completion = std::move(state->completion);
+        if (state->failed) return completion(false, {});
+        completion(true, std::move(state->bytes));
     }
 }
 
@@ -2217,13 +2503,10 @@ UdmaModel::WriteToken(std::uint32_t token, std::uint64_t address,
 void
 UdmaModel::ContinueTokenWrite(std::shared_ptr<TokenWriteState> state)
 {
-    if (state->done) return;
-    if (state->completed_bytes == state->bytes.size()) {
-        state->done = true;
-        return state->completion(true);
-    }
+    if (state->done || state->advancing) return;
+    state->advancing = true;
     const std::size_t limit = state->max_outstanding;
-    while (!state->done && state->in_flight < limit &&
+    while (!state->failed && state->in_flight < limit &&
            state->next_offset < state->bytes.size()) {
         const std::size_t offset = state->next_offset;
         const std::uint64_t current = state->address + offset;
@@ -2234,26 +2517,32 @@ UdmaModel::ContinueTokenWrite(std::shared_ptr<TokenWriteState> state)
         TranslateToken(state->token, current, true,
             [this, state, offset, chunk]
             (bool ok, std::uint64_t physical) mutable {
-                if (state->done) return;
-                if (!ok || !physical) {
-                    state->done = true;
-                    return state->completion(false);
+                if (state->failed || !ok || !physical) {
+                    state->failed = true;
+                    --state->in_flight;
+                    return ContinueTokenWrite(std::move(state));
                 }
                 std::vector<std::uint8_t> bytes(
                     state->bytes.begin() + offset,
                     state->bytes.begin() + offset + chunk);
                 host_.DmaWrite(physical, std::move(bytes),
                     [this, state, chunk](bool write_ok) mutable {
-                        if (state->done) return;
                         if (!write_ok) {
-                            state->done = true;
-                            return state->completion(false);
+                            state->failed = true;
+                        } else {
+                            state->completed_bytes += chunk;
                         }
                         --state->in_flight;
-                        state->completed_bytes += chunk;
                         ContinueTokenWrite(std::move(state));
                     });
             });
+    }
+    state->advancing = false;
+    if (!state->in_flight &&
+        (state->failed || state->completed_bytes == state->bytes.size())) {
+        state->done = true;
+        auto completion = std::move(state->completion);
+        completion(!state->failed);
     }
 }
 
@@ -2413,6 +2702,10 @@ UdmaModel::Receive(Frame frame)
       case Frame::Operation::RmaError: {
         auto found = pending_rma_.find(frame.request_id);
         if (found == pending_rma_.end()) { ++ubase_errors_; return; }
+        found->second.failed = true;
+        // An error completion permits the guest to recycle the destination
+        // buffer. Do not publish it before previously accepted DMA has drained.
+        if (found->second.response_dma) return;
         const PendingRma pending = found->second;
         pending_rma_.erase(found);
         CompleteSq(pending.jetty_id, pending.producer, pending.wqebbs,
@@ -2481,7 +2774,11 @@ UdmaModel::NextEventTime() const
 bool
 UdmaModel::IsQuiescent() const
 {
-    if (ubios_busy_ || ubase_busy_ || aeq_in_flight_ || completion_event_busy_ ||
+    if (ubios_busy_ || ubase_busy_ || pending_queue_destroy_ ||
+        pending_jfc_destroy_ || pending_eq_destroy_ ||
+        active_receive_jfr_ || active_receive_jetty_ || !read_response_dma_.empty() ||
+        aeq_in_flight_ || !mailbox_events_.empty() ||
+        !jfc_publications_.empty() || completion_event_busy_ ||
         !completion_events_.empty() || !pending_.empty() || receive_busy_ ||
         !receive_frames_.empty() || !pending_rma_.empty())
         return false;
@@ -2513,7 +2810,7 @@ bool
 UdmaModel::SaveState(std::ostream& output) const
 {
     if (!IsQuiescent()) return false;
-    const std::uint32_t version = 1;
+    const std::uint32_t version = 2;
     const std::uint8_t has_token = generic_iova_token_.has_value();
     const std::uint32_t token = generic_iova_token_.value_or(0);
     if (!WritePod(output, kStateMagic) || !WritePod(output, version) ||
@@ -2534,9 +2831,11 @@ UdmaModel::SaveState(std::ostream& output) const
         !WritePod(output, ubase_errors_) ||
         !WritePod(output, msi_iova_) || !WritePod(output, msi_physical_) ||
         !WritePod(output, aeq_iova_) || !WritePod(output, aeq_depth_) ||
-        !WritePod(output, aeq_producer_) || !WritePod(output, ceq_iova_) ||
-        !WritePod(output, ceq_depth_) || !WritePod(output, ceq_producer_) ||
+        !WritePod(output, aeq_producer_) || !WritePod(output, aeq_vector_) ||
+        !WritePodMap(output, ceqs_) ||
+        !WritePodMap(output, jfc_ceqs_) ||
         !WritePodMap(output, jfc_contexts_) ||
+        !WritePodMap(output, jfc_query_contexts_) ||
         !WritePodMap(output, jfr_contexts_) ||
         !WritePodMap(output, jetty_contexts_) ||
         !WritePodMap(output, tp_routes_) || !WritePod(output, next_tp_id_) ||
@@ -2567,7 +2866,7 @@ UdmaModel::LoadState(std::istream& input)
     std::uint8_t has_token{};
     std::uint32_t token{};
     if (!ReadPod(input, magic) || magic != kStateMagic ||
-        !ReadPod(input, version) || version != 1 ||
+        !ReadPod(input, version) || version != 2 ||
         !ReadPod(input, mmio_base) || mmio_base != config_.mmio_base ||
         !ReadPod(input, port_count) || port_count != config_.port_count ||
         !ReadPod(input, endpoint_eid) || endpoint_eid != config_.endpoint_eid ||
@@ -2583,9 +2882,11 @@ UdmaModel::LoadState(std::istream& input)
         !ReadPod(input, ubase_target_producer_) || !ReadPod(input, ubase_errors_) ||
         !ReadPod(input, msi_iova_) || !ReadPod(input, msi_physical_) ||
         !ReadPod(input, aeq_iova_) || !ReadPod(input, aeq_depth_) ||
-        !ReadPod(input, aeq_producer_) || !ReadPod(input, ceq_iova_) ||
-        !ReadPod(input, ceq_depth_) || !ReadPod(input, ceq_producer_) ||
-        !ReadPodMap(input, jfc_contexts_) || !ReadPodMap(input, jfr_contexts_) ||
+        !ReadPod(input, aeq_producer_) || !ReadPod(input, aeq_vector_) ||
+        !ReadPodMap(input, ceqs_) ||
+        !ReadPodMap(input, jfc_ceqs_) ||
+        !ReadPodMap(input, jfc_contexts_) || !ReadPodMap(input, jfc_query_contexts_) ||
+        !ReadPodMap(input, jfr_contexts_) ||
         !ReadPodMap(input, jetty_contexts_) || !ReadPodMap(input, tp_routes_) ||
         !ReadPod(input, next_tp_id_) || !ReadPod(input, next_tp_port_) ||
         !ReadPod(input, next_sequence_) || !ReadPod(input, next_rma_request_) ||
@@ -2606,6 +2907,15 @@ UdmaModel::LoadState(std::istream& input)
     }
     ubios_busy_ = ubase_busy_ = completion_event_busy_ = receive_busy_ = false;
     completion_events_.clear();
+    mailbox_events_.clear();
+    jfc_publications_.clear();
+    aeq_in_flight_ = 0;
+    draining_eq_command_ = draining_queue_command_ = 0;
+    pending_eq_destroy_ = pending_jfc_destroy_ = pending_queue_destroy_ = {};
+    draining_jfc_id_.reset();
+    active_receive_jfr_.reset();
+    active_receive_jetty_.reset();
+    read_response_dma_.clear();
     pending_.clear();
     receive_frames_.clear();
     pending_rma_.clear();
@@ -2727,10 +3037,12 @@ UdmaModel::ReceiveReadResponse(Frame frame)
 {
     auto found = pending_rma_.find(frame.request_id);
     if (found == pending_rma_.end() || found->second.opcode != 6 ||
+        found->second.failed ||
         frame.bytes.size() != frame.transfer_length ||
         frame.transfer_length == 0 ||
-        frame.transaction_offset + frame.transfer_length >
-            found->second.byte_count ||
+        frame.transaction_offset > found->second.byte_count ||
+        frame.transfer_length > found->second.byte_count - frame.transaction_offset ||
+        frame.transfer_length > found->second.byte_count - found->second.accepted_bytes ||
         found->second.completed_tassns.count(frame.ta_ssn) != 0) {
         ++ubase_errors_;
         return;
@@ -2738,36 +3050,47 @@ UdmaModel::ReceiveReadResponse(Frame frame)
     const std::uint64_t request_id = frame.request_id;
     const std::uint32_t ta_ssn = frame.ta_ssn;
     const std::uint32_t transfer_length = frame.transfer_length;
+    const std::uint32_t jetty_id = found->second.jetty_id;
+    // Reserve the TA before issuing asynchronous writes. Duplicate packets
+    // must not submit a second DMA into the same destination while one is live.
+    found->second.completed_tassns.emplace(ta_ssn, false);
+    found->second.accepted_bytes += transfer_length;
+    ++found->second.response_dma;
+    ++read_response_dma_[jetty_id];
     WriteToken(found->second.local_token,
                found->second.local_address + frame.transaction_offset,
                         std::move(frame.bytes),
-        [this, request_id, ta_ssn, transfer_length](bool ok) {
+        [this, request_id, ta_ssn, transfer_length, jetty_id](bool ok) {
+          // Keep both the request and queue resource owned until host DMA ends.
+          auto finish_response = [this, request_id, ta_ssn, transfer_length, ok]() {
             auto current = pending_rma_.find(request_id);
             if (current == pending_rma_.end()) {
                 ++ubase_errors_;
                 return;
             }
-            if (!ok) {
-                auto jetty = jetty_contexts_.find(current->second.jetty_id);
-                if (jetty != jetty_contexts_.end()) jetty->second.busy = false;
-                ++ubase_errors_;
-                return;
-            }
             PendingRma& progress = current->second;
-            if (progress.completed_tassns.count(ta_ssn) != 0 ||
-                progress.completed_bytes + transfer_length > progress.byte_count) {
+            --progress.response_dma;
+            if (!ok) {
+                progress.failed = true;
                 ++ubase_errors_;
-                return;
+            } else {
+                progress.completed_tassns[ta_ssn] = true;
+                progress.completed_bytes += transfer_length;
             }
-            progress.completed_tassns.emplace(ta_ssn, true);
-            progress.completed_bytes += transfer_length;
-            if (progress.completed_bytes != progress.byte_count) return;
+            if (progress.response_dma ||
+                (!progress.failed && progress.completed_bytes != progress.byte_count)) return;
             const PendingRma pending = progress;
             pending_rma_.erase(current);
             CompleteSq(pending.jetty_id, pending.producer, pending.wqebbs,
                        pending.completed_index, pending.opcode,
                        pending.byte_count, pending.immediate,
-                       pending.completion);
+                       pending.completion, pending.failed ? 5 : 0);
+          };
+          finish_response();
+          const auto active = read_response_dma_.find(jetty_id);
+          if (active != read_response_dma_.end() && --active->second == 0)
+              read_response_dma_.erase(active);
+          MaybeCompleteQueueDestroy();
         }, config_.dma_max_outstanding);
 }
 
@@ -2782,25 +3105,40 @@ UdmaModel::ProcessReceiveQueue()
 }
 
 void
+UdmaModel::ReleaseReceive()
+{
+    active_receive_jfr_.reset();
+    active_receive_jetty_.reset();
+    receive_busy_ = false;
+    MaybeCompleteQueueDestroy();
+    ProcessReceiveQueue();
+}
+
+void
 UdmaModel::ReceiveSend(std::shared_ptr<Frame> frame)
 {
     auto fail = [this]() {
         ++ubase_errors_;
-        receive_busy_ = false;
-        ProcessReceiveQueue();
+        ReleaseReceive();
     };
     auto jetty = jetty_contexts_.find(frame->destination_jetty);
     if (jetty == jetty_contexts_.end()) return fail();
+    if (draining_queue_command_ == 0x07 &&
+        draining_queue_id_ == frame->destination_jetty) return fail();
     auto jfr = jfr_contexts_.find(jetty->second.receive_queue);
     if (jfr == jfr_contexts_.end() || !jfr->second.producer_iova)
         return fail();
     const std::uint32_t jfr_id = jfr->first;
+    if (draining_queue_command_ == 0x57 && draining_queue_id_ == jfr_id)
+        return fail();
+    active_receive_jfr_ = jfr_id;
+    active_receive_jetty_ = frame->destination_jetty;
     const std::uint64_t pi = jfr->second.producer_iova;
     ReadToken(jfr->second.token, pi, 4,
         [this, frame = std::move(frame), jfr_id]
         (bool ok, std::vector<std::uint8_t> producer_bytes) mutable {
             auto fail = [this]() {
-                ++ubase_errors_; receive_busy_ = false; ProcessReceiveQueue();
+                ++ubase_errors_; ReleaseReceive();
             };
             auto jfr = jfr_contexts_.find(jfr_id);
             if (!ok || producer_bytes.size() != 4 || jfr == jfr_contexts_.end())
@@ -2817,13 +3155,11 @@ UdmaModel::ReceiveSend(std::shared_ptr<Frame> frame)
                     auto jfr = jfr_contexts_.find(jfr_id);
                     if (!index_ok || index_bytes.size() != 4 ||
                         jfr == jfr_contexts_.end()) {
-                        ++ubase_errors_; receive_busy_ = false;
-                        ProcessReceiveQueue(); return;
+                        ++ubase_errors_; ReleaseReceive(); return;
                     }
                     const std::uint32_t rqe = abi::Load32(index_bytes.data());
                     if (rqe >= jfr->second.depth) {
-                        ++ubase_errors_; receive_busy_ = false;
-                        ProcessReceiveQueue(); return;
+                        ++ubase_errors_; ReleaseReceive(); return;
                     }
                     ReceiveSge(std::move(frame), jfr_id, rqe, 0, 0);
                 });
@@ -2836,11 +3172,15 @@ UdmaModel::ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
                       std::uint32_t copied)
 {
     auto jfr = jfr_contexts_.find(jfr_id);
-    if (jfr == jfr_contexts_.end()) return;
+    if (jfr == jfr_contexts_.end()) {
+        ++ubase_errors_;
+        ReleaseReceive();
+        return;
+    }
     if (copied == frame->bytes.size())
         return FinishReceive(std::move(frame), jfr_id, rqe_index);
     if (sge_index >= jfr->second.max_sge) {
-        ++ubase_errors_; receive_busy_ = false; ProcessReceiveQueue(); return;
+        ++ubase_errors_; ReleaseReceive(); return;
     }
     const std::uint64_t address = jfr->second.queue_iova +
         std::uint64_t(rqe_index) * jfr->second.entry_stride +
@@ -2849,8 +3189,7 @@ UdmaModel::ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
         [this, frame = std::move(frame), jfr_id, rqe_index, sge_index, copied]
         (bool ok, std::vector<std::uint8_t> bytes) mutable {
             if (!ok || bytes.size() != abi::kSgeBytes) {
-                ++ubase_errors_; receive_busy_ = false;
-                ProcessReceiveQueue(); return;
+                ++ubase_errors_; ReleaseReceive(); return;
             }
             const abi::Sge sge{abi::Load32(bytes.data()),
                                abi::Load32(bytes.data() + 4),
@@ -2858,23 +3197,20 @@ UdmaModel::ReceiveSge(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
             const std::uint32_t chunk = std::min<std::uint32_t>(
                 sge.length, static_cast<std::uint32_t>(frame->bytes.size() - copied));
             if (!chunk || !sge.address) {
-                ++ubase_errors_; receive_busy_ = false;
-                ProcessReceiveQueue(); return;
+                ++ubase_errors_; ReleaseReceive(); return;
             }
             std::vector<std::uint8_t> payload(frame->bytes.begin() + copied,
                                                frame->bytes.begin() + copied + chunk);
             auto jfr = jfr_contexts_.find(jfr_id);
             if (jfr == jfr_contexts_.end()) {
-                ++ubase_errors_; receive_busy_ = false;
-                ProcessReceiveQueue(); return;
+                ++ubase_errors_; ReleaseReceive(); return;
             }
             WriteToken(jfr->second.payload_token, sge.address,
                        std::move(payload),
                 [this, frame = std::move(frame), jfr_id, rqe_index,
                  sge_index, copied, chunk](bool write_ok) mutable {
                     if (!write_ok) {
-                        ++ubase_errors_; receive_busy_ = false;
-                        ProcessReceiveQueue(); return;
+                        ++ubase_errors_; ReleaseReceive(); return;
                     }
                     ReceiveSge(std::move(frame), jfr_id, rqe_index,
                                sge_index + 1, copied + chunk);
@@ -2888,7 +3224,11 @@ UdmaModel::FinishReceive(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
 {
     auto jfr = jfr_contexts_.find(jfr_id);
     auto jetty = jetty_contexts_.find(frame->destination_jetty);
-    if (jfr == jfr_contexts_.end() || jetty == jetty_contexts_.end()) return;
+    if (jfr == jfr_contexts_.end() || jetty == jetty_contexts_.end()) {
+        ++ubase_errors_;
+        ReleaseReceive();
+        return;
+    }
     const std::uint32_t jfc_id = jetty->second.receive_completion_queue ?
         jetty->second.receive_completion_queue : jfr->second.completion_queue;
     WriteCqe(jfc_id, true, true, static_cast<std::uint8_t>(frame->operation),
@@ -2899,8 +3239,7 @@ UdmaModel::FinishReceive(std::shared_ptr<Frame> frame, std::uint32_t jfr_id,
             auto jfr = jfr_contexts_.find(jfr_id);
             if (ok && jfr != jfr_contexts_.end()) ++jfr->second.consumer;
             if (!ok) ++ubase_errors_;
-            receive_busy_ = false;
-            ProcessReceiveQueue();
+            ReleaseReceive();
         }, frame->source_jetty, frame->source_eid, frame->tpn);
 }
 

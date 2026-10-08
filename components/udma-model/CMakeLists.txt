@@ -25,4 +25,24 @@ if(BUILD_TESTING)
     target_compile_options(udma_model_test PRIVATE
         -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
     add_test(NAME udma_model_separation COMMAND udma_model_test)
+    add_executable(udma_token_dma_test tests/token_dma_test.cc)
+    target_link_libraries(udma_token_dma_test PRIVATE ubsim_udma_model)
+    target_compile_options(udma_token_dma_test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME udma_token_dma_drain COMMAND udma_token_dma_test)
+    add_executable(udma_jfc_query_test tests/jfc_query_test.cc)
+    target_link_libraries(udma_jfc_query_test PRIVATE ubsim_udma_model)
+    target_compile_options(udma_jfc_query_test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME udma_jfc_query_context COMMAND udma_jfc_query_test)
+    add_executable(udma_lifecycle_resource_test tests/lifecycle_resource_test.cc)
+    target_link_libraries(udma_lifecycle_resource_test PRIVATE ubsim_udma_model)
+    target_compile_options(udma_lifecycle_resource_test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME udma_resource_destroy_drain COMMAND udma_lifecycle_resource_test)
+    add_executable(udma_lifecycle_test tests/lifecycle_test.cc)
+    target_link_libraries(udma_lifecycle_test PRIVATE ubsim_udma_model)
+    target_compile_options(udma_lifecycle_test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME udma_lifecycle_drain COMMAND udma_lifecycle_test)
 endif()
