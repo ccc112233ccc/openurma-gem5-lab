@@ -199,6 +199,7 @@ class UdmaModel {
     std::uint64_t ubase_errors() const { return ubase_errors_; }
     std::size_t jfc_count() const { return jfc_contexts_.size(); }
     bool ceq_enabled() const { return ceq_iova_ != 0 && ceq_depth_ != 0; }
+    bool aeq_enabled() const { return aeq_iova_ != 0 && aeq_depth_ != 0; }
     std::size_t jfr_count() const { return jfr_contexts_.size(); }
     std::size_t jetty_count() const { return jetty_contexts_.size(); }
     std::size_t tp_count() const { return tp_routes_.size(); }
@@ -428,6 +429,7 @@ class UdmaModel {
     std::uint64_t aeq_iova_{};
     std::uint32_t aeq_depth_{};
     std::uint32_t aeq_producer_{};
+    std::uint32_t aeq_in_flight_{};
     std::uint64_t ceq_iova_{};
     std::uint32_t ceq_depth_{};
     std::uint32_t ceq_producer_{};

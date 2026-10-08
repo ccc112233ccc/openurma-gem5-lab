@@ -30,7 +30,7 @@ Paths below are repository-relative.
 | UDMA JFS/Jetty context | `oe66/drivers/ub/urma/hw/udma/udma_cmd.h`, `udma_jetty.c` | Mailbox create 0x04, query 0x06, destroy 0x07 | Create/DMA path covered; query is synthesized, full modify/flush/in-flight teardown not verified |
 | UDMA JFC | `udma_jfc.c`, command header | Create 0x24, modify 0x25, destroy 0x27; CQE/moderation tests | Partial modify masks; new 16-cycle destroy/recreate test exercises CSQ wrap |
 | UDMA JFR | `udma_jfr.c`, command header | Create 0x54, destroy 0x57; SEND receive DMA tests | Full modify/query and in-flight teardown not verified |
-| AEQ / CEQ | command header and UBASE event setup | Create 0x34/0x44; mailbox/completion event DMA | **Single modeled AEQ/CEQ**, not per-ID multi-queue hardware. CEQ destroy 0x47 added this stage |
+| AEQ / CEQ | command header and UBASE event setup | Create 0x34/0x44, destroy 0x37/0x47; mailbox/completion event DMA | **Single modeled AEQ/CEQ**, not per-ID multi-queue hardware. Busy destroy/replacement rejects; full driver teardown still needs drain |
 | CtrlQ QoS/SEID | `udma_ctrlq*`, UBASE control envelope | Services 4:1/2, 2:1/0x15 in `BuildCtrlqResponse` | Template responses; SEID query is not proof of complete security-entity behavior |
 | CtrlQ TP | `udma_ctrlq_tp.h/.c` | GET_LIST 0x21, ACTIVE 0x22, DEACTIVE 0x23, REMOVE 0x13; exhaustion/reclaim/reuse tests | REMOVE supports inactive routes with no pending RMA; CHECK/SET_ATTR/GET_ATTR not implemented |
 | Official provider SEND / SEND_IMM / WRITE / READ | `sources/umdk/src/urma/hw/udma/udma_u_jfs.c` | `SqWqe`, `ProcessSq`, receive paths; native and historical full-system RMA tests | Implemented subset; SQ opcodes accepted are 0, 1, 3, 6 |
@@ -127,7 +127,7 @@ The tool reads selected pinned UBASE/UDMA enums, including both mailbox headers,
 and assigns conservative, manually reviewed categories. It counts aliases as
 symbols, not unique operations. It is neither exhaustive across all UB modules
 nor dynamic verification. Current results: UBASE 86 symbols (78 completion-only,
-6 partial, 2 dispatch); mailbox 74 (53 completion-only, 21 partial); CtrlQ TP 8
+6 partial, 2 dispatch); mailbox 74 (52 completion-only, 22 partial); CtrlQ TP 8
 (4 partial, 4 rejected); CtrlQ device 6 (1 partial, 5 rejected).
 
 Standalone device incremental build took **3.49 s**, and its process-contract
@@ -135,6 +135,32 @@ and model tests passed in **1.40 s**. No guest cold boot or full-system driver
 revalidation was performed for this stage.
 Final no-change rerun took **0.10 s** to check build targets and **0.17 s**
 for the same two tests; assertions remain enabled via `-UNDEBUG`.
+
+## Third implementation result: event queue lifetime guards
+
+AEQ destroy (0x37) now clears its DMA address, depth and producer instead of
+silently succeeding. AEQ outstanding operations are counted through DMA and
+interrupt completion. AEQ/CEQ create or destroy returns EBUSY (16) while its
+event path is in flight; CEQ also checks pending events. This prevents these
+commands from replacing model queue state underneath an old callback.
+Checkpoint save treats outstanding AEQ events as non-quiescent; restore now
+rejects non-quiescent state before consuming input.
+
+Tests hold actual event DMA callbacks while subsequent CSQ commands execute.
+Both queues reject destroy/replacement while busy and permit destruction after
+completion. AEQ recreation at a different address emits the expected event
+without new writes to the old buffer. Busy checkpoint save/restore is rejected.
+Native build/test took **1.45 s / 0.52 s** before the final restore guard rerun.
+The final build/test including that guard passed in **3.57 s / 1.15 s**.
+
+Important limitation: `ubase_destroy_eq()` in
+`oe66/drivers/ub/ubase/ubase_eq.c` frees the coherent buffer even when the
+mailbox destroy reports failure. Therefore the EBUSY policy is only a model
+state guard, **not complete official-driver teardown safety**. A future drain
+path must defer successful destruction until in-flight DMA/interrupts finish,
+with bounded failure handling. Per-ID queues, parallel AEQ producer allocation
+and queue-full semantics also remain unimplemented. No guest revalidation is
+claimed for these native tests.
 
 ## Next priority gaps
 

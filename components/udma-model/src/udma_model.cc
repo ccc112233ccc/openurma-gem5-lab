@@ -1024,6 +1024,13 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
     const std::uint32_t tag =
         LoadLe<std::uint32_t>(descriptor.data() + 16) >> 8;
 
+    // Singleton event queues must not be replaced/revoked while a DMA or
+    // interrupt completion still refers to their current lifetime.
+    if (((command == 0x34 || command == 0x37) && aeq_in_flight_) ||
+        ((command == 0x44 || command == 0x47) &&
+         (completion_event_busy_ || !completion_events_.empty())))
+        return RejectUbase(std::move(descriptor), descriptor_count, 16);
+
     const bool needs_context = command == QueryJfsContext || command == 0x34 ||
         command == 0x44 || command == 0x04 || command == 0x24 ||
         command == 0x54 || command == 0x25;
@@ -1039,6 +1046,11 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
     if (command == DestroyJfsContext) jetty_contexts_.erase(tag);
     if (command == DestroyJfcContext) jfc_contexts_.erase(tag);
     if (command == DestroyJfrContext) jfr_contexts_.erase(tag);
+    if (command == 0x37) {
+        aeq_iova_ = 0;
+        aeq_depth_ = 0;
+        aeq_producer_ = 0;
+    }
     // The current model exposes one CEQ. Destroy must revoke the DMA target,
     // not merely acknowledge the mailbox while retaining the guest buffer.
     if (command == DestroyCeqContext) {
@@ -1204,15 +1216,21 @@ UdmaModel::EmitMailboxEvent(std::uint16_t sequence, Completion completion)
     event[12] = static_cast<std::uint8_t>(sequence);
     event[13] = static_cast<std::uint8_t>(sequence >> 8);
     const std::uint32_t slot = aeq_producer_ & (aeq_depth_ - 1);
+    ++aeq_in_flight_;
     WriteIoVirtual(aeq_iova_ + std::uint64_t(slot) * 64,
                             std::move(event),
         [this, completion = std::move(completion)](bool ok) mutable {
             if (ok) {
                 ++aeq_producer_;
                 ubase_command_source_ |= 1U << 1;
-                RaiseInterrupt(1, std::move(completion));
+                RaiseInterrupt(1,
+                    [this, completion = std::move(completion)](bool interrupt_ok) mutable {
+                        --aeq_in_flight_;
+                        completion(interrupt_ok);
+                    });
                 return;
             }
+            --aeq_in_flight_;
             completion(false);
         });
 }
@@ -2429,7 +2447,7 @@ UdmaModel::NextEventTime() const
 bool
 UdmaModel::IsQuiescent() const
 {
-    if (ubios_busy_ || ubase_busy_ || completion_event_busy_ ||
+    if (ubios_busy_ || ubase_busy_ || aeq_in_flight_ || completion_event_busy_ ||
         !completion_events_.empty() || !pending_.empty() || receive_busy_ ||
         !receive_frames_.empty() || !pending_rma_.empty())
         return false;
@@ -2504,6 +2522,9 @@ UdmaModel::SaveState(std::ostream& output) const
 bool
 UdmaModel::LoadState(std::istream& input)
 {
+    // Outstanding callbacks belong to the current state and cannot be
+    // cancelled by replacing the serialized queue contents.
+    if (!IsQuiescent()) return false;
     std::uint64_t magic{};
     std::uint32_t version{};
     std::uint64_t mmio_base{};

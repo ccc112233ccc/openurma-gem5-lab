@@ -83,9 +83,29 @@ class MockHost final : public device::HostInterface {
     {
         events.emplace_back("dma-write");
         dma_write_addresses.push_back(address);
+        if (defer_write_address && address == defer_write_address) {
+            pending_writes.push_back(
+                [this, address, data = std::move(data), completion = std::move(completion)]() mutable {
+                    Store(address, data);
+                    completion(true);
+                });
+            return;
+        }
         Store(address, data);
         completion(true);
     }
+
+    void FlushWrites()
+    {
+        while (!pending_writes.empty()) {
+            auto done = std::move(pending_writes.front());
+            pending_writes.pop_front();
+            done();
+        }
+    }
+
+    std::uint64_t defer_write_address{};
+    std::deque<std::function<void()>> pending_writes;
 
     void SetInterrupt(std::uint32_t vector, bool asserted) override
     {
@@ -791,6 +811,39 @@ int main()
         store32(desc, 16, (id << 8) | opcode);
         mailbox(std::move(desc));
     };
+    // Hold actual event DMA completion while later CSQ commands continue.
+    host.defer_write_address = aeq_iova;
+    mailbox(create_aeq); // producer resets to zero; event DMA remains in flight
+    assert(host.pending_writes.size() == 1);
+    assert(!official_model.IsQuiescent());
+    std::ostringstream busy_snapshot;
+    assert(!official_model.SaveState(busy_snapshot));
+    std::istringstream busy_restore("not consumed while DMA is outstanding");
+    assert(!official_model.LoadState(busy_restore));
+    assert(busy_restore.tellg() == 0);
+    auto destroy_aeq = create_aeq;
+    store32(destroy_aeq, 16, 0x37);
+    store32(destroy_aeq, 20, 0); // official EQ teardown uses polling
+    mailbox(destroy_aeq, 16);
+    mailbox(create_aeq, 16);
+    assert(official_model.aeq_enabled());
+    host.defer_write_address = 0;
+    host.FlushWrites();
+    mailbox(destroy_aeq);
+    assert(!official_model.aeq_enabled());
+    const auto old_aeq_writes = host.dma_write_addresses.size();
+    auto recreated_aeq = create_aeq;
+    constexpr std::uint64_t new_aeq_iova = 0x1b0000;
+    auto new_aeq_context = aeq_context;
+    store32(new_aeq_context, 8, new_aeq_iova);
+    host.Store(aeq_context_iova, new_aeq_context);
+    mailbox(recreated_aeq);
+    assert(official_model.aeq_enabled());
+    assert(host.Load(new_aeq_iova)[12] == 0x34);
+    for (std::size_t i = old_aeq_writes; i < host.dma_write_addresses.size(); ++i)
+        assert(host.dma_write_addresses[i] < aeq_iova ||
+               host.dma_write_addresses[i] >= aeq_iova + 64 * 64);
+    std::cout << "udma-model AEQ in-flight teardown/recreate and checkpoint guard: PASS\n";
     const auto errors_before_lifecycle = official_model.ubase_errors();
     assert(official_model.ceq_enabled());
     destroy(0x47, 0);
@@ -828,6 +881,27 @@ int main()
         saw_cqe |= address >= cq_iova && address < cq_iova + 4096;
     }
     assert(saw_cqe); // real CQ completion occurred, but no DMA to freed CEQ memory
+    mailbox(create_ceq);
+    host.defer_write_address = ceq_iova;
+    for (std::uint32_t index = 10; index < 12; ++index) {
+        auto wqe = send_wqe;
+        const auto flags = index | (0x60U << 16) | (1U << 31);
+        std::memcpy(wqe.data(), &flags, 4);
+        host.Store(sq_iova + index * 64, {wqe.begin(), wqe.end()});
+    }
+    assert(official_model.WriteMmio(jetty_page + 0x80, 4, 12));
+    assert(host.pending_writes.size() == 1);
+    auto destroy_ceq = create_ceq;
+    store32(destroy_ceq, 16, 0x47);
+    mailbox(destroy_ceq, 16);
+    mailbox(create_ceq, 16);
+    assert(official_model.ceq_enabled());
+    assert(!official_model.IsQuiescent());
+    host.defer_write_address = 0;
+    host.FlushWrites();
+    mailbox(destroy_ceq);
+    assert(!official_model.ceq_enabled());
+    std::cout << "udma-model CEQ in-flight destroy/replacement guard: PASS\n";
     auto duplicate_jfc=create_jfc;
     mailbox(duplicate_jfc,17);
     auto bad_context=create_jfc;
