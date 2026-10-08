@@ -1,0 +1,266 @@
+--- a/src/unified-bus/model/ub-port.cc
++++ b/src/unified-bus/model/ub-port.cc
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ #include "ns3/ub-port.h"
++#include "ns3/ub-controller.h"
++#include "ns3/ub-ctp.h"
+ #include "ns3/ub-cbfc.h"
+ #include "ns3/ub-link.h"
+ #include "ns3/ub-pfc.h"
+@@ -558,6 +560,20 @@
+         }
+     }
+ 
++    Ptr<UbController> controller = GetNode()->GetObject<UbController>();
++    auto ctp = controller ? controller->PeekCtpTransportService() : nullptr;
++    if (ctp && ctp->CancelStaleQueuedRequest(packet)) {
++        m_flowControl->OnEgressCancelled({packet, nullptr, inPortId, m_portId, priority});
++        m_currentPkt = nullptr;
++        m_currentInPortId = 0;
++        m_currentPriority = 0;
++        m_sendState = SendState::READY;
++        if (ubSwitch && ubSwitch->GetAllocator()) {
++            ubSwitch->GetAllocator()->ScheduleTriggerAllocator(this);
++        }
++        Simulator::ScheduleNow(&UbPort::TriggerTransmit, this);
++        return;
++    }
+     if (!m_faultCallBack.IsNull()) {
+         m_faultCallBack(packet, GetNode()->GetId(), m_portId, this);
+         return;
+@@ -823,6 +839,8 @@
+     if (result == false) {
+         NS_LOG_WARN("Channel transmission failed! Packet dropped at Node " << GetNode()->GetId() << " Port " << m_portId);
+         ConfirmTransmitAttempt(attemptToken);
++        m_flowControl->OnEgressCancelled(
++            {packet, nullptr, m_currentInPortId, m_portId, m_currentPriority});
+         // Reset port state so it won't remain BUSY and try next packet
+         m_sendState = SendState::READY;
+         m_currentPkt = nullptr;
+@@ -835,6 +853,8 @@
+     // Transmission started successfully: notify and schedule completion. The
+     // counters advance here and not in ComputePacketRateNobTime, so a rejected
+     // attempt cannot consume burst budget.
++    m_flowControl->OnEgressTransmitted(
++        {packet, nullptr, m_currentInPortId, m_portId, m_currentPriority});
+     CommitPacketRateControlCounters(packet);
+     TraComEventNotify(packet, txCompleteTime);
+     Simulator::Schedule(txCompleteTime, &UbPort::TransmitComplete, this);
+--- a/src/unified-bus/model/protocol/ub-flow-control.h
++++ b/src/unified-bus/model/protocol/ub-flow-control.h
+@@ -76,6 +76,9 @@
+     virtual void OnIngressReleased(const UbFlowControlEventContext& context) {}
+     // 报文已经进入 egress queue 后调用。
+     virtual void OnEgressEnqueued(const UbFlowControlEventContext& context) {}
++    // Cancel only the local, not-yet-transmitted reservation; never release ingress twice.
++    virtual void OnEgressCancelled(const UbFlowControlEventContext& context) {}
++    virtual void OnEgressTransmitted(const UbFlowControlEventContext& context) {}
+     // 对端发来的 flow-control 控制帧到达后调用。
+     virtual void OnControlFrameReceived(Ptr<Packet> p) {}
+     // 普通 DLLDP 数据包到达后调用；用于消费本跳 piggyback credit 等 data-link 本地语义。
+--- a/src/unified-bus/model/protocol/ub-cbfc.h
++++ b/src/unified-bus/model/protocol/ub-cbfc.h
+@@ -3,6 +3,7 @@
+ #define UB_CBFC_H
+ 
+ #include "ns3/ub-flow-control.h"
++#include <map>
+ 
+ namespace ns3 {
+ /**
+@@ -22,6 +23,10 @@
+     virtual bool IsFcLimited(Ptr<UbIngressQueue> ingressQ) override;
+     virtual void OnIngressReleased(const UbFlowControlEventContext& context) override;
+     virtual void OnEgressEnqueued(const UbFlowControlEventContext& context) override;
++    void OnEgressCancelled(const UbFlowControlEventContext& context) override;
++    void OnEgressTransmitted(const UbFlowControlEventContext& context) override;
++    int32_t GetAvailableCredits(uint8_t vl) const { return m_crdTxfree.at(vl); }
++    virtual int32_t GetAvailableSharedCredits() const { return 0; }
+     virtual void OnControlFrameReceived(Ptr<Packet> p) override;
+     virtual void OnDataPacketReceived(Ptr<Packet> p) override;
+     virtual void OnIngressEnqueued(const UbFlowControlEventContext& context) override;
+@@ -32,6 +37,16 @@
+     void SendCrdAck(Ptr<Packet> cbfcPkt, uint32_t targetPortId);
+ 
+ protected:
++    struct EgressReservation {
++        uint8_t vl;
++        int32_t dedicated;
++        int32_t shared;
++        uint8_t piggyVl{0};
++        int32_t piggyCells{0};
++    };
++    std::map<const Packet*, EgressReservation> m_egressReservations;
++    void RememberReservation(Ptr<Packet> packet, EgressReservation reservation);
++    virtual void RestoreSharedReservation(int32_t cells);
+     void ControlCreditRestoreNotify(uint32_t nodeId,
+                                     uint32_t portId,
+                                     const std::vector<uint8_t>& credits);
+@@ -95,8 +110,10 @@
+     void OnEgressEnqueued(const UbFlowControlEventContext& context) override;
+     void OnControlFrameReceived(Ptr<Packet> p) override;
+     void OnDataPacketReceived(Ptr<Packet> p) override;
++    int32_t GetAvailableSharedCredits() const override { return m_shareCrd; }
+ 
+ private:
++    void RestoreSharedReservation(int32_t cells) override;
+     bool CbfcSharedConsumeCrd(Ptr<Packet> p);
+     bool CbfcSharedRestoreCrd(Ptr<Packet> p);
+     bool RestoreSharedDataPacketCredit(Ptr<Packet> p);
+--- a/src/unified-bus/model/protocol/ub-cbfc.cc
++++ b/src/unified-bus/model/protocol/ub-cbfc.cc
+@@ -103,6 +103,7 @@
+ void UbCbfc::DoDispose()
+ {
+     NS_LOG_FUNCTION(this);
++    m_egressReservations.clear();
+     Object::DoDispose();
+ }
+ 
+@@ -162,10 +163,55 @@
+         NS_LOG_DEBUG("is crd pkt");
+         return;
+     }
+-    CbfcConsumeCrd(context.packet); // 计算消耗的信用证
+-    TryAttachPiggybackCredit(context.packet);
++    UbDatalinkPacketHeader header;
++    context.packet->PeekHeader(header);
++    const uint8_t vl = header.GetPacketVL();
++    const int32_t before = m_crdTxfree.at(vl);
++    NS_ABORT_MSG_IF(!CbfcConsumeCrd(context.packet), "egress allocation without CBFC credit");
++    RememberReservation(context.packet, {vl, before - m_crdTxfree.at(vl), 0});
++}
++
++void UbCbfc::RememberReservation(Ptr<Packet> packet, EgressReservation reservation)
++{
++    NS_ABORT_MSG_IF(m_egressReservations.contains(PeekPointer(packet)),
++                    "duplicate CBFC egress reservation");
++    if (TryAttachPiggybackCredit(packet)) {
++        UbDatalinkPacketHeader header;
++        packet->PeekHeader(header);
++        reservation.piggyVl = header.GetCreditTargetVL();
++        reservation.piggyCells = m_cbfcCfg.m_retCellGrainDataPacket;
++    }
++    m_egressReservations.emplace(PeekPointer(packet), reservation);
++}
++
++void UbCbfc::OnEgressTransmitted(const UbFlowControlEventContext& context)
++{
++    m_egressReservations.erase(PeekPointer(context.packet));
++}
++
++void UbCbfc::OnEgressCancelled(const UbFlowControlEventContext& context)
++{
++    auto it = m_egressReservations.find(PeekPointer(context.packet));
++    // Control frames / detached transmissions do not reserve data credits.
++    if (it == m_egressReservations.end()) return;
++    const auto reservation = it->second;
++    m_egressReservations.erase(it);
++    m_crdTxfree.at(reservation.vl) += reservation.dedicated;
++    RestoreSharedReservation(reservation.shared);
++    m_crdToReturn.at(reservation.piggyVl) += reservation.piggyCells;
++    MaybeQueueControlReturn(m_portId);
+ }
+ 
++void UbCbfc::RestoreSharedReservation(int32_t cells)
++{
++    NS_ABORT_MSG_IF(cells != 0, "shared credit reservation on dedicated CBFC");
++}
++
++void UbCbfcSharedCredit::RestoreSharedReservation(int32_t cells)
++{
++    m_shareCrd += cells;
++}
++
+ void UbCbfc::OnControlFrameReceived(Ptr<Packet> p)
+ {
+     CbfcRestoreCrd(p);
+@@ -596,8 +642,14 @@
+         NS_LOG_DEBUG("is crd pkt");
+         return;
+     }
+-    CbfcSharedConsumeCrd(context.packet);
+-    TryAttachPiggybackCredit(context.packet);
++    UbDatalinkPacketHeader header;
++    context.packet->PeekHeader(header);
++    const uint8_t vl = header.GetPacketVL();
++    const int32_t before = m_crdTxfree.at(vl);
++    const int32_t sharedBefore = m_shareCrd;
++    NS_ABORT_MSG_IF(!CbfcSharedConsumeCrd(context.packet), "egress allocation without shared credit");
++    RememberReservation(context.packet,
++                        {vl, before - m_crdTxfree.at(vl), sharedBefore - m_shareCrd});
+ }
+ 
+ void UbCbfcSharedCredit::OnControlFrameReceived(Ptr<Packet> p)
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -150,6 +150,11 @@
+     void SetRetransmissionTimeout(Time timeout);
+     void SetMaxRetransmissionAttempts(uint32_t attempts);
+     uint64_t GetRetransmissionCount() const;
++    uint64_t GetQueuedRetryCount() const { return m_queuedRetryCount; }
++    uint64_t GetActiveSentRetryCount() const { return m_retransmissionCount; }
++    uint64_t GetStaleSentRetryCount() const { return m_staleSentRetryCount; }
++    uint64_t GetCancelledRetryCount() const { return m_cancelledRetryCount; }
++    bool CancelStaleQueuedRequest(Ptr<Packet> packet);
+     uint64_t GetRetransmissionExhaustedCount() const;
+     void SetDropNextTaAckForTest(bool enabled);
+     void SetDropNextReadResponseForTest(bool enabled);
+@@ -378,6 +383,9 @@
+     Time m_retransmissionTimeout{NanoSeconds(25600)};
+     uint32_t m_maxRetransmissionAttempts{7};
+     uint64_t m_retransmissionCount{0};
++    uint64_t m_queuedRetryCount{0};
++    uint64_t m_staleSentRetryCount{0};
++    uint64_t m_cancelledRetryCount{0};
+     uint64_t m_retransmissionExhaustedCount{0};
+     uint64_t m_nextRequestGeneration{1};
+     std::set<uint32_t> m_actualSendPorts;
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -1330,6 +1330,20 @@
+     packet->AddPacketTag(tag);
+ }
+ 
++bool
++UbCtpTransportService::CancelStaleQueuedRequest(Ptr<Packet> packet)
++{
++    CtpRequestAttemptTag tag;
++    if (!packet->PeekPacketTag(tag) || m_node == nullptr || tag.node != m_node->GetId()) return false;
++    const auto record = m_retransmissionRecords.find({tag.key, tag.tassn});
++    auto* state = GetTransactionOwner()->FindCtpTransactionState(tag.key);
++    const bool stale = record == m_retransmissionRecords.end() || record->second.sent ||
++        record->second.generation != tag.generation || record->second.attempts != tag.attempt ||
++        state == nullptr || !state->outstandingSegments.contains(tag.tassn);
++    if (stale && tag.attempt != 0) ++m_cancelledRetryCount;
++    return stale;
++}
++
+ void
+ UbCtpTransportService::RequestActuallySent(uint32_t outPort, Ptr<Packet> packet, Time)
+ {
+@@ -1338,10 +1352,14 @@
+     const auto record = m_retransmissionRecords.find({tag.key, tag.tassn});
+     if (record == m_retransmissionRecords.end() || record->second.sent ||
+         record->second.generation != tag.generation || record->second.attempts != tag.attempt ||
+-        record->second.outPort != outPort) return;
++        record->second.outPort != outPort) {
++        if (tag.attempt != 0) ++m_staleSentRetryCount;
++        return;
++    }
+     auto* state = GetTransactionOwner()->FindCtpTransactionState(tag.key);
+     if (state == nullptr || !state->outstandingSegments.contains(tag.tassn))
+     {
++        if (tag.attempt != 0) ++m_staleSentRetryCount;
+         m_retransmissionRecords.erase(record);
+         return;
+     }
+@@ -1423,6 +1441,7 @@
+     tag.node = m_node->GetId(); tag.key = stateKey; tag.tassn = taSsn;
+     tag.generation = record->second.generation; tag.attempt = record->second.attempts;
+     retry->AddPacketTag(tag);
++    ++m_queuedRetryCount;
+     queue->EnqueueData(retry);
+     Ptr<UbPort> port = DynamicCast<UbPort>(m_node->GetDevice(record->second.outPort));
+     NS_ABORT_MSG_IF(port == nullptr, "CTP retransmission selected a non-UB source port");

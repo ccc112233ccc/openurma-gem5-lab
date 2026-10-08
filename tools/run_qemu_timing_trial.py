@@ -12,6 +12,18 @@ import signal
 from run_modular_rma_regression import validate_depth_output, validate_bw_scan
 
 
+def write_bw_command(size, port, iterations=64, depth=64, post_list=16, cq_mod=16):
+    if min(size, port, iterations, depth, post_list, cq_mod) <= 0:
+        raise ValueError("WRITE settings must be positive")
+    if post_list > depth or cq_mod > depth:
+        raise ValueError("WRITE post list and CQ moderation must not exceed SQ depth")
+    if iterations % post_list or iterations % cq_mod:
+        raise ValueError("WRITE iterations must be divisible by post list and CQ moderation")
+    return ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest write_bw "
+            f"-d udma0 --eid_idx 0 --ctp -B -s {size} -P {port} "
+            f"-J 1 -I {depth} -T {depth} -n {iterations} -l {post_list} -Q {cq_mod} -p 0")
+
+
 def observe_drain(root, timeout):
     """Sample live process-owned work; not a coordinated checkpoint barrier."""
     begin = time.monotonic()
@@ -63,6 +75,10 @@ def main():
     p.add_argument("--sizes", type=int, nargs="+", default=[4096, 65536, 1048576])
     p.add_argument("--drain-timeout", type=float, default=0,
                    help="optional bounded live drain observation before stopping processes")
+    p.add_argument("--write-iterations", type=int, default=64)
+    p.add_argument("--write-depth", type=int, default=64)
+    p.add_argument("--write-post-list", type=int, default=16)
+    p.add_argument("--write-cq-mod", type=int, default=16)
     p.add_argument("--user-read-scan", action="store_true",
                    help="run requested a23/n16384 READ scan, capped to reported queue limits")
     p.add_argument("--read-size", type=int,
@@ -70,6 +86,13 @@ def main():
     p.add_argument("--read-sizes", type=int, nargs="+",
                    help="test separate READ sizes; continue after clean guest errors")
     args = p.parse_args()
+    if not args.user_read_scan:
+        try:
+            for size in args.sizes:
+                write_bw_command(size, 21410, args.write_iterations, args.write_depth,
+                                 args.write_post_list, args.write_cq_mod)
+        except ValueError as error:
+            p.error(str(error))
     lab = Path(__file__).resolve().parents[1]
     root = lab / "run-qemu-dual"
     args.output.mkdir(parents=True, exist_ok=False)
@@ -161,13 +184,13 @@ def main():
                         os.kill(int((root/f"{component}.pid").read_text().strip()), 0)
             return int(failed)
         for index, size in enumerate(args.sizes):
-            command = ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest write_bw "
-                       f"-d udma0 --eid_idx 0 --ctp -B -s {size} -P {21410+index} "
-                       "-J 1 -I 64 -T 64 -n 64 -l 16 -Q 16 -p 0")
+            command = write_bw_command(size, 21410 + index, args.write_iterations,
+                                       args.write_depth, args.write_post_list, args.write_cq_mod)
             if run(f"write-{size}", serial+["--stagger", "1", "--commands",
                      command, command+" -S 10.0.0.1"], args.timeout+10): return 1
             errors = validate_depth_output(
-                (args.output/f"write-{size}.txt").read_text(), 64, size, 64)
+                (args.output/f"write-{size}.txt").read_text(), args.write_depth,
+                size, args.write_iterations)
             records[-1]["validation_errors"] = errors
             if errors:
                 records[-1]["returncode"] = 1

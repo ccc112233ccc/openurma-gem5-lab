@@ -510,6 +510,8 @@ class UbNetFabric {
             std::chrono::steady_clock::now() - wall_started).count();
         std::uint64_t ctp_retransmissions = 0;
         std::uint64_t ctp_retransmission_exhausted = 0;
+        std::uint64_t ctp_retries_queued = 0, ctp_retries_active_sent = 0;
+        std::uint64_t ctp_retries_stale_sent = 0, ctp_retries_cancelled = 0;
         std::uint64_t duplicate_write_suppressed = 0;
         std::uint64_t duplicate_taack_replays = 0;
         std::uint64_t injected_taack_drops = 0;
@@ -524,6 +526,10 @@ class UbNetFabric {
             Ptr<UbCtpTransportService> service = controller->GetCtpTransportService();
             ctp_retransmissions += service->GetRetransmissionCount();
             ctp_retransmission_exhausted += service->GetRetransmissionExhaustedCount();
+            ctp_retries_queued += service->GetQueuedRetryCount();
+            ctp_retries_active_sent += service->GetActiveSentRetryCount();
+            ctp_retries_stale_sent += service->GetStaleSentRetryCount();
+            ctp_retries_cancelled += service->GetCancelledRetryCount();
             duplicate_write_suppressed += service->GetDuplicateWriteSuppressedCount();
             duplicate_taack_replays += service->GetDuplicateTaAckReplayCount();
             injected_taack_drops += service->GetInjectedTaAckDropCount();
@@ -585,6 +591,10 @@ class UbNetFabric {
                   << " ctp_retransmissions=" << ctp_retransmissions
                   << " ctp_retransmission_exhausted="
                   << ctp_retransmission_exhausted
+                  << " ctp_retries_queued=" << ctp_retries_queued
+                  << " ctp_retries_active_sent=" << ctp_retries_active_sent
+                  << " ctp_retries_stale_sent=" << ctp_retries_stale_sent
+                  << " ctp_retries_cancelled=" << ctp_retries_cancelled
                   << " injected_ctp_request_drops="
                   << injected_ctp_request_drops
                   << " duplicate_write_suppressed=" << duplicate_write_suppressed

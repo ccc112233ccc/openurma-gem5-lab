@@ -6,15 +6,16 @@ wire ranges and reply identity, drains accepted DMA independently, and checks
 the actual ns-3 scheduler before idle time fast-forward. Patch0010 ignores
 late replies without an outstanding source operation rather than creating a
 new context. See [lifetime acceptance](../../docs/validation/ctp-request-context-20261009.md)
-for fast failure contracts, official-driver evidence and remaining1 MiB timing
-gaps; these changes do not constitute complete error/replay recovery support.
+for fast failure contracts, official-driver evidence and historical1 MiB timing
+failures addressed below; these changes alone do not constitute complete
+error/replay recovery support.
 
 Patch0011 maps validated target `RmaError` to a CTP Remote Abort response
 (WRITE TAACK or empty READ_RESPONSE), terminates the matching source WQE once,
 and caches the error response for replay without repeating DMA. Reverse peer
 identity is checked independently of physical port. See
 [error-path acceptance](../../docs/validation/ctp-remote-abort-20261009.md);
-this does not fix premature retry timers or establish large-message bandwidth.
+this patch alone does not fix premature retry timers or establish large-message bandwidth.
 
 Patch0012 starts retry timers at the source port's actual successful transmit
 callback, not enqueue or CTP queue dequeue. Queued retries cannot consume a
@@ -24,6 +25,13 @@ from rearming a retired WQE. See
 for native port-blocking counterexamples and official-driver evidence. The
 adapter accepts SIGUSR1 for read-only live work snapshots; the timing trial
 runner can collect bounded pre-stop observations with `--drain-timeout`.
+
+Patch0013 cancels stale local attempts at source egress before transmission,
+with exact dedicated/shared/unsent-piggyback credit refunds. In-flight copies
+still reach the target normally. Separate queued, active-sent, stale-sent and
+cancelled counters expose physical vs queued retry work. See
+[cancellation acceptance](../../docs/validation/ctp-stale-retry-cancel-20261009.md)
+for real egress and credit counterexamples and full-system results.
 
 The production boundary is `ub-net-adapter.cc`. It connects independent UDMA
 device processes through the simulator-neutral UB-NET v1 ABI and uses native

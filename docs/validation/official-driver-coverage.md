@@ -46,6 +46,17 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest accepted repair: [stale source retry cancellation](ctp-stale-retry-cancel-20261009.md)
+raises the same200G1 MiB `-B` short-test average from38.38989 to47.62731 GB/s,
+without changing RTO.11254 queued retries reconcile as11104 cancelled,
+150 active-sent and0 stale-sent. Target duplicates fall from11251 to150;
+in-flight retries are preserved, not hidden.128/128 WQEs complete and both
+UDMAs drain/save state. Total wall133.930 s. Eight real-port/credit tests,
+ten independent late-DMA/error contracts and twelve official-driver functional
+cases pass. The stale-queue priority below is now closed for this reproduced
+normal-fabric case. Next: longer timing runs and counter-backed actual512-depth
+concurrency/parameter sensitivity; broad link-fault recovery remains deferred.
+
 Latest accepted repair: [actual-send CTP retry timers](ctp-actual-send-retry-20261009.md)
 closes the reproduced1 MiB WRITE retry storm without increasing RTO. At400G,
 the synchronized `-B` short test reports88476.59 MiB/s (92.77443 GB/s), already
