@@ -12,6 +12,38 @@ Sources inspected:
 - Device: `components/udma-model/src/udma_model.cc`.
 - Native regression: `components/udma-model/tests/model_test.cc`.
 
+## Current item 2 scope: performance paths (2026-10-08)
+
+The user's revised scope is authoritative: implement and validate the official
+driver paths needed for performance experiments, not every UB feature. The
+historical inventory below remains evidence, not an all-command completion gate.
+
+Acceptance priorities:
+
+1. Official provider/driver SEND, READ and WRITE latency/bandwidth paths in the
+   full system, including repeated runs, supported size sweeps, 4 KiB/64 KiB/
+   1 MiB RMA fragmentation and SEND's supported size limit.
+2. Performance-critical SQ/JFR/JFC, SGE/DMA and completion correctness: ring
+   wrap, batching, CQ moderation, backpressure, shared resources and outstanding
+   up to 512. Resource reuse must permit repeated experiments without hangs or
+   stale data/completions.
+3. Virtual-time and measurement correctness, then parameter sensitivity to
+   link bandwidth/latency, DMA and outstanding. Functional no-sync results do
+   not establish timing accuracy or bandwidth saturation. Do not fit constants
+   to unrelated physical-system measurements.
+4. Multi-Jetty/multiport/CTP routing and relevant congestion behavior for the
+   selected performance workloads; implement where the hardware responsibility
+   lies, leaving official driver actions to the driver.
+5. Reproducible bounded regressions and profiling, recording configuration,
+   build/test/simulation wall time and remaining limitations. Independent review
+   must distinguish native contracts from actual full-system driver evidence.
+
+Deferred unless they block these experiments: exhaustive management/diagnostic
+commands, unrelated UB modules, hotplug, general hot-reset/disconnect recovery
+and exhaustive driver unload/reload. Completion-only command counts are not a
+completion target. Existing safety guards remain; data corruption, stalls or
+misleading performance results on an in-scope path still require fixes.
+
 ## Coverage matrix
 
 Here **partial** means a real implementation with explicit limits;
@@ -249,10 +281,11 @@ The current distinct-opcode audit still reports **76 UBASE and 32 mailbox
 completion-only commands**. `--check` now rejects changed enum declarations
 until their namespace is reviewed; this is not a hardware-implementation check.
 
-### Next autonomous acceptance priorities
+### Historical autonomous acceptance priorities (superseded)
 
 The remote-service quiescence and response-interval priorities were closed by
-the sixth implementation below. Remaining priorities:
+the sixth implementation below. The following broader priorities are deferred
+under the performance-path scope above unless an experiment needs them:
 
 1. Define cancellation/reset with transport quiescence for missing callbacks
    or ACKs. Never time out successfully while a DMA can still land.
@@ -261,8 +294,8 @@ the sixth implementation below. Remaining priorities:
 3. Continue removing completion-only operations by official caller semantics;
    explicit unsupported errors are not equivalent to implemented features.
 
-The thread has an hourly continuation automation (`ubsim`) to advance this
-list with separate implementation/acceptance agents, save local milestones,
+The thread has an hourly continuation automation (`ubsim`) to advance the
+current performance-path scope with separate implementation/acceptance agents, save local milestones,
 and report meaningful results or decisions. This is a continuation mechanism,
 not a declaration that item 2 is complete.
 
@@ -362,7 +395,10 @@ The subsequent shutdown-checkpoint guard changes were validated natively;
 they do not change the dataplane and were not separately rerun on guests.
 Final build/test with that guard: **1.11 s / 1.34 s**, **9/9 passed**.
 
-### Remaining broader driver gaps
+### Remaining broader driver gaps (not current completion gates)
+
+This inventory is retained for transparency. Only entries needed by the
+performance-path acceptance priorities above are in the current work scope.
 
 1. Enumerate every UBASE/mailbox/CtrlQ command into explicit implemented,
    accepted-no-op or rejected categories; remove false-success paths safely.
