@@ -44,6 +44,23 @@ and exhaustive driver unload/reload. Completion-only command counts are not a
 completion target. Existing safety guards remain; data corruption, stalls or
 misleading performance results on an in-scope path still require fixes.
 
+## Stage3 started: synchronized bandwidth (2026-10-08)
+
+See [timing results](qemu-timing-bandwidth-20261008.md). With the current
+pipeline and required QEMU/UDMA/ns-3 synchronization, WRITE bandwidth at64 KiB
+was 53120.86 MiB/s bidirectional at400G/port and 32905.46 at200G/port. The4 KiB
+case was nearly unchanged. These are first short measurements, not saturation
+or repeatability acceptance. The topology has two ports per endpoint; do not
+infer single-port utilization from the aggregate output.
+
+**Next timing-path blocker:** 1 MiB at400G failed in ns-3 with
+`target execution cannot resolve external WQE`. Source review finds terminal
+task deletion can precede late queued/in-flight CTP request arrival; the log
+does not yet distinguish the precise terminal cause. Add task/TA/outcome/tick
+diagnostics, then fix this lifetime boundary and add late-packet regression.
+Do not mask it by increasing RTO or ignoring an unknown task. Functional
+no-sync passing does not close this synchronized high-queue-delay failure.
+
 ## Multi-WQE pipeline acceptance (2026-10-08)
 
 Implemented bounded per-Jetty SQ issue separate from ordered retirement. Local
