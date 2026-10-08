@@ -12,7 +12,7 @@ and submits the WQE to a prepared native `UbJetty`.
 
 `UbCtpTransportService` then owns 4-KiB transaction segmentation, per-Entity
 TASSN allocation, the sliding completion window, ordering, member-port
-selection, compact CTP/UPI/EID/TA headers, response processing, and the
+selection, CTP/compact UPI/EID headers, full transaction headers, response processing, and the
 virtual-time timeout/retransmission state for WRITE and READ requests. The
 adapter's `UbTargetExecutor` calls the external target UDMA for the physical
 DMA action of each native segment. WRITE TAACKs and READ responses retire the
@@ -60,6 +60,21 @@ two-retry budget, and requires a failed native WQE plus an initiator-visible
 RMA error completion. A fourth contract drops the first READ response and
 requires one retransmission, one duplicate READ suppression, one cached
 response replay, and exactly one target-side READ execution.
+
+Subsequent patches0006/0007 add congestion recovery/shared wakeups and queue
+feedback. Patch0008 uses full BTAH/ATAH/MAETAH for URMA CTP traffic, including
+exact per-segment byte length,64-bit address and requester context. CTP is a
+transport choice, not a requirement to use compact transaction headers.
+The separate Load/Store compact codecs are unchanged. CTP tail padding is
+serialized and removed at receive; it is not application payload. Ordinary
+READ/WRITE segment addresses now advance by their WQE offset. The external
+target checks decoded address/length/token against the DMA request range,
+preventing adapter metadata from masking a wire-encoding error.
+
+The build also runs `ctp-read-length-contract`:17 sizes including unaligned
+addresses and short tail fragments, plus malformed-response and marked READ
+response feedback checks. This native contract does not run official drivers;
+full-system evidence is recorded under `docs/validation/`.
 
 Native CTP CNP reception now changes data-plane behavior instead of only
 recording a counter. Congestion state is isolated by destination node, EID and

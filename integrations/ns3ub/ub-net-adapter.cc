@@ -994,6 +994,12 @@ class UbNetFabric {
         wire.ta_ssn = ta_ssn;
         wire.transfer_length = segment->second.bytes;
         wire.payload_offset = segment->second.offset;
+        if ((request->GetType() == UbTransactionOpcode::READ ||
+             request->GetType() == UbTransactionOpcode::WRITE) &&
+            (request->GetRemoteAddress() != wire.remote_address ||
+             request->GetLogicalBytes() != wire.transfer_length ||
+             request->GetRemoteTokenId() != wire.segment))
+            throw std::runtime_error("native wire memory range disagrees with target DMA range");
         std::vector<std::uint8_t> payload;
         if (request->HasExplicitPayload()) {
             Ptr<const Packet> packet = request->GetExplicitPayload();

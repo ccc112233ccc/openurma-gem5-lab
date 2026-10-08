@@ -46,6 +46,15 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest follow-up: [full CTP transaction headers](read-full-ta-20261008.md)
+repair exact small/non-power-of-two lengths and per-segment remote addresses.
+All12 no-sync official-driver regression cases pass, including1 MiB RMA.
+Synchronized2/4/8/16 B now pass, but32 B stalls with identical repeated live
+snapshots. QEMU profiling identifies a separate pending-IRQ/MMIO retry loop;
+the continuous-scan reliability gate is reopened while an independent CPU
+device-wait fix is validated. The earlier successful scans remain evidence,
+not a claim that all synchronization stalls were eliminated.
+
 Latest fix: QEMU's synchronized empty-input poll now services due output SYNC
 nonblockingly, so a same-tick sync timer cannot be starved by the polling
 callback. The first fixed full-system run completed all seven64–4096 B READ
