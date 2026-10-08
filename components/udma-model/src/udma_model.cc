@@ -753,6 +753,10 @@ UdmaModel::HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor)
 {
     const std::uint16_t opcode = LoadLe<std::uint16_t>(descriptor.data());
     const std::uint32_t count = std::max<std::uint32_t>(1, descriptor[3]);
+    const auto depth = ubase_command_queue_registers_[0x08 / 4] << 3;
+    const auto head = ubase_command_queue_registers_[0x14 / 4] % depth;
+    const auto pending = (ubase_target_producer_ % depth + depth - head) % depth;
+    if (count > pending) return RejectUbase(std::move(descriptor), 1, 22);
     if (opcode == 0x7000) {
         HandleUbaseMailbox(std::move(descriptor), count);
         return;
@@ -769,8 +773,15 @@ UdmaModel::HandleUbaseDescriptor(std::vector<std::uint8_t> descriptor)
     // return ownership and advance Head here, matching the original in-process
     // device model and preventing an unchanged driver from waiting forever on
     // a command that the functional model has accepted.
-    FinishUbaseDescriptor(std::move(descriptor), opcode, count,
-                          BuildUbaseResponse(opcode));
+    auto response = BuildUbaseResponse(opcode);
+    if (descriptor[2] & (1U << 6)) { // UBASE_CMD_FLAG_GET_BD_NUM
+        if (response.empty()) return RejectUbase(std::move(descriptor), count, 95);
+        const auto blocks = static_cast<std::uint8_t>((response.size() + 39) / 32);
+        return FinishUbaseDescriptor(std::move(descriptor), opcode, count, {blocks});
+    }
+    if (response.size() > 24 + (count - 1) * 32)
+        return RejectUbase(std::move(descriptor), count, 90);
+    FinishUbaseDescriptor(std::move(descriptor), opcode, count, std::move(response));
 }
 
 void
@@ -789,8 +800,9 @@ UdmaModel::HandleCtrlq(std::vector<std::uint8_t> descriptor,
         descriptor.begin() + 8, descriptor.end());
     auto index = std::make_shared<std::uint32_t>(1);
     auto read_next = std::make_shared<std::function<void()>>();
+    std::weak_ptr<std::function<void()>> weak_next = read_next;
     *read_next = [this, descriptor = std::move(descriptor), descriptor_count,
-                  depth, head, base, request, index, read_next]() mutable {
+                  depth, head, base, request, index, weak_next]() mutable {
         if (*index >= descriptor_count) {
             ApplyCtrlq(std::move(descriptor), descriptor_count,
                        std::move(*request));
@@ -800,9 +812,10 @@ UdmaModel::HandleCtrlq(std::vector<std::uint8_t> descriptor,
             base + std::uint64_t((head + *index) % depth) * 32;
         ++*index;
         ReadIoVirtual(address, 32,
-            [this, request, read_next](bool ok,
-                                      std::vector<std::uint8_t> continuation) {
-                if (!ok || continuation.size() != 32) return FailUbase();
+            [this, request, read_next = weak_next.lock(), descriptor, descriptor_count]
+            (bool ok, std::vector<std::uint8_t> continuation) mutable {
+                if (!ok || continuation.size() != 32)
+                    return RejectUbase(std::move(descriptor), descriptor_count, 5);
                 request->insert(request->end(), continuation.begin(),
                                 continuation.end());
                 (*read_next)();
@@ -811,14 +824,18 @@ UdmaModel::HandleCtrlq(std::vector<std::uint8_t> descriptor,
     (*read_next)();
 }
 
-bool
+std::uint16_t
 UdmaModel::BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
                               std::vector<std::uint8_t>& event)
 {
     constexpr std::size_t Outer = 16;
     constexpr std::size_t Ctrl = 12;
     if (request.size() < Outer + Ctrl ||
-        LoadLe<std::uint16_t>(request.data() + 4) != 3) return false;
+        LoadLe<std::uint16_t>(request.data() + 4) != 3) return 22;
+    // Linux errno values are part of the guest ABI, not the host errno ABI.
+    const std::size_t input = LoadLe<std::uint16_t>(request.data() + 10);
+    const std::size_t output = LoadLe<std::uint16_t>(request.data() + 12);
+    if (input > request.size() - Outer - Ctrl) return 22;
     const std::uint8_t service = request[Outer + 1];
     const std::uint8_t opcode = request[Outer + 3];
     const bool query_sl = service == 4 && opcode == 2;
@@ -828,10 +845,15 @@ UdmaModel::BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
     const bool get_tp = service == 1 && opcode == 0x21;
     const bool activate = service == 1 && opcode == 0x22;
     const bool deactivate = service == 1 && opcode == 0x23;
+    const bool remove = service == 1 && opcode == 0x13;
     if (!query_sl && !query_vl && !init && !query_seid && !get_tp &&
-        !activate && !deactivate) return false;
-    const std::size_t output = query_sl || query_vl ? 20 :
-        LoadLe<std::uint16_t>(request.data() + 12);
+        !activate && !deactivate && !remove) return 95;
+    const std::size_t min_input = get_tp ? 36 : (activate ? 24 : (deactivate ? 12 : (remove ? 4 : 0)));
+    const std::size_t min_output = query_sl || query_vl ? 20 :
+        (query_seid ? 100 : (get_tp ? 44 : (activate ? 8 : (remove ? 4 : 0))));
+    if (input < min_input || output < min_output) return 22;
+    const std::uint32_t crq_depth = ubase_command_queue_registers_[0x20 / 4] << 3;
+    if (Outer + Ctrl + output + 8 >= std::uint64_t(crq_depth) * 32) return 90;
     event.assign(Outer + Ctrl + output, 0);
     std::memcpy(event.data(), request.data(), Outer + Ctrl);
     StoreLe<std::uint16_t>(event, 10, static_cast<std::uint16_t>(output));
@@ -855,13 +877,16 @@ UdmaModel::BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
             StoreLe<std::uint32_t>(event, entry - event.data() + 20, 0x7fff);
         }
     } else if (get_tp && output >= 44 && request.size() >= Outer + Ctrl + 36) {
+        if (tp_routes_.size() >= 1023) return 28;
+        const std::uint8_t* cfg = request.data() + Outer + Ctrl;
+        if (!(LoadLe<std::uint32_t>(cfg) & 0xfffffU) ||
+            !(LoadLe<std::uint32_t>(cfg + 16) & 0xfffffU)) return 22;
         std::uint32_t id = next_tp_id_;
         for (std::uint32_t attempts = 0; attempts < 1023; ++attempts) {
             if (++next_tp_id_ >= 1024) next_tp_id_ = 1;
             if (!tp_routes_.count(id)) break;
             id = next_tp_id_;
         }
-        const std::uint8_t* cfg = request.data() + Outer + Ctrl;
         std::uint32_t port = 0;
         bool found_port = false;
         for (std::uint32_t attempt = 0; attempt < config_.port_count; ++attempt) {
@@ -871,13 +896,13 @@ UdmaModel::BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
                 port = candidate; found_port = true; break;
             }
         }
-        if (!found_port) return false;
+        if (!found_port) return 100;
         TpRoute route{id, id, LoadLe<std::uint32_t>(cfg) & 0xfffffU,
                       LoadLe<std::uint32_t>(cfg + 16) & 0xfffffU,
                       port,
                       false};
         if (!route.local_eid || !route.remote_eid || tp_routes_.count(id))
-            return false;
+            return 28;
         tp_routes_[id] = route;
         StoreLe<std::uint32_t>(event, response - event.data(), 1);
         StoreLe<std::uint32_t>(event, response - event.data() + 4,
@@ -888,11 +913,19 @@ UdmaModel::BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
         const std::uint8_t* cfg = request.data() + Outer + Ctrl;
         const std::uint32_t id = LoadLe<std::uint32_t>(cfg) & 0xffffffU;
         auto found = tp_routes_.find(id);
-        if (found == tp_routes_.end()) return false;
+        if (found == tp_routes_.end()) return 2;
+        if (activate && (found->second.port >= link_up_.size() || !link_up_[found->second.port]))
+            return 100;
         found->second.active = activate;
         if (activate && output >= 8) std::memcpy(response, cfg, 8);
+    } else if (remove) {
+        const auto tpn = LoadLe<std::uint32_t>(request.data() + Outer + Ctrl) & 0xffffffU;
+        auto found = tp_routes_.find(tpn); // current model allocates one TPN per TP ID
+        if (found == tp_routes_.end()) return 2;
+        if (found->second.active || !pending_rma_.empty()) return 16;
+        tp_routes_.erase(found);
     }
-    return true;
+    return 0;
 }
 
 void
@@ -901,10 +934,11 @@ UdmaModel::ApplyCtrlq(std::vector<std::uint8_t> descriptor,
                       std::vector<std::uint8_t> request)
 {
     std::vector<std::uint8_t> response;
-    if (!BuildCtrlqResponse(request, response)) {
+    const auto status = BuildCtrlqResponse(request, response);
+    if (status) {
         std::cerr << "udma-model: rejected CtrlQ request bytes="
                   << request.size() << '\n';
-        return FailUbase();
+        return RejectUbase(std::move(descriptor), descriptor_count, status);
     }
     FinishUbaseDescriptor(std::move(descriptor), 0xf00e, descriptor_count, {},
         [this, response = std::move(response)]() mutable {
@@ -952,7 +986,8 @@ UdmaModel::EmitCtrlqResponse(std::vector<std::uint8_t> event,
     auto cursor = std::make_shared<std::size_t>(0);
     auto done = std::make_shared<Completion>(std::move(completion));
     auto issue = std::make_shared<std::function<void()>>();
-    *issue = [this, writes, cursor, issue, tail, done]() mutable {
+    std::weak_ptr<std::function<void()>> weak_issue = issue;
+    *issue = [this, writes, cursor, weak_issue, tail, done]() mutable {
         if (*cursor == writes->size()) {
             ubase_command_queue_registers_[0x24 / 4] = tail;
             ubase_command_source_ |= 1U << 1;
@@ -961,7 +996,7 @@ UdmaModel::EmitCtrlqResponse(std::vector<std::uint8_t> event,
         }
         auto& write = writes->at((*cursor)++);
         WriteIoVirtual(write.first, std::move(write.second),
-            [issue, done](bool ok) {
+            [issue = weak_issue.lock(), done](bool ok) {
                 if (!ok) {
                     std::cerr << "udma-model: CRQ IOVA write failed\n";
                     (*done)(false);
@@ -989,6 +1024,18 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
     const std::uint32_t tag =
         LoadLe<std::uint32_t>(descriptor.data() + 16) >> 8;
 
+    const bool needs_context = command == QueryJfsContext || command == 0x34 ||
+        command == 0x44 || command == 0x04 || command == 0x24 ||
+        command == 0x54 || command == 0x25;
+    if (needs_context && !context_iova)
+        return RejectUbase(std::move(descriptor), descriptor_count, 22);
+    if (command == QueryJfsContext && !jetty_contexts_.count(tag))
+        return RejectUbase(std::move(descriptor), descriptor_count, 2);
+    if ((command == 0x04 && jetty_contexts_.count(tag)) ||
+        (command == 0x24 && jfc_contexts_.count(tag)) ||
+        (command == 0x54 && jfr_contexts_.count(tag)))
+        return RejectUbase(std::move(descriptor), descriptor_count, 17);
+
     if (command == DestroyJfsContext) jetty_contexts_.erase(tag);
     if (command == DestroyJfcContext) jfc_contexts_.erase(tag);
     if (command == DestroyJfrContext) jfr_contexts_.erase(tag);
@@ -1006,7 +1053,7 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
         StoreLe<std::uint32_t>(context, 26 * sizeof(std::uint32_t), 1U << 26);
         WriteIoVirtual(context_iova, std::move(context),
             [this, descriptor = std::move(descriptor), descriptor_count](bool ok) mutable {
-                if (!ok) return FailUbase();
+                if (!ok) return RejectUbase(std::move(descriptor), descriptor_count, 5);
                 ApplyUbaseMailbox(std::move(descriptor), descriptor_count, {});
             });
         return;
@@ -1021,7 +1068,8 @@ UdmaModel::HandleUbaseMailbox(std::vector<std::uint8_t> descriptor,
         ReadIoVirtual(context_iova, bytes,
             [this, descriptor = std::move(descriptor), descriptor_count, bytes]
             (bool ok, std::vector<std::uint8_t> context) mutable {
-                if (!ok || context.size() != bytes) return FailUbase();
+                if (!ok || context.size() != bytes)
+                    return RejectUbase(std::move(descriptor), descriptor_count, 5);
                 ApplyUbaseMailbox(std::move(descriptor), descriptor_count,
                                   std::move(context));
             });
@@ -1048,10 +1096,10 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
 
     if ((command == 0x34 || command == 0x44) && context.size() >= 64) {
         const std::uint32_t shift = dw(1) & 0x1f;
-        if (shift >= 26) return FailUbase();
+        if (shift >= 26) return RejectUbase(std::move(descriptor), descriptor_count, 22);
         const std::uint64_t iova =
             ((std::uint64_t(dw(3)) << 20) | (dw(2) >> 12)) << 12;
-        if (!iova) return FailUbase();
+        if (!iova) return RejectUbase(std::move(descriptor), descriptor_count, 22);
         if (command == 0x34) {
             aeq_iova_ = iova;
             aeq_depth_ = 1U << (shift + 6);
@@ -1074,11 +1122,12 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
         if (!queue.moderation_count) queue.moderation_count = 1;
         queue.moderation_period = (dw(5) >> 22) & 0x7U;
         if (!queue.queue_iova || !queue.index_iova || !queue.depth)
-            return FailUbase();
+            return RejectUbase(std::move(descriptor), descriptor_count, 22);
         jfc_contexts_[tag] = queue;
     } else if (command == 0x25 && context.size() >= 256) {
         auto found = jfc_contexts_.find(tag);
-        if (found == jfc_contexts_.end()) return FailUbase();
+        if (found == jfc_contexts_.end())
+            return RejectUbase(std::move(descriptor), descriptor_count, 2);
         const std::uint32_t count_mask =
             LoadLe<std::uint32_t>(context.data() + 128 + 4 * 4);
         const std::uint32_t period_mask =
@@ -1108,7 +1157,8 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
         queue.token = ((dw(1) & 0x3fU) << 14) | ((dw(0) >> 18) & 0x3fffU);
         queue.payload_token = (dw(3) >> 2) & 0x000fffffU;
         if (!queue.queue_iova || !queue.index_iova ||
-            !queue.producer_iova || !queue.depth) return FailUbase();
+            !queue.producer_iova || !queue.depth)
+            return RejectUbase(std::move(descriptor), descriptor_count, 22);
         jfr_contexts_[tag] = queue;
     } else if (command == 0x04 && context.size() >= 128) {
         const std::uint32_t sq_shift = (dw(0) >> 8) & 0xfU;
@@ -1126,7 +1176,8 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
         queue.device_page_offset = abi::kUdmaMemoryOffset +
             abi::kHardwarePageBytes + std::uint64_t(tag) * abi::kHardwarePageBytes;
         queue.is_jetty = ((dw(0) >> 19) & 1U) != 0;
-        if (!queue.queue_iova || !queue.depth) return FailUbase();
+        if (!queue.queue_iova || !queue.depth)
+            return RejectUbase(std::move(descriptor), descriptor_count, 22);
         jetty_contexts_[tag] = queue;
     }
 
@@ -2155,11 +2206,21 @@ UdmaModel::ContinueTokenWrite(std::shared_ptr<TokenWriteState> state)
 }
 
 void
+UdmaModel::RejectUbase(std::vector<std::uint8_t> descriptor,
+                       std::uint32_t descriptor_count, std::uint16_t status)
+{
+    ++ubase_errors_;
+    const auto opcode = LoadLe<std::uint16_t>(descriptor.data());
+    FinishUbaseDescriptor(std::move(descriptor), opcode, descriptor_count, {}, {}, status);
+}
+
+void
 UdmaModel::FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
                                  std::uint16_t opcode,
                                  std::uint32_t descriptor_count,
                                  std::vector<std::uint8_t> response,
-                                 std::function<void()> after_completion)
+                                 std::function<void()> after_completion,
+                                 std::uint16_t status)
 {
     constexpr std::size_t BaseLow = 0x00 / 4;
     constexpr std::size_t BaseHigh = 0x04 / 4;
@@ -2172,7 +2233,7 @@ UdmaModel::FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
     const std::size_t first = std::min<std::size_t>(response.size(), 24);
     if (first) std::memcpy(descriptor.data() + 8, response.data(), first);
     descriptor[2] |= 1U << 1;
-    descriptor[4] = descriptor[5] = 0;
+    StoreLe<std::uint16_t>(descriptor, 4, status);
     if (opcode == 0x0001) StoreLe<std::uint32_t>(descriptor, 8, 0x01000000);
     if (opcode == 0x7001) StoreLe<std::uint32_t>(descriptor, 8, 1);
 
@@ -2195,7 +2256,8 @@ UdmaModel::FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
     writes->push_back({base + std::uint64_t(head) * 32, std::move(descriptor)});
     auto cursor = std::make_shared<std::size_t>(0);
     auto issue = std::make_shared<std::function<void()>>();
-    *issue = [this, writes, cursor, issue, head, descriptor_count, depth,
+    std::weak_ptr<std::function<void()>> weak_issue = issue;
+    *issue = [this, writes, cursor, weak_issue, head, descriptor_count, depth,
               after_completion = std::move(after_completion)]() mutable {
         if (*cursor == writes->size()) {
             constexpr std::size_t Tail = 0x10 / 4;
@@ -2210,7 +2272,7 @@ UdmaModel::FinishUbaseDescriptor(std::vector<std::uint8_t> descriptor,
         }
         WriteRecord& record = writes->at((*cursor)++);
         WriteIoVirtual(record.address, std::move(record.bytes),
-            [this, issue](bool ok) {
+            [this, issue = weak_issue.lock()](bool ok) {
                 if (!ok) return FailUbase();
                 (*issue)();
             });

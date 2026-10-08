@@ -6,6 +6,7 @@
 #include "protocol/ub_net/proto.h"
 #include "protocol/ub_net/udma_wire.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <deque>
@@ -384,6 +385,7 @@ int main()
 
     std::vector<std::uint8_t> get_tp_request(88, 0);
     get_tp_request[4] = 3;
+    get_tp_request[10] = 36;
     get_tp_request[12] = 44;
     get_tp_request[16 + 1] = 1;
     get_tp_request[16 + 3] = 0x21;
@@ -415,6 +417,7 @@ int main()
 
     std::vector<std::uint8_t> activate_request(56, 0);
     activate_request[4] = 3;
+    activate_request[10] = 24;
     activate_request[12] = 8;
     activate_request[16 + 1] = 1;
     activate_request[16 + 3] = 0x22;
@@ -770,7 +773,7 @@ int main()
 
     // Exercise lifecycle commands through the same CSQ DMA/MMIO boundary as
     // the official driver, including ring wrap. Do not call model internals.
-    const auto mailbox = [&](std::vector<std::uint8_t> desc) {
+    const auto mailbox = [&](std::vector<std::uint8_t> desc, std::uint16_t expected=0) {
         std::uint64_t head{};
         assert(official_model.ReadMmio(0x318414, 4, head));
         const auto slot = head % 8;
@@ -779,7 +782,8 @@ int main()
         assert(official_model.ReadMmio(0x318414, 4, head));
         assert(head == (slot + 1) % 8);
         const auto& completed = host.Load(ubase_csq + slot * 32);
-        assert((completed[2] & 2) && !completed[4] && !completed[5]);
+        assert((completed[2] & 2) && completed[4]==(expected&255) && completed[5]==(expected>>8));
+        return completed;
     };
     const auto destroy = [&](std::uint8_t opcode, std::uint32_t id) {
         std::vector<std::uint8_t> desc(32, 0);
@@ -824,6 +828,117 @@ int main()
         saw_cqe |= address >= cq_iova && address < cq_iova + 4096;
     }
     assert(saw_cqe); // real CQ completion occurred, but no DMA to freed CEQ memory
+    auto duplicate_jfc=create_jfc;
+    mailbox(duplicate_jfc,17);
+    auto bad_context=create_jfc;
+    store32(bad_context,16,(99U<<8)|0x24);
+    store32(bad_context,8,0); store32(bad_context,12,0);
+    mailbox(bad_context,22);
+    store32(bad_context,8,0x1a0000); // no mapped context bytes in mock memory
+    mailbox(bad_context,5);
+    host.Store(0x1a0000,std::vector<std::uint8_t>(128,0));
+    mailbox(bad_context,22); // mapped but invalid queue addresses
+    assert(official_model.jfc_count()==jfcs_before);
+    auto probe=std::vector<std::uint8_t>(32,0);
+    probe[0]=0x30; probe[3]=1; probe[2]=1U<<6;
+    assert(mailbox(probe)[8]==10); // 312-byte query uses ten descriptors
+    probe[2]=0;
+    mailbox(probe,90); // do not silently truncate a large response
+    probe[0]=7; // subsequent NOTIFY_DRV_CAPS still completes
+    mailbox(probe);
+    probe[3]=7; // chain extends past the producer: consume only the malformed header
+    mailbox(probe,22);
+    probe[3]=1;
+    mailbox(probe);
+    // Control-path failures must complete with Linux errno and leave CSQ usable.
+    const auto control = [&](std::vector<std::uint8_t> request, std::uint16_t expected) {
+        std::uint64_t head{}, tail{};
+        assert(official_model.ReadMmio(0x318414, 4, head));
+        assert(official_model.ReadMmio(0x318424, 4, tail));
+        const auto count = (request.size() + 39) / 32;
+        assert(count < 8);
+        std::size_t offset = 0;
+        for (std::size_t i=0; i<count; ++i) {
+            std::vector<std::uint8_t> desc(32, 0);
+            const std::size_t start = i ? 0 : 8;
+            if (!i) { desc[0]=0x0e; desc[1]=0xf0; desc[3]=count; }
+            const auto bytes = std::min(32-start, request.size()-offset);
+            std::memcpy(desc.data()+start, request.data()+offset, bytes);
+            offset += bytes;
+            host.Store(ubase_csq + ((head+i)%8)*32, desc);
+        }
+        const auto errors = official_model.ubase_errors();
+        const auto target = (head+count)%8;
+        assert(official_model.WriteMmio(0x318410, 4, target));
+        if (host.defer_reads) host.FlushReads();
+        const auto& completed = host.Load(ubase_csq + head*32);
+        if (completed[4]!=(expected&255) || completed[5]!=(expected>>8))
+            std::cerr << "CtrlQ opcode=" << unsigned(request[19]) << " expected=" << expected
+                      << " actual=" << (unsigned(completed[4]) | (unsigned(completed[5])<<8)) << '\n';
+        assert((completed[2]&2) && completed[4]==(expected&255) && completed[5]==(expected>>8));
+        std::uint64_t after{};
+        assert(official_model.ReadMmio(0x318414, 4, after) && after==target);
+        assert(official_model.ubase_errors()==errors+(expected ? 1 : 0));
+        assert(official_model.ReadMmio(0x318424, 4, after));
+        if (expected) { assert(after==tail); return std::vector<std::uint8_t>{}; }
+        const auto& first = host.Load(crq_iova+tail*32);
+        std::vector<std::uint8_t> result(first.begin()+8,first.end());
+        for (unsigned i=1;i<first[3];++i) {
+            const auto& part = host.Load(crq_iova+((tail+i)%8)*32);
+            result.insert(result.end(),part.begin(),part.end());
+        }
+        assert(official_model.WriteMmio(0x318428,4,after)); // consume response
+        return result;
+    };
+    const auto request = [&](std::uint8_t op, unsigned input, unsigned output, std::uint32_t id=0) {
+        std::vector<std::uint8_t> bytes(28+input,0);
+        bytes[4]=3; bytes[10]=input; bytes[11]=input>>8;
+        bytes[12]=output; bytes[13]=output>>8;
+        bytes[17]=1; bytes[19]=op;
+        if (input>=4) store32(bytes,28,id);
+        return bytes;
+    };
+    const auto routes_before = official_model.tp_count();
+    control(request(0xff,0,0),95); // unsupported is not success
+    control(request(0x21,35,44),22); // short GET_LIST
+    control(request(0x21,36,43),22); // short output
+    auto truncated=request(0x21,36,44); truncated.resize(28);
+    control(truncated,22); // declared input exceeds descriptor DMA
+    control(request(0x22,23,8,tp_id),22); // full official ACTIVE is 24 bytes
+    control(request(0x23,11,0,tp_id),22); // DEACTIVE is 12 bytes
+    control(request(0x22,24,8,999),2); // unknown TP
+    control(request(0x21,36,65535),90); // response cannot fit CRQ
+    assert(official_model.tp_count()==routes_before && official_model.tp_active(tp_id));
+    auto allocate=request(0x21,36,44);
+    store32(allocate,28,0x100); store32(allocate,44,0x200);
+    official_model.SetLinkState(1,false);
+    control(allocate,100); // neither port can carry a TP
+    control(request(0x22,24,8,tp_id),100);
+    assert(official_model.tp_count()==routes_before);
+    official_model.SetLinkState(1,true);
+    control(request(0x22,24,8,tp_id),0);
+    for (unsigned i=routes_before;i<1023;++i) control(allocate,0);
+    assert(official_model.tp_count()==1023);
+    control(allocate,28); // full table, no overwrite
+    control(request(0x13,4,4,tp_id),16); // reject deleting active route
+    control(request(0x23,12,0,tp_id),0);
+    assert(!official_model.tp_active(tp_id));
+    control(request(0x13,4,4,tp_id),0);
+    assert(official_model.tp_count()==1022);
+    control(request(0x13,4,4,tp_id),2); // double remove is visible
+    const auto reused=control(allocate,0); // only the freed slot can be allocated
+    std::uint32_t reused_id{};
+    std::memcpy(&reused_id,reused.data()+32,4);
+    assert((reused_id&0xffffffU)==tp_id && official_model.tp_count()==1023);
+    for (unsigned id=1;id<=1023;++id) control(request(0x13,4,4,id),0);
+    assert(official_model.tp_count()==0);
+    control(allocate,0); // success after failures, wrap, exhaustion and reclamation
+    assert(official_model.tp_count()==1);
+    host.defer_reads=true;
+    control(allocate,0); // descriptor + continuation DMA callbacks remain valid asynchronously
+    host.defer_reads=false;
+    assert(official_model.tp_count()==2);
+    std::cout << "udma-model CtrlQ errors, 1023 TP exhaustion/reclaim/reuse: PASS\n";
     std::cout << "udma-model CEQ destroy/recreate and JFC lifecycle/ring-wrap: PASS\n";
     std::cout << "udma-model host/device/network separation test: PASS\n";
     return 0;

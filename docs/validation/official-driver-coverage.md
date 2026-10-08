@@ -32,7 +32,7 @@ Paths below are repository-relative.
 | UDMA JFR | `udma_jfr.c`, command header | Create 0x54, destroy 0x57; SEND receive DMA tests | Full modify/query and in-flight teardown not verified |
 | AEQ / CEQ | command header and UBASE event setup | Create 0x34/0x44; mailbox/completion event DMA | **Single modeled AEQ/CEQ**, not per-ID multi-queue hardware. CEQ destroy 0x47 added this stage |
 | CtrlQ QoS/SEID | `udma_ctrlq*`, UBASE control envelope | Services 4:1/2, 2:1/0x15 in `BuildCtrlqResponse` | Template responses; SEID query is not proof of complete security-entity behavior |
-| CtrlQ TP | `udma_ctrlq_tp.h/.c` | GET_LIST 0x21, ACTIVE 0x22, DEACTIVE 0x23; routing state/native activation test | REMOVE/CHECK/SET_ATTR/GET_ATTR not implemented; deactivate does not free ID |
+| CtrlQ TP | `udma_ctrlq_tp.h/.c` | GET_LIST 0x21, ACTIVE 0x22, DEACTIVE 0x23, REMOVE 0x13; exhaustion/reclaim/reuse tests | REMOVE supports inactive routes with no pending RMA; CHECK/SET_ATTR/GET_ATTR not implemented |
 | Official provider SEND / SEND_IMM / WRITE / READ | `sources/umdk/src/urma/hw/udma/udma_u_jfs.c` | `SqWqe`, `ProcessSq`, receive paths; native and historical full-system RMA tests | Implemented subset; SQ opcodes accepted are 0, 1, 3, 6 |
 | Atomic / other provider opcodes | same provider | Rejected by current SQ opcode validation | Not implemented in UDMA, even if ns-3 supports corresponding transactions |
 | Multiport selection | `udma_ctrlq_tp.c` and provider TP handles | `tp_routes_`, `SetLinkState`; native fallback test | Functional route/port fallback, not exhaustive multi-Jetty/multiport matrix |
@@ -74,19 +74,80 @@ Final standalone-device rebuild took **3.28 s**; its process contract and
 model regression both passed in **1.84 s** total wall time. Existing running
 guests were not restarted or claimed as revalidated.
 
+## Second implementation result: control errors and TP reuse
+
+Commands whose descriptors can be read and completed now return Linux errno
+in CSQ `ret`, return ownership and advance Head on semantic failure. This
+matches `ubase_get_cmd_result()` in `ubase_cmd.c`; the driver returns `-ret`.
+CtrlQ send failure exits before waiting for CRQ in `ubase_ctrlq.c`, so rejected
+requests deliberately produce no success-shaped CRQ response.
+
+Native MMIO/DMA tests cover:
+
+| Case | Linux errno / expected behavior |
+|---|---|
+| Short CtrlQ input/output; null or malformed context | EINVAL (22) |
+| Unsupported CtrlQ opcode | EOPNOTSUPP (95) |
+| Context DMA read failure | EIO (5) |
+| Duplicate JFS/JFC/JFR creation (JFC exercised) | EEXIST (17) |
+| Unknown TP activation/deactivation/removal | ENOENT (2) |
+| All ports down / activating a down-port TP | ENETDOWN (100) |
+| TP table full | ENOSPC (28); existing entries preserved |
+| Removing an active TP | EBUSY (16) |
+| Oversized CRQ output or short UBASE response capacity | EMSGSIZE (90) |
+| Descriptor chain exceeds submitted entries | EINVAL (22); consume only bad header |
+
+Tests fill all **1,023 model TP slots**, reject the next allocation, deactivate
+and remove a route, reuse its freed ID, remove all routes, then allocate again.
+This is the current model capacity, not a claim about hardware limits.
+Removal conservatively rejects whenever *any* RMA is pending; this is not
+complete per-TP live flush/teardown behavior. A later asynchronous-DMA test
+checks that command callbacks survive deferred completion.
+
+Official `GET_BD_NUM` queries now return descriptor requirements for modeled
+response buffers, preventing silent truncation. Three command-path recursive
+callback chains use weak self-references to eliminate their ownership cycles.
+This does not assert that all asynchronous paths have been audited.
+
+Unrecoverable queue faults remain distinct: an unreadable first descriptor,
+invalid queue base, or unwritable completion can still reach `FailUbase()`.
+No safe driver-visible completion is claimed when the completion buffer itself
+cannot be accessed. Generic UBASE and mailbox defaults still include successful
+empty responses; the error improvements do **not** remove all false-success
+paths.
+
+Reproducible source inventory:
+
+```sh
+python3 tools/audit_command_coverage.py
+python3 tools/audit_command_coverage.py --json
+```
+
+The tool reads selected pinned UBASE/UDMA enums, including both mailbox headers,
+and assigns conservative, manually reviewed categories. It counts aliases as
+symbols, not unique operations. It is neither exhaustive across all UB modules
+nor dynamic verification. Current results: UBASE 86 symbols (78 completion-only,
+6 partial, 2 dispatch); mailbox 74 (53 completion-only, 21 partial); CtrlQ TP 8
+(4 partial, 4 rejected); CtrlQ device 6 (1 partial, 5 rejected).
+
+Standalone device incremental build took **3.49 s**, and its process-contract
+and model tests passed in **1.40 s**. No guest cold boot or full-system driver
+revalidation was performed for this stage.
+Final no-change rerun took **0.10 s** to check build targets and **0.17 s**
+for the same two tests; assertions remain enabled via `-UNDEBUG`.
+
 ## Next priority gaps
 
 1. Enumerate every UBASE/mailbox/CtrlQ command into explicit implemented,
    accepted-no-op or rejected categories; remove false-success paths safely.
-2. Return driver-visible errors and advance CSQ on malformed commands.
-   `FailUbase()` currently increments a counter and releases busy state, but
-   does not complete the descriptor: a driver can still time out.
-3. Validate short CtrlQ input/output buffers before success. Some opcode
-   branches currently fall through with a success-shaped empty response.
+2. Expand driver-visible error coverage beyond the validated command branches;
+   define recovery for unreadable queues and unwritable completions.
+3. Audit remaining service-specific input fields, flags and semantics beyond
+   the new minimum-length checks.
 4. Model per-ID event queues and safe in-flight teardown/reuse. The singleton
    CEQ fix does not solve deferred-DMA generation checks or multiple CEQs.
-5. Add TP removal/reuse/exhaustion and attribute operations from the official
-   definitions; then verify multi-Jetty/multi-Entity state isolation.
+5. Extend TP removal to safe per-TP in-flight teardown and add attribute
+   operations; then verify multi-Jetty/multi-Entity state isolation.
 6. Run bounded full-system driver lifecycle tests from a compatible ready
    checkpoint after native contracts pass. Do not infer those results here.
 

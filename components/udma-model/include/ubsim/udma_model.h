@@ -242,7 +242,7 @@ class UdmaModel {
     void ApplyCtrlq(std::vector<std::uint8_t> descriptor,
                     std::uint32_t descriptor_count,
                     std::vector<std::uint8_t> request);
-    bool BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
+    std::uint16_t BuildCtrlqResponse(const std::vector<std::uint8_t>& request,
                             std::vector<std::uint8_t>& event);
     void EmitCtrlqResponse(std::vector<std::uint8_t> event,
                            Completion completion);
@@ -368,7 +368,10 @@ class UdmaModel {
                                std::uint16_t opcode,
                                std::uint32_t descriptor_count,
                                std::vector<std::uint8_t> response,
-                               std::function<void()> after_completion = {});
+                               std::function<void()> after_completion = {},
+                               std::uint16_t status = 0);
+    void RejectUbase(std::vector<std::uint8_t> descriptor,
+                     std::uint32_t descriptor_count, std::uint16_t status);
     void FailUbase();
 
     HostInterface& host_;
