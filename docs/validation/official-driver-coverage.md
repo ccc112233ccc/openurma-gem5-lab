@@ -46,6 +46,15 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest range request: [2–4096 B READ results](read-2b-4096b-20261008.md).
+Seven sizes64–4096 B have valid single-direction readings (0.015792–1.010911
+GB/s) in two sessions.2 B failed and cleanup stalled;4–32 B were not run.
+The first64–4096 session stalled at1024 B despite ns-3 completing all81920
+requests; UDMA retired81509 and could not checkpoint. A fresh session passed
+1024/2048/4096. Completion-tail progress across repeated workloads is therefore
+an additional open timing/reliability gate; do not label the grouped results
+as a single successful continuous scan or infer a CTP sequence-wrap cause.
+
 Latest requested READ evidence:
 [single-direction scan and aligned control](requested-read-scan-20261008.md).
 Actual capabilities limit R/T/C to1024/1024/4096. With n16384, batch256 and

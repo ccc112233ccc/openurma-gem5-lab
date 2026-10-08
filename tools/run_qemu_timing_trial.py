@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 import re
+import os
 from run_modular_rma_regression import validate_depth_output, validate_bw_scan
 
 
@@ -19,6 +20,8 @@ def main():
                    help="run requested a23/n16384 READ scan, capped to reported queue limits")
     p.add_argument("--read-size", type=int,
                    help="with --user-read-scan, isolate one size instead of a23")
+    p.add_argument("--read-sizes", type=int, nargs="+",
+                   help="test separate READ sizes; continue after clean guest errors")
     args = p.parse_args()
     lab = Path(__file__).resolve().parents[1]
     root = lab / "run-qemu-dual"
@@ -76,26 +79,40 @@ def main():
             print(f"requested READ scan effective queue settings: {selected}", flush=True)
             if selected["T"] < 256:
                 raise ValueError("reported JFS capacity cannot support requested batch256")
-            size_option = f"-s {args.read_size}" if args.read_size else "-a23"
-            command = ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest read_bw "
-                       f"-d udma0 --eid_idx 0 --ctp {size_option} -P 21115 -J 1 "
-                       f"-R {selected['R']} -T {selected['T']} -C {selected['C']} "
-                       "-Q 1 -l 256 -n 16384 -p 0")
-            rc = run("requested-read-scan", serial+["--stagger", "1", "--commands",
-                     command, command+" -S 10.0.0.1"], args.timeout+10)
-            transcript = (args.output/"requested-read-scan.txt").read_text()
-            # Single-direction READ server omits its JFS-depth header; use
-            # the exact-size result rows, not bidirectional depth validation.
-            if args.read_size:
-                sections = re.split(r"(?m)^--- UART \d+ ---\s*$", transcript)[1:]
-                row = rf"(?m)^\s*{args.read_size}\s+16384\s+[\d.]+\s+[\d.]+\s+[\d.]+\s*$"
-                errors = [] if len(sections) == 2 and all(
-                    len(re.findall(row, section)) == 1 for section in sections
-                ) else ["missing single-size READ results"]
-            else:
-                errors = validate_bw_scan(transcript, 23, 16384)
-            records[-1]["validation_errors"] = errors
-            return rc or int(bool(errors))
+            failed = False
+            for index, read_size in enumerate(args.read_sizes or [args.read_size]):
+                size_option = f"-s {read_size}" if read_size else "-a23"
+                label = f"read-{read_size}" if args.read_sizes else "requested-read-scan"
+                command = ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest read_bw "
+                           f"-d udma0 --eid_idx 0 --ctp {size_option} -P {21115+index} -J 1 "
+                           f"-R {selected['R']} -T {selected['T']} -C {selected['C']} "
+                           "-Q 1 -l 256 -n 16384 -p 0")
+                rc = run(label, serial+["--stagger", "1", "--commands",
+                         command, command+" -S 10.0.0.1"], args.timeout+10)
+                transcript = (args.output/f"{label}.txt").read_text()
+                # Single-direction READ server omits its JFS-depth header.
+                if read_size:
+                    sections = re.split(r"(?m)^--- UART \d+ ---\s*$", transcript)[1:]
+                    row = rf"(?m)^\s*{read_size}\s+16384\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$"
+                    rows = [re.findall(row, section) for section in sections]
+                    errors = [] if len(rows) == 2 and all(len(r) == 1 for r in rows) else ["missing single-size READ results"]
+                    if not errors and rc == 0:
+                        records[-1]["average_mib_s"] = [float(r[0][1]) for r in rows]
+                else:
+                    errors = validate_bw_scan(transcript, 23, 16384)
+                records[-1]["validation_errors"] = errors
+                records[-1]["size_bytes"] = read_size
+                failed |= bool(rc or errors)
+                if rc or errors:
+                    # Reuse only guests that returned a clean command status;
+                    # a timed-out process or dead adapter makes later data invalid.
+                    statuses = re.findall(r"(?m)^__UBSIM_RC_\d+_\d+__=\d+\s*$", transcript)
+                    if rc == 124 or len(statuses) != 2:
+                        break
+                    for component in ("node0/qemu", "node1/qemu", "udma-node0/udma",
+                                      "udma-node1/udma", "ub-fabric/ns3"):
+                        os.kill(int((root/f"{component}.pid").read_text().strip()), 0)
+            return int(failed)
         for index, size in enumerate(args.sizes):
             command = ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest write_bw "
                        f"-d udma0 --eid_idx 0 --ctp -B -s {size} -P {21410+index} "
