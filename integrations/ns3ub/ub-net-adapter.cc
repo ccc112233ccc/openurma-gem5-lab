@@ -221,6 +221,20 @@ struct NativeTask {
     std::map<std::uint16_t, NativeSegment> segments;
 };
 
+// Diagnostic history only: never used to admit, complete, or discard work.
+struct NativeTerminalDiagnostic {
+    std::uint32_t task_id{};
+    UbWorkOutcome outcome{};
+    std::uint64_t time_ps{};
+    std::size_t source{};
+    std::size_t destination{};
+    std::uint64_t request_id{};
+    std::uint32_t transfer_length{};
+    std::size_t ta_count{};
+    std::uint16_t min_wire_tassn{};
+    std::uint16_t max_wire_tassn{};
+};
+
 struct TargetExecutionKey {
     std::size_t source{};
     std::uint64_t request_id{};
@@ -236,6 +250,10 @@ struct PendingTargetExecution {
     UbTargetCompletion completion;
     std::uint32_t task_id{};
     std::uint16_t ta_ssn{};
+    std::size_t target{};
+    std::uint32_t source_eid{};
+    std::uint32_t target_eid{};
+    ubnet::UdmaWireHeader request{};
 };
 
 struct Endpoint {
@@ -328,7 +346,7 @@ class UbNetFabric {
             for (auto& endpoint : endpoints_)
                 progress = Flush(endpoint, now) || progress;
             if (options_.lifecycle_sync &&
-                scheduled_packets_ == 0 && OutputsEmpty() &&
+                scheduled_packets_ == 0 && pending_target_executions_.empty() && OutputsEmpty() &&
                 std::all_of(endpoints_.begin(), endpoints_.end(),
                     [](const Endpoint& endpoint) {
                         return endpoint.lifecycle_prepare;
@@ -379,7 +397,8 @@ class UbNetFabric {
                           << " absolute_origin_ps=" << epoch_origin_ps_
                           << " endpoints=" << endpoints_.size() << '\n';
             }
-            if (all_terminated && scheduled_packets_ == 0 && OutputsEmpty()) break;
+            if (all_terminated && scheduled_packets_ == 0 &&
+                pending_target_executions_.empty() && OutputsEmpty()) break;
             if (!OutputsEmpty()) {
                 ++output_backpressure_;
                 if (!progress)
@@ -416,7 +435,8 @@ class UbNetFabric {
                 AdvanceTo(next);
                 ++sync_steps_;
                 progress = true;
-            } else if (!synchronized && scheduled_packets_) {
+            } else if (!synchronized &&
+                       (scheduled_packets_ || !pending_target_executions_.empty())) {
                 // ns-3-UB owns periodic maintenance events, so an unbounded
                 // Simulator::Run() never drains. Advance one finite quantum
                 // and return to the process boundary to flush completed
@@ -487,6 +507,8 @@ class UbNetFabric {
                   << " native_wqes_submitted=" << native_wqes_submitted_
                   << " native_wqes_completed=" << native_wqes_completed_
                   << " native_wqes_failed=" << native_wqes_failed_
+                  << " target_dma_drained_after_terminal=" << target_dma_drained_after_terminal_
+                  << " pending_target_dma=" << pending_target_executions_.size()
                   << " native_order_no=" << native_order_no_
                   << " native_order_relax=" << native_order_relax_
                   << " native_order_strong=" << native_order_strong_
@@ -970,8 +992,11 @@ class UbNetFabric {
         if (request == nullptr) return completion(UbWorkExecutionResult{});
         const auto source_it = endpoint_by_node_.find(request->GetSrc());
         auto task = native_tasks_.find(request->GetTaskId());
-        if (source_it == endpoint_by_node_.end() || task == native_tasks_.end())
+        if (source_it == endpoint_by_node_.end() || task == native_tasks_.end()) {
+            LogMissingNativeTask("target-execute", request->GetTaskId(),
+                                 request->GetRequestTassn(), target);
             throw std::runtime_error("target execution cannot resolve external WQE");
+        }
         const std::size_t source = source_it->second;
         const std::uint16_t ta_ssn = static_cast<std::uint16_t>(request->GetRequestTassn());
         auto segment = task->second.segments.find(ta_ssn);
@@ -1024,7 +1049,8 @@ class UbNetFabric {
         }
         const TargetExecutionKey key{source, wire.request_id, ta_ssn};
         if (!pending_target_executions_.emplace(
-                key, PendingTargetExecution{completion, request->GetTaskId(), ta_ssn}).second)
+                key, PendingTargetExecution{completion, request->GetTaskId(), ta_ssn,
+                    target, frame.source_eid, frame.destination_eid, wire}).second)
             throw std::runtime_error("duplicate external target DMA execution");
     }
 
@@ -1035,6 +1061,8 @@ class UbNetFabric {
     {
         if (!IsTargetCompletion(wire.operation) ||
             wire.payload_length > UB_MTU_BYTE ||
+            wire.ta_ssn > std::numeric_limits<std::uint16_t>::max() ||
+            wire.payload_length != payload.size() ||
             frame.destination_eid == endpoints_[target].eid)
             throw std::runtime_error("invalid external target DMA completion");
         const std::size_t source = route_.at(frame.destination_eid);
@@ -1043,17 +1071,34 @@ class UbNetFabric {
         auto pending = pending_target_executions_.find(key);
         if (pending == pending_target_executions_.end())
             throw std::runtime_error("unmatched external target DMA completion");
+        const auto& expected = pending->second;
+        const bool read = static_cast<ubnet::UdmaOperation>(expected.request.operation) ==
+                          ubnet::UdmaOperation::ReadRequest;
+        const auto expected_operation = read ? ubnet::UdmaOperation::ReadResponse :
+                                              ubnet::UdmaOperation::WriteAck;
+        if (target != expected.target || frame.source_eid != expected.target_eid ||
+            frame.destination_eid != expected.source_eid ||
+            wire.operation != static_cast<std::uint8_t>(expected_operation) ||
+            wire.source_jetty != expected.request.destination_jetty ||
+            wire.destination_jetty != expected.request.source_jetty ||
+            wire.tpn != expected.request.tpn ||
+            wire.transfer_length != expected.request.transfer_length ||
+            wire.payload_offset != expected.request.payload_offset ||
+            payload.size() != (read ? expected.request.transfer_length : 0))
+            throw std::runtime_error("mismatched external target DMA completion");
         auto task = native_tasks_.find(pending->second.task_id);
-        if (task == native_tasks_.end())
-            throw std::runtime_error("target DMA completion lost its native WQE");
-        auto segment = task->second.segments.find(pending->second.ta_ssn);
-        if (segment == task->second.segments.end())
-            throw std::runtime_error("target DMA completion lost its native segment");
-        if (static_cast<ubnet::UdmaOperation>(wire.operation) ==
-            ubnet::UdmaOperation::ReadResponse) {
-            if (payload.size() != segment->second.bytes)
-                throw std::runtime_error("target READ payload length mismatch");
-            segment->second.read_payload = std::move(payload);
+        if (task != native_tasks_.end()) {
+            auto segment = task->second.segments.find(pending->second.ta_ssn);
+            if (segment == task->second.segments.end() ||
+                segment->second.bytes != expected.request.transfer_length ||
+                segment->second.offset != expected.request.payload_offset)
+                throw std::runtime_error("target DMA completion lost its native segment");
+            if (read) segment->second.read_payload = std::move(payload);
+        } else {
+            // The target accepted this DMA before source termination. Drain its
+            // callback independently; CTP rejects a later response without an
+            // outstanding source transaction. Do not recreate or complete it.
+            ++target_dma_drained_after_terminal_;
         }
         UbTargetCompletion completion = pending->second.completion;
         pending_target_executions_.erase(pending);
@@ -1117,12 +1162,68 @@ class UbNetFabric {
         QueueUdma(task->second.source, frame, wire, payload);
     }
 
+    void PrintTerminalDiagnostic(const NativeTerminalDiagnostic& record) const
+    {
+        std::cerr << " task=" << record.task_id
+                  << " outcome=" << static_cast<unsigned>(record.outcome)
+                  << " completed=" << (record.outcome == UbWorkOutcome::COMPLETED)
+                  << " terminal_ps=" << record.time_ps
+                  << " source=" << record.source << " destination=" << record.destination
+                  << " request_id=" << record.request_id
+                  << " transfer_length=" << record.transfer_length
+                  << " ta_count=" << record.ta_count
+                  << " min_wire_tassn=" << record.min_wire_tassn
+                  << " max_wire_tassn=" << record.max_wire_tassn;
+    }
+
+    void LogMissingNativeTask(const char* site, std::uint32_t task_id,
+                              std::uint32_t ta_ssn, std::size_t target) const
+    {
+        const auto now = NowPs();
+        std::cerr << "[NS3_UB_NET_MISSING_TASK] site=" << site
+                  << " now_ps=" << now << " request_task=" << task_id
+                  << " request_tassn=" << ta_ssn << " target=" << target;
+        const auto record = std::find_if(recent_terminals_.rbegin(), recent_terminals_.rend(),
+            [task_id](const auto& terminal) { return terminal.task_id == task_id; });
+        if (record == recent_terminals_.rend()) {
+            std::cerr << " terminal_history=not-retained-or-never-terminal"
+                      << " history_evictions=" << terminal_history_evictions_;
+        } else {
+            PrintTerminalDiagnostic(*record);
+            std::cerr << " terminal_age_ps=" << (now - record->time_ps);
+        }
+        std::cerr << std::endl;
+    }
+
     void OnNativeWqeTerminal(UbWqeCompletion completion)
     {
         auto task = native_tasks_.find(completion.wqeId);
         if (task == native_tasks_.end())
             throw std::runtime_error("native WQE completion has no external WQE");
+        const auto& segments = task->second.segments;
+        const NativeTerminalDiagnostic diagnostic{
+            completion.wqeId, completion.outcome, NowPs(), task->second.source,
+            task->second.destination, task->second.wire.request_id,
+            task->second.wire.transfer_length, segments.size(),
+            segments.empty() ? std::uint16_t{0} : segments.begin()->first,
+            segments.empty() ? std::uint16_t{0} : segments.rbegin()->first};
+        if (recent_terminals_.size() == 4096) {
+            recent_terminals_.pop_front();
+            ++terminal_history_evictions_;
+        }
+        recent_terminals_.push_back(diagnostic);
         if (completion.outcome != UbWorkOutcome::COMPLETED) {
+            const auto pending_dma = std::count_if(
+                pending_target_executions_.begin(), pending_target_executions_.end(),
+                [&](const auto& pending) { return pending.second.task_id == completion.wqeId; });
+            const auto service = endpoint_nodes_[task->second.source]
+                ->GetObject<UbController>()->GetCtpTransportService();
+            std::cerr << "[NS3_UB_NET_TERMINAL_FAILURE]";
+            PrintTerminalDiagnostic(diagnostic);
+            std::cerr << " pending_target_dma=" << pending_dma
+                      << " source_retransmissions=" << service->GetRetransmissionCount()
+                      << " source_retry_exhaustions=" << service->GetRetransmissionExhaustedCount()
+                      << std::endl;
             ubnet::UdmaWireHeader wire{};
             wire.magic = ubnet::kUdmaWireMagic;
             wire.version = ubnet::kUdmaWireVersion;
@@ -1216,7 +1317,7 @@ class UbNetFabric {
          * the complete ns-3 scheduler once per synchronization quantum.  The
          * next real frame is scheduled relative to the then-current ns-3
          * clock, and the offset maps its callbacks back to protocol time. */
-        if (scheduled_packets_ == 0) {
+        if (scheduled_packets_ == 0 && pending_target_executions_.empty()) {
             time_offset_ps_ += static_cast<std::int64_t>(target - now);
             return;
         }
@@ -1233,7 +1334,10 @@ class UbNetFabric {
     std::vector<std::unordered_map<std::uint64_t, PartialWqe>> partial_wqes_;
     std::vector<std::optional<std::uint32_t>> last_native_tassn_;
     std::unordered_map<std::uint32_t, NativeTask> native_tasks_;
+    std::deque<NativeTerminalDiagnostic> recent_terminals_;
+    std::uint64_t terminal_history_evictions_{};
     std::map<TargetExecutionKey, PendingTargetExecution> pending_target_executions_;
+    std::uint64_t target_dma_drained_after_terminal_{};
     std::uint32_t next_native_task_id_{1};
     std::unordered_map<std::uint32_t, std::size_t> endpoint_by_node_;
     Ptr<Node> switch_node_;

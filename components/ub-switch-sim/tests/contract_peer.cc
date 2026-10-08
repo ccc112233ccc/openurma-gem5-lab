@@ -3,6 +3,7 @@
 #include "protocol/ub_net/udma_wire.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -23,6 +24,101 @@ void ZeroVolatile(volatile T& object)
     auto* bytes = reinterpret_cast<volatile std::uint8_t*>(&object);
     for (std::size_t i = 0; i < sizeof(T); ++i) bytes[i] = 0;
     object.timestamp = timestamp;
+}
+
+// A bounded protocol counterexample: retry exhaustion precedes a real target
+// completion. Keep both participants advancing after the initiator's error.
+int LateDma(net::Interface& interface, bool sender, const std::string& profile)
+{
+    const bool read=profile=="ctp-late-read";
+    const bool badLength=profile=="ctp-late-dma-bad-length";
+    const auto start = std::chrono::steady_clock::now();
+    std::uint64_t now=0, due=0;
+    unsigned errors=0, requests=0, acknowledgements=0;
+    bool link=false, sent=false;
+    net::UdmaWireHeader delayed{};
+    while (std::chrono::steady_clock::now()-start < std::chrono::seconds(15)) {
+        net::UbNetOutSync(&interface,now);
+        const bool sendRequest=sender && link && !sent;
+        const bool sendAck=!sender && due && now>=due && !acknowledgements;
+        if (sendRequest || sendAck) {
+            auto* out=net::UbNetOutAlloc(&interface,now);
+            if(out) {
+                ZeroVolatile(out->frame);
+                out->frame.sequence=200;
+                out->frame.source_eid=sender ? 0x101 : 0x202;
+                out->frame.destination_eid=sender ? 0x202 : 0x101;
+                out->frame.source_port=0;
+                net::UdmaWireHeader wire=sendAck ? delayed : net::UdmaWireHeader{};
+                if(sendRequest) {
+                    wire.magic=net::kUdmaWireMagic; wire.version=net::kUdmaWireVersion;
+                    wire.operation=static_cast<std::uint8_t>(read ? net::UdmaOperation::ReadRequest
+                                                               : net::UdmaOperation::Write);
+                    wire.flags=net::kUdmaWireLastFragment;
+                    wire.source_jetty=7; wire.destination_jetty=9;
+                    wire.segment=11; wire.remote_address=0x10000;
+                    wire.request_id=2000; wire.transfer_length=32; wire.payload_length=read ? 0 : 32;
+                } else {
+                    std::swap(wire.source_jetty,wire.destination_jetty);
+                    wire.operation=static_cast<std::uint8_t>(read ? net::UdmaOperation::ReadResponse
+                                                               : net::UdmaOperation::WriteAck);
+                    wire.flags=net::kUdmaWireCtpSegment|net::kUdmaWireLastFragment;
+                    wire.payload_length=read ? 32 : 0;
+                    if(badLength) wire.transfer_length=31;
+                }
+                out->frame.length=sizeof(wire)+wire.payload_length;
+                auto* payload=reinterpret_cast<volatile std::uint8_t*>(out)+sizeof(net::Message);
+                const auto* bytes=reinterpret_cast<const std::uint8_t*>(&wire);
+                for(std::size_t i=0;i<sizeof(wire);++i) payload[i]=bytes[i];
+                for(unsigned i=0;i<wire.payload_length;++i) payload[sizeof(wire)+i]=0x5a;
+                net::UbNetOutSend(&interface,out,static_cast<std::uint8_t>(net::MessageType::Frame));
+                if(sendRequest) sent=true;
+                else { ++acknowledgements; std::cout<<"LATE_DMA_SENT now_ps="<<now<<std::endl; }
+            }
+        }
+        auto* in=net::UbNetInPoll(&interface,now);
+        if(in) {
+            const auto type=static_cast<net::MessageType>(net::UbNetInType(&interface,in));
+            if(type==net::MessageType::LinkState)
+                link=in->link.state==static_cast<std::uint8_t>(net::LinkState::Up);
+            else if(type==net::MessageType::Frame) {
+                if(in->frame.length<sizeof(net::UdmaWireHeader)) return 8;
+                net::UdmaWireHeader wire{};
+                auto* bytes=reinterpret_cast<std::uint8_t*>(&wire);
+                const auto* payload=reinterpret_cast<const volatile std::uint8_t*>(in)+sizeof(net::Message);
+                for(std::size_t i=0;i<sizeof(wire);++i) bytes[i]=payload[i];
+                if(wire.request_id!=2000 || wire.magic!=net::kUdmaWireMagic ||
+                   wire.version!=net::kUdmaWireVersion ||
+                   in->frame.length!=sizeof(wire)+wire.payload_length) return 8;
+                if(sender) {
+                    if(wire.operation!=static_cast<std::uint8_t>(net::UdmaOperation::RmaError) || ++errors!=1)
+                        return 8;
+                    std::cout<<"EXPECTED_RMA_ERROR now_ps="<<now<<std::endl;
+                } else {
+                    if(wire.operation!=static_cast<std::uint8_t>(read ? net::UdmaOperation::ReadRequest
+                                                                    : net::UdmaOperation::Write) ||
+                       wire.transfer_length!=32 || wire.payload_length!=(read ? 0U : 32U) ||
+                       ++requests!=1) return 8;
+                    delayed=wire; due=now+300000000;
+                    std::cout<<"TARGET_ACCEPTED now_ps="<<now<<" completion_due_ps="<<due<<std::endl;
+                }
+            }
+            net::UbNetInDone(&interface,in);
+        } else {
+            const auto next=std::min(net::UbNetInTimestamp(&interface),net::UbNetOutNextSync(&interface));
+            if(next>now && next!=std::numeric_limits<std::uint64_t>::max()) now=next;
+            std::this_thread::yield();
+        }
+        if(now>=400000000) {
+            const bool valid=sender ? errors==1 : requests==1 && acknowledgements==1;
+            std::cout<<"LATE_DMA_DIAGNOSTIC role="<<(sender ? "sender" : "receiver")
+                     <<" now_ps="<<now<<" errors="<<errors<<" requests="<<requests
+                     <<" acknowledgements="<<acknowledgements<<" valid="<<valid<<std::endl;
+            return valid ? 0 : 8;
+        }
+    }
+    std::cerr<<"LATE_DMA_DEADLINE role="<<(sender ? "sender" : "receiver")<<" now_ps="<<now<<'\n';
+    return 6;
 }
 
 int Run(const std::string& role, const std::string& socket,
@@ -58,6 +154,12 @@ int Run(const std::string& role, const std::string& socket,
     if (SimBricksBaseIfEstablish(&establish, 1) != 0 ||
         peer_intro.version != net::kVersion)
         return 4;
+
+    if(profile=="ctp-late-dma" || profile=="ctp-late-read" ||
+       profile=="ctp-late-dma-bad-length") {
+        if(sync_mode!="required") return 2;
+        return LateDma(interface,sender,profile);
+    }
 
     const bool ctp_order = profile == "ctp-order";
     const bool ctp_retrans = profile == "ctp-retrans";
@@ -428,7 +530,8 @@ int main(int argc, char** argv)
     if (argc != 5 && argc != 6) {
         std::cerr << "usage: ub-net-contract-peer sender|receiver SOCKET SHM "
                      "off|required [raw|ctp-order|ctp-retrans|ctp-taack-loss|"
-                     "ctp-exhaust|ctp-read-response-loss]\n";
+                     "ctp-exhaust|ctp-read-response-loss|ctp-late-dma|ctp-late-read|"
+                     "ctp-late-dma-bad-length]\n";
         return 2;
     }
     return Run(argv[1], argv[2], argv[3], argv[4],

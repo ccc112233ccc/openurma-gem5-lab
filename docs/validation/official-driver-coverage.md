@@ -113,13 +113,18 @@ case was nearly unchanged. These are first short measurements, not saturation
 or repeatability acceptance. The topology has two ports per endpoint; do not
 infer single-port utilization from the aggregate output.
 
-**Next timing-path blocker:** 1 MiB at400G failed in ns-3 with
-`target execution cannot resolve external WQE`. Source review finds terminal
-task deletion can precede late queued/in-flight CTP request arrival; the log
-does not yet distinguish the precise terminal cause. Add task/TA/outcome/tick
-diagnostics, then fix this lifetime boundary and add late-packet regression.
-Do not mask it by increasing RTO or ignoring an unknown task. Functional
-no-sync passing does not close this synchronized high-queue-delay failure.
+**Next timing-path blocker:** [CTP terminal/DMA record](ctp-terminal-drain-20261008.md).
+The synchronized1 MiB failure is now confirmed as retry exhaustion followed
+16.39628 us later by target execution referencing the deleted source task.
+A related accepted-target-DMA lifetime branch is repaired: pending work owns
+its callback/range/identity independently and strictly validates replies.
+Native delayed READ/WRITE pass with one failure, no successful completion,
+one drained target callback and no pending target DMA; malformed completion
+is rejected. All12 official no-sync regressions pass again in28.310 s.
+The first-arrival-after-terminal branch, response-cache anti-replay lifetime
+and remaining network in-flight tracking are still open. Do not mask them
+by increasing RTO or ignoring unknown tasks; no-sync passing is not timing
+acceptance.
 
 ## Multi-WQE pipeline acceptance (2026-10-08)
 
