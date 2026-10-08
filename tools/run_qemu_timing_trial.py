@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded timing-mode QEMU bandwidth trial; preserves commands and evidence."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -18,7 +19,7 @@ def write_bw_command(size, port, iterations=64, depth=64, post_list=16, cq_mod=1
 
 
 def bw_command(verb, size, port, iterations=64, depth=64, post_list=16, cq_mod=16,
-               inline_size=64):
+               inline_size=64, report_diagnostic=False):
     if verb not in ("write_bw", "read_bw", "send_bw"):
         raise ValueError("unsupported bandwidth verb")
     if min(size, port, iterations, depth, post_list, cq_mod) <= 0:
@@ -38,7 +39,8 @@ def bw_command(verb, size, port, iterations=64, depth=64, post_list=16, cq_mod=1
     if verb == "read_bw":
         inline_size = 0  # Official perftest READ unconditionally disables inline.
     receive_depth = f" -R {depth}" if verb != "write_bw" else ""
-    return (f"LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest {verb} "
+    diagnostic_env = "UBSIM_BW_REPORT_DIAGNOSTIC=1 " if report_diagnostic else ""
+    return (f"{diagnostic_env}LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest {verb} "
             f"-d udma0 --eid_idx 0 --ctp -B -s {size} -P {port} "
             f"-J 1 -I {inline_size} -T {depth}{receive_depth} -n {iterations} -l {post_list} -Q {cq_mod} -p 0")
 
@@ -123,6 +125,8 @@ def parse_args(argv=None):
     p.add_argument("--drain-timeout", type=float, default=0,
                    help="optional bounded live drain observation before stopping processes")
     p.add_argument("--bw-verb", choices=("write_bw", "read_bw", "send_bw"), default="write_bw")
+    p.add_argument("--report-diagnostic", action="store_true",
+                   help="request existing-sample diagnostics from an explicitly selected instrumented initrd")
     p.add_argument("--iterations", "--write-iterations", dest="write_iterations", type=int, default=64)
     p.add_argument("--depth", "--write-depth", dest="write_depth", type=int, default=64)
     p.add_argument("--post-list", "--write-post-list", dest="write_post_list", type=int, default=16)
@@ -136,6 +140,8 @@ def parse_args(argv=None):
     p.add_argument("--read-sizes", type=int, nargs="+",
                    help="test separate READ sizes; continue after clean guest errors")
     args = p.parse_args(argv)
+    if args.report_diagnostic and args.user_read_scan:
+        p.error("report diagnostics require explicit-size bandwidth trials")
     for sizes in (args.sizes, args.read_sizes or []):
         if len(sizes) != len(set(sizes)):
             p.error("duplicate sizes would overwrite experiment evidence")
@@ -174,6 +180,12 @@ def main():
         print(f"{label}: rc={rc} wall={records[-1]['wall_seconds']:.3f}s", flush=True)
         return rc
     try:
+        initrd = Path(os.environ.get("UBSIM_INITRD", str(lab / "out/official-udma.cpio.gz")))
+        if args.report_diagnostic and "UBSIM_INITRD" not in os.environ:
+            raise ValueError("diagnostics require explicit UBSIM_INITRD; the regular image is not instrumented")
+        records.append(dict(label="input-image", path=str(initrd.resolve()),
+                            sha256=hashlib.sha256(initrd.read_bytes()).hexdigest(),
+                            report_diagnostic=args.report_diagnostic))
         if run("launch", ["./lab", "start-qemu-dual", "--timing"], 30):
             return 1
         launched = True
@@ -258,13 +270,18 @@ def main():
         for index, size in enumerate(args.sizes):
             command = bw_command(args.bw_verb, size, 21410 + index, args.write_iterations,
                                        args.write_depth, args.write_post_list, args.write_cq_mod,
-                                       args.write_inline)
+                                       args.write_inline, args.report_diagnostic)
             label = f"{args.bw_verb.removesuffix('_bw')}-{size}"
             if run(label, serial+["--stagger", "1", "--commands",
                      command, command+" -S 10.0.0.1"], args.timeout+10): return 1
             errors = validate_depth_output(
                 (args.output/f"{label}.txt").read_text(), args.write_depth,
                 size, args.write_iterations)
+            if args.report_diagnostic:
+                diagnostic_lines = re.findall(r"(?m)^\[UBSIM_BW_REPORT_DIAGNOSTIC\].*$",
+                    (args.output/f"{label}.txt").read_text())
+                if len(diagnostic_lines) != 2:
+                    errors.append("missing unique report diagnostic from both endpoints")
             records[-1]["validation_errors"] = errors
             if errors:
                 records[-1]["returncode"] = 1

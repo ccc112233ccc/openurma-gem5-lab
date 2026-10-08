@@ -62,6 +62,14 @@ attributes are also retained as a diagnostic, not explained away as ABI skew.
 
 ## SEND4 KiB: functional completion, timing gate rejected
 
+**Subsequent correction:** the rejection below was caused by an invalid audit
+assumption, not a proven statistics/clock bug. Runtime diagnosis in
+[the report-diagnostic record](perftest-bw-report-diagnostic-20261009.md)
+shows official SEND disables the server's peak but still adds its average.
+The combined peak therefore need not bound the combined average. Preserve the
+original investigation below as history; do not repeat its conclusion as the
+current status. This does not change the still-failing READ result.
+
 Evidence: `experiments/qemu-send-4k-depth512-long-20261009`, including an
 independent `acceptance.txt`. Required synchronization,400G configured port
 rate, `send_bw -B -s4096 -J1 -I64 -T512 -R512 -n16384 -l16 -Q16 -p0`.
@@ -75,9 +83,11 @@ The actual exchanged perftest row is peak1953.12 MiB/s, average2432.10 MiB/s,
 message rate0.622617 Mpps. Average converts numerically to2.5502416896 GB/s,
 but **is not an accepted bandwidth measurement**: average exceeds peak and the
 checker rejects it. In the current `calculate_opt_delta`, i=0/j=16383 includes
-the complete average interval. With common scale/units, taking its minimum
-per-operation interval requires peak>=average. Post-list16 and CQ16 do not
-explain the inconsistency.
+the complete average interval when peak calculation is enabled. The original
+analysis incorrectly assumed this applied to both endpoints: official SEND
+sets server `no_peak=1`, so that endpoint never executes this loop. Post-list16
+and CQ16 were not the cause, but the omitted automatic role-specific setting
+does explain the apparent inconsistency.
 
 Independent provenance inspection found the same SHA256 for the actual
 initramfs ELF, build ELF and manifest:

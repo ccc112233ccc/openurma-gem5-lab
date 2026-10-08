@@ -4,6 +4,14 @@ from run_qemu_timing_trial import (write_bw_command, validate_write_capabilities
 
 
 class WriteTrialParametersTest(unittest.TestCase):
+    def test_opt_in_report_diagnostic(self):
+        base = bw_command("send_bw", 4096, 21410)
+        self.assertEqual(bw_command("send_bw", 4096, 21410, report_diagnostic=True),
+                         "UBSIM_BW_REPORT_DIAGNOSTIC=1 " + base)
+        self.assertTrue(parse_args(["unused", "--report-diagnostic"]).report_diagnostic)
+        with self.assertRaises(SystemExit):
+            parse_args(["unused", "--report-diagnostic", "--user-read-scan"])
+
     def test_default_sizes_stay_within_advertised_message_capacity(self):
         self.assertEqual(parse_args(["unused-output"]).sizes, [4096, 65536])
         caps = "".join(f"--- UART {port} ---\nmax_jfs_depth : 1024\n"

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from check_qemu_write_trial import audit, AuditError
+from check_qemu_write_trial import audit, AuditError, peak_policy, check_report_diagnostic, command_config
 
 
 class AuditTests(unittest.TestCase):
@@ -243,6 +243,66 @@ class AuditTests(unittest.TestCase):
         result = audit(self.root)
         self.assertIsNone(result["advertised_size_compliance"])
         self.assertTrue(result["capability_warnings"])
+
+    def test_source_peak_rules(self):
+        self.assertEqual(peak_policy("send",20000)[0], [1,0])
+        for verb in ("send","write","read"):
+            self.assertEqual(peak_policy(verb,20001)[0], [1,1])
+        self.assertEqual(peak_policy("write",20000)[0], [0,0])
+
+    def test_send_aggregate_avg_may_exceed_client_peak_without_diagnostic(self):
+        self.set_verb("send")
+        self.replace("send-4096.txt", "1100.00 1000.00", "900.00 1000.00")
+        result=audit(self.root)
+        self.assertEqual(result["cases"][0]["endpoint_no_peak"], [1,0])
+
+    def test_write_enabled_peak_bound_preserved(self):
+        self.replace("write-4096.txt", "1100.00 1000.00", "900.00 1000.00")
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_unsupported_report_modes_rejected(self):
+        original=(self.root/"report.json").read_text()
+        for flag in ("--enable_imm", "-N", "-D 5", "--run_infinitely", "--unknown"):
+            self.write("report.json", original.replace("--ctp", "--ctp "+flag))
+            with self.subTest(flag=flag), self.assertRaises(AuditError): audit(self.root)
+
+    @staticmethod
+    def diagnostic(no_peak):
+        opt=64000 if no_peak else 1000
+        fields=dict(observation="existing_samples_only", api_type=2,bidirection=1,no_peak=no_peak,
+                    tposted0=100,array0=100,tcompleted0=64100 if no_peak else 1100,
+                    tcompleted_last=64100,completed_index=0 if no_peak else 63,
+                    iters_sum=64,cfg_iters=64,jettys=1,post_list=16,cq_mod=16,size=4096,
+                    opt_delta=opt,cpu_mhz=1,scale=1000000,cycles_sum=64000,
+                    peak_up=0 if no_peak else 4096000000,peak_down=opt*1048576,
+                    avg_up=262144000000,avg_down=67108864000,peak=0 if no_peak else 3.90625,avg=3.90625)
+        return "[UBSIM_BW_REPORT_DIAGNOSTIC] "+" ".join(f"{k}={v}" for k,v in fields.items())
+
+    def add_diagnostics(self):
+        self.set_verb("send")
+        self.replace("send-4096.txt", "1100.00 1000.00 0.100", "3.91 7.81 0.002000")
+        raw=(self.root/"send-4096.txt").read_text()
+        for port, np in ((3560,1),(3570,0)):
+            raw=raw.replace(f"__UBSIM_RC_{port}_123__=0", self.diagnostic(np)+f"\n__UBSIM_RC_{port}_123__=0")
+        self.write("send-4096.txt",raw)
+
+    def test_diagnostic_endpoint_arithmetic_and_summed_rounding(self):
+        self.add_diagnostics()
+        self.assertTrue(audit(self.root)["cases"][0]["report_diagnostics_checked"])
+
+    def test_diagnostic_bad_index_scale_arithmetic_or_sum_rejected(self):
+        self.add_diagnostics()
+        original=(self.root/"send-4096.txt").read_text()
+        for old,new in (("completed_index=0","completed_index=63"), ("no_peak=1","no_peak=0"),
+                        ("cpu_mhz=1","cpu_mhz=2"), ("avg_up=262144000000","avg_up=1"),
+                        ("cycles_sum=64000","cycles_sum=1"), ("3.91 7.81","3.91 8.00")):
+            self.write("send-4096.txt",original.replace(old,new))
+            with self.subTest(old=old), self.assertRaises(AuditError): audit(self.root)
+
+    def test_one_sided_diagnostic_rejected(self):
+        self.add_diagnostics()
+        self.replace("send-4096.txt",self.diagnostic(1),"")
+        with self.assertRaises(AuditError): audit(self.root)
 
 
 if __name__ == "__main__":

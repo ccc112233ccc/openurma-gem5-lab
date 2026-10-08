@@ -47,11 +47,16 @@ misleading performance results on an in-scope path still require fixes.
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
 Latest attempted timing gate: [READ/SEND high concurrency](read-send-timing-20261009.md).
-SEND4 KiB completes32768 WQEs with16 SQ wraps per endpoint, but its printed
-average exceeds peak, so timing acceptance fails. READ64 KiB/depth512 fails
-with native retry exhaustion; no bandwidth is reported. Preserve both failures
-and prioritize their native/runtime diagnostics before more size sweeps. Wall
-times137.081 s(SEND),136.903 s(READ). Do not call final error-drain a pass.
+SEND's previous peak/average rejection is now corrected by
+[runtime report diagnosis](perftest-bw-report-diagnostic-20261009.md): official
+SEND disables server peak but still sums its average. The diagnostic run
+reports2432.09 MiB/s =2.55023120384 GB/s,32768 completed WQEs and16 SQ wraps
+per endpoint; per-endpoint arithmetic and raw counters pass (wall135.876 s).
+Its two endpoint averaging windows differ, so this is the official tool's
+reported rate, not independently established common-window fabric goodput.
+READ64 KiB/depth512 still fails with native retry exhaustion; no bandwidth is
+reported. Prioritize its fast native response-queue counterexample before more
+full-system size sweeps. Prior READ wall136.903 s; error-drain is not a pass.
 The new capability preflight also confirms the official driver's fixed64 KiB
 `max_msg_size`; prior successful1 MiB trials are beyond that advertised limit,
 not a declaration of official1 MiB support. Their raw transfer evidence remains.

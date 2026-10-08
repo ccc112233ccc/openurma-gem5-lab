@@ -40,6 +40,19 @@ def command_config(command, role=None):
     require("urma_perftest" in args and len(verbs) == 1 and "-B" in args,
             "only explicit-size bidirectional write/read/send_bw is supported")
     config = {"verb": verbs[0]}
+    # Only modes whose reporting semantics are modeled below are accepted.
+    executable = args.index("urma_perftest")
+    require(all(token.startswith("LD_LIBRARY_PATH=") or token == "UBSIM_BW_REPORT_DIAGNOSTIC=1"
+                for token in args[:executable]), "unsupported command prefix")
+    remaining = args[executable + 2:]
+    value_flags = {"-s", "-n", "-T", "-J", "-l", "-Q", "-I", "-R", "-d", "--eid_idx", "-S", "-P", "-p", "-C"}
+    while remaining:
+        flag = remaining[0]
+        if flag in ("-B", "--ctp"):
+            remaining = remaining[1:]
+        else:
+            require(flag in value_flags and len(remaining) >= 2, f"unsupported command mode/option: {flag}")
+            remaining = remaining[2:]
     require(args.count("--ctp") == 1, "explicit CTP transport required")
     for flag, expected in (("-d", "udma0"), ("--eid_idx", "0")):
         require(args.count(flag) == 1 and args.index(flag) + 1 < len(args) and
@@ -67,6 +80,52 @@ def command_config(command, role=None):
             "SEND sizes above 4096 are outside the supported trial contract")
     require(not any(arg.startswith("-a") for arg in args), "scan commands not supported")
     return config
+
+
+def peak_policy(verb, iterations):
+    if iterations > 20000:
+        return [1, 1], "disabled on both endpoints (iterations > 20000)"
+    if verb == "send":
+        return [1, 0], "client-only peak; average and message rate combine both directions"
+    return [0, 0], "sum of both endpoint peaks; average combines both directions"
+
+
+def check_report_diagnostic(line, config, no_peak):
+    fields = dict(re.findall(r"(\w+)=([^\s]+)", line))
+    require(fields.get("observation") == "existing_samples_only", "unknown diagnostic observation scope")
+    def number(key):
+        require(key in fields, f"missing report diagnostic {key}")
+        value = float(fields[key])
+        require(math.isfinite(value), f"nonfinite report diagnostic {key}")
+        return value
+    def matches(key, expected):
+        require(math.isclose(number(key), expected, rel_tol=1e-12, abs_tol=1e-9), f"diagnostic arithmetic mismatch: {key}")
+    for key, expected in {"api_type": {"read": 0, "write": 1, "send": 2}[config["verb"]],
+                          "bidirection": 1, "no_peak": no_peak, "jettys": 1,
+                          "size": config["-s"], "iters_sum": config["-n"], "cfg_iters": config["-n"],
+                          "post_list": config["-l"], "cq_mod": config["-Q"],
+                          "completed_index": 0 if no_peak else config["-n"]-1}.items():
+        matches(key, expected)
+    scale = number("scale")
+    require(scale > 0, "diagnostic scale must be positive")
+    matches("scale", number("cpu_mhz") * 1e6)
+    cycles = number("tcompleted_last") - number("tposted0")
+    require(cycles > 0 and number("opt_delta") > 0, "invalid diagnostic cycle interval")
+    matches("cycles_sum", cycles)
+    matches("array0", number("tposted0"))
+    if no_peak:
+        matches("tcompleted_last", number("tcompleted0"))
+        matches("opt_delta", number("tcompleted0") - number("array0"))
+    matches("peak_up", (1-no_peak)*config["-s"]*scale)
+    matches("peak_down", number("opt_delta")*1048576)
+    matches("avg_up", config["-s"]*config["-n"]*scale)
+    matches("avg_down", cycles*1048576)
+    matches("peak", number("peak_up")/number("peak_down"))
+    matches("avg", number("avg_up")/number("avg_down"))
+    if not no_peak:
+        require(number("opt_delta") <= math.floor(cycles / config["-n"]),
+                "enabled peak minimum excludes the full interval candidate")
+    return number("peak"), number("avg"), config["-n"]*scale/cycles/1e6
 
 
 def size_compliance(directory, manifest, cases):
@@ -150,6 +209,8 @@ def audit(directory, verb=None):
         blocks = re.split(r"(?m)^--- UART (\d+) ---\s*$", raw)
         require(len(blocks) == 5, "expected exactly two UART blocks")
         values = []
+        diagnostics = []
+        no_peak, peak_scope = peak_policy(trial_verb, count)
         for index, expected_port in ((1, manifest.get("uart0")), (3, manifest.get("uart1"))):
             port, body = blocks[index:index + 2]
             require(port == expected_port, "UART/manifest mismatch")
@@ -177,17 +238,34 @@ def audit(directory, verb=None):
             row = rows[0]
             require((int(row[0]), int(row[1])) == (size, count), "size/iterations mismatch")
             peak, average, message_rate = float(row[2]), float(row[3]), float(row[4])
-            require(math.isfinite(peak) and math.isfinite(average) and 0 < average <= peak and
+            require(math.isfinite(peak) and math.isfinite(average) and average > 0 and peak >= 0 and
                     math.isfinite(message_rate) and message_rate >= 0,
                     "invalid bandwidth values")
+            if no_peak == [0, 0]:
+                require(average <= peak, "peak-enabled aggregate average exceeds peak")
+            elif no_peak == [1, 1]:
+                require(peak == 0, "peak must be zero when both endpoints disable peak")
+            else:
+                require(peak > 0, "client-only enabled SEND peak must be positive")
             values.append((peak, average, message_rate))
+            lines = [line for line in body.splitlines() if line.startswith("[UBSIM_BW_REPORT_DIAGNOSTIC]")]
+            require(len(lines) <= 1, "duplicate report diagnostics")
+            diagnostics.append(check_report_diagnostic(lines[0], config, no_peak[len(values)-1]) if lines else None)
         require(values[0] == values[1], "exchanged endpoint bandwidth rows differ")
         peak, average, message_rate = values[0]
+        if any(item is not None for item in diagnostics):
+            require(all(item is not None for item in diagnostics), "diagnostics missing on one endpoint")
+            sums = [sum(item[column] for item in diagnostics) for column in range(3)]
+            require(all(abs(value-total) <= precision for value,total,precision in
+                        zip(values[0], sums, (0.005001, 0.005001, 0.000000501))),
+                    "summed local diagnostics disagree with printed aggregate rounding")
         cases.append(dict(verb=trial_verb, size_bytes=size, iterations_per_endpoint=count, configured_sq_depth=depth,
                           configured_receive_depth=config.get("-R"),
                           inline_size=config["-I"],
                           peak_MiB_s=peak, average_MiB_s=average,
                           message_rate_Mpps=message_rate,
+                          peak_scope=peak_scope, endpoint_no_peak=no_peak,
+                          report_diagnostics_checked=diagnostics[0] is not None,
                           average_GB_s=average * 1048576 / 1e9,
                           aggregation="perftest -B combined directions, counted once"))
         expected_wqes += count
