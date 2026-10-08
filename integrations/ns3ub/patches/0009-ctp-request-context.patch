@@ -1,0 +1,156 @@
+--- a/src/unified-bus/model/ub-datatype.h
++++ b/src/unified-bus/model/ub-datatype.h
+@@ -757,6 +757,16 @@
+ class UbWqe : public Object {
+ public:
+     static TypeId GetTypeId(void);
++
++    // Simulator-only value context: copied into each request packet, never wire data.
++    void SetExternalContext(const std::vector<uint8_t>& value)
++    {
++        m_externalRequestContext = value;
++    }
++    const std::vector<uint8_t>& GetExternalContext() const
++    {
++        return m_externalRequestContext;
++    }
+ 
+     // ========== 构造函数 ==========
+     UbWqe()
+@@ -1222,6 +1232,7 @@
+ private:
+     // ========== 全局信息 ==========
+     uint32_t m_wqeId;   // WQE标识符（Node范围内唯一）。仅用于数据收集。
++    std::vector<uint8_t> m_externalRequestContext;
+     // ========== 任务描述信息 ==========
+     uint32_t m_src;     // 源节点标识符
+     uint32_t m_dest;    // 目的节点标识符
+@@ -1278,6 +1289,17 @@
+ class UbWqeSegment : public Object {
+ public:
+     static TypeId GetTypeId(void);
++
++    void SetExternalContext(const std::vector<uint8_t>& value, uint32_t offset)
++    {
++        m_externalRequestContext = value;
++        m_externalRequestOffset = offset;
++    }
++    const std::vector<uint8_t>& GetExternalContext() const
++    {
++        return m_externalRequestContext;
++    }
++    uint32_t GetExternalContextOffset() const { return m_externalRequestOffset; }
+ 
+     // ========== 构造函数 ==========
+     UbWqeSegment()
+@@ -1813,6 +1835,8 @@
+ private:
+     // ========== 任务描述信息 ==========
+     uint32_t m_src{0};                              // 源节点标识符
++    std::vector<uint8_t> m_externalRequestContext;
++    uint32_t m_externalRequestOffset{0};
+     uint32_t m_dest{0};                             // 目的节点标识符
+     bool m_hasSrcEntityId{false};
+     bool m_hasDstEntityId{false};
+--- a/src/unified-bus/model/ub-tag.h
++++ b/src/unified-bus/model/ub-tag.h
+@@ -5,6 +5,7 @@
+ #include <unordered_map>
+ #include <vector>
+ #include "ns3/tag.h"
++#include "ns3/abort.h"
+ 
+ namespace ns3 {
+ 
+@@ -14,6 +15,51 @@
+     NAK,
+     SACK,
+     CONTROL_FRAME
++};
++
++/** Simulator-only immutable-by-value request context, independent of source WQE lifetime.
++ * This tag is not a UB header and must never override decoded address/token/length.
++ */
++class UbExternalRequestTag : public Tag {
++public:
++    UbExternalRequestTag() = default;
++    UbExternalRequestTag(const std::vector<uint8_t>& context, uint32_t offset)
++        : m_context(context), m_offset(offset)
++    {
++        NS_ABORT_MSG_IF(context.size() > 4096, "external request context exceeds 4096 bytes");
++    }
++    static TypeId GetTypeId()
++    {
++        static TypeId tid = TypeId("ns3::UbExternalRequestTag")
++                               .SetParent<Tag>().AddConstructor<UbExternalRequestTag>();
++        return tid;
++    }
++    TypeId GetInstanceTypeId() const override { return GetTypeId(); }
++    uint32_t GetSerializedSize() const override { return 8 + m_context.size(); }
++    void Serialize(TagBuffer buffer) const override
++    {
++        buffer.WriteU32(m_offset);
++        buffer.WriteU32(m_context.size());
++        for (uint8_t byte : m_context) buffer.WriteU8(byte);
++    }
++    void Deserialize(TagBuffer buffer) override
++    {
++        m_offset = buffer.ReadU32();
++        const uint32_t size = buffer.ReadU32();
++        NS_ABORT_MSG_IF(size > 4096, "external request context exceeds 4096 bytes");
++        m_context.resize(size);
++        for (auto& byte : m_context) byte = buffer.ReadU8();
++    }
++    void Print(std::ostream& os) const override
++    {
++        os << "ExternalRequestContextBytes:" << m_context.size()
++           << " SegmentOffset:" << m_offset;
++    }
++    const std::vector<uint8_t>& GetContext() const { return m_context; }
++    uint32_t GetOffset() const { return m_offset; }
++private:
++    std::vector<uint8_t> m_context;
++    uint32_t m_offset{0};
+ };
+ 
+ /**
+--- a/src/unified-bus/model/protocol/ub-function.cc
++++ b/src/unified-bus/model/protocol/ub-function.cc
+@@ -1286,6 +1286,9 @@
+     // 创建新的 WQE 分段
+     Ptr<UbWqeSegment> segment = CreateObject<UbWqeSegment>();
+ 
++    segment->SetExternalContext(wqe->GetExternalContext(),
++                                      wqe->GetSize() - wqe->GetBytesLeft());
++
+     // 设置任务描述信息（从WQE复制）
+     segment->SetSrc(wqe->GetSrc());
+     segment->SetDest(wqe->GetDest());
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -153,6 +153,12 @@
+     }
+     UbFlowTag flowTag(segment->GetTaskId(), segment->GetWqeSize());
+     packet->AddPacketTag(flowTag);
++
++    if (!isAckResponse && !segment->GetExternalContext().empty())
++    {
++        packet->AddPacketTag(UbExternalRequestTag(segment->GetExternalContext(),
++                                                segment->GetExternalContextOffset()));
++    }
+ 
+     {
+         UbTransactionHeader taHeader;
+@@ -1780,6 +1786,12 @@
+     }
+ 
+     request->SetDport(CTP_WILDCARD_PORT);
++    UbExternalRequestTag externalContext;
++    if (packet->PeekPacketTag(externalContext))
++    {
++        request->SetExternalContext(externalContext.GetContext(),
++                                          externalContext.GetOffset());
++    }
+     if (receivePort != std::numeric_limits<uint32_t>::max() &&
+         (!RoutingTypeIsPerPacket(linkHeader.GetRoutingType()) || destinationPortExplicit))
+     {

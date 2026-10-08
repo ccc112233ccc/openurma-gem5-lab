@@ -1,0 +1,43 @@
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -1626,13 +1626,22 @@
+             if (opcode != UbTransactionOpcode::TAACK &&
+                 cnaHeader.GetMode() == 4 && cnaHeader.GetFecn() != 0)
+                 SendCongestionFeedback(localKey, receivePort);
+-            auto& txState = GetTransactionState(localKey);
+-            const uint32_t logicalTaSsn = ResolveWireTaSsn(txState, ackHeader.GetIniTaSsn());
+-            auto outstanding = txState.outstandingSegments.find(logicalTaSsn);
++            // A response can outlive a failed/retired source operation. Do not
++            // create an empty transaction or resolve a wire sequence through
++            // a null context. Search the existing peer and source-group state.
++            const auto findRequest = [&](const UbCtpEntityKey& key) -> Ptr<UbWqeSegment> {
++                auto* state = GetTransactionOwner()->FindCtpTransactionState(key);
++                if (state == nullptr || state->context == nullptr) return nullptr;
++                const auto ssn = ResolveWireTaSsn(*state, ackHeader.GetIniTaSsn());
++                auto found = state->outstandingSegments.find(ssn);
++                return found == state->outstandingSegments.end() ? nullptr : found->second;
++            };
++            Ptr<UbWqeSegment> outstandingRequest = findRequest(localKey);
++            if (outstandingRequest == nullptr)
++                outstandingRequest = findRequest(MakeSourceGroupKeyForRequest(localKey));
+             UbTransactionFields responseFields;
+-            if (outstanding != txState.outstandingSegments.end() &&
+-                outstanding->second != nullptr &&
+-                outstanding->second->GetType() == UbTransactionOpcode::ATOMIC_SYNC)
++            if (outstandingRequest != nullptr &&
++                outstandingRequest->GetType() == UbTransactionOpcode::ATOMIC_SYNC)
+             {
+                 UbTransactionExtensionHeader taid(UbTransactionHeaderKind::TAIDETAH);
+                 if (ackCandidate->GetSize() < taid.GetSerializedSize() ||
+@@ -1652,6 +1661,11 @@
+                           flowTag.GetFlowId(),
+                           traceTag);
+ 
++            // Simulator correlation also prevents an old packet aliasing a
++            // newly admitted operation after a wire sequence wraps.
++            if (outstandingRequest == nullptr ||
++                outstandingRequest->GetTaskId() != flowTag.GetFlowId()) return true;
++
+             Ptr<UbWqeSegment> response = CreateObject<UbWqeSegment>();
+             response->SetSrc(wireSrcNodeId);
+             response->SetDest(wireDstNodeId);

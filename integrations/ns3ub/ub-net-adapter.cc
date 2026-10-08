@@ -6,6 +6,7 @@
 #include "ns3/enum.h"
 #include "ns3/node.h"
 #include "ns3/packet.h"
+#include "ns3/map-scheduler.h"
 #include "ns3/ub-datalink.h"
 #include "ns3/ub-controller.h"
 #include "ns3/ub-ctp.h"
@@ -46,6 +47,27 @@ namespace ubnet = ubsim::proto::net;
 namespace {
 
 std::atomic<bool> running{true};
+
+// IsFinished() also reports true after Simulator::Stop(), even with queued
+// events. Observe the real scheduler queue instead; no event is classified or
+// removed here, including retransmission and background maintenance timers.
+class AdapterEventScheduler : public MapScheduler {
+  public:
+    static TypeId GetTypeId()
+    {
+        static TypeId tid = TypeId("ns3::UbAdapterEventScheduler")
+            .SetParent<MapScheduler>().AddConstructor<AdapterEventScheduler>();
+        return tid;
+    }
+    AdapterEventScheduler() { instance_ = this; }
+    ~AdapterEventScheduler() override { instance_ = nullptr; }
+    static bool QueueEmpty()
+    {
+        return instance_ != nullptr && instance_->IsEmpty();
+    }
+  private:
+    inline static AdapterEventScheduler* instance_ = nullptr;
+};
 constexpr std::size_t kPollBatch = 256;
 void StopProcess(int) { running.store(false); }
 
@@ -221,6 +243,18 @@ struct NativeTask {
     std::map<std::uint16_t, NativeSegment> segments;
 };
 
+// Simulator association metadata, carried by value with the native packet.
+// This replaces a target-side dereference of the source's live task table;
+// it is not a UB wire header and never overrides decoded address/length/token.
+struct ExternalRequestContext {
+    std::uint32_t magic{0x55424358};
+    std::uint32_t task_id{};
+    std::uint32_t source_eid{};
+    std::uint32_t destination_eid{};
+    std::uint64_t sequence{};
+    ubnet::UdmaWireHeader original{};
+};
+
 // Diagnostic history only: never used to admit, complete, or discard work.
 struct NativeTerminalDiagnostic {
     std::uint32_t task_id{};
@@ -296,6 +330,9 @@ class UbNetFabric {
           partial_wqes_(options.endpoints.size()),
           last_native_tassn_(options.endpoints.size())
     {
+        ObjectFactory scheduler;
+        scheduler.SetTypeId(AdapterEventScheduler::GetTypeId());
+        Simulator::SetScheduler(scheduler);
         for (std::size_t i = 0; i < endpoints_.size(); ++i) {
             endpoints_[i].socket = options_.endpoints[i].socket;
             endpoints_[i].eid = options_.endpoints[i].eid;
@@ -346,7 +383,8 @@ class UbNetFabric {
             for (auto& endpoint : endpoints_)
                 progress = Flush(endpoint, now) || progress;
             if (options_.lifecycle_sync &&
-                scheduled_packets_ == 0 && pending_target_executions_.empty() && OutputsEmpty() &&
+                scheduled_packets_ == 0 && pending_target_executions_.empty() &&
+                AdapterEventScheduler::QueueEmpty() && OutputsEmpty() &&
                 std::all_of(endpoints_.begin(), endpoints_.end(),
                     [](const Endpoint& endpoint) {
                         return endpoint.lifecycle_prepare;
@@ -398,7 +436,8 @@ class UbNetFabric {
                           << " endpoints=" << endpoints_.size() << '\n';
             }
             if (all_terminated && scheduled_packets_ == 0 &&
-                pending_target_executions_.empty() && OutputsEmpty()) break;
+                pending_target_executions_.empty() &&
+                AdapterEventScheduler::QueueEmpty() && OutputsEmpty()) break;
             if (!OutputsEmpty()) {
                 ++output_backpressure_;
                 if (!progress)
@@ -436,7 +475,8 @@ class UbNetFabric {
                 ++sync_steps_;
                 progress = true;
             } else if (!synchronized &&
-                       (scheduled_packets_ || !pending_target_executions_.empty())) {
+                       (scheduled_packets_ || !pending_target_executions_.empty() ||
+                        !AdapterEventScheduler::QueueEmpty())) {
                 // ns-3-UB owns periodic maintenance events, so an unbounded
                 // Simulator::Run() never drains. Advance one finite quantum
                 // and return to the process boundary to flush completed
@@ -509,6 +549,14 @@ class UbNetFabric {
                   << " native_wqes_failed=" << native_wqes_failed_
                   << " target_dma_drained_after_terminal=" << target_dma_drained_after_terminal_
                   << " pending_target_dma=" << pending_target_executions_.size()
+                  << " native_late_response_received=" << native_late_response_received_
+                  << " native_target_after_terminal=" << native_target_after_terminal_
+                  << " native_scheduler_runs=" << native_scheduler_runs_
+                  << " native_events_processed=" << native_events_processed_
+                  << " native_orphan_scheduler_runs=" << native_orphan_scheduler_runs_
+                  << " native_orphan_events_processed=" << native_orphan_events_processed_
+                  << " native_event_queue_empty=" << AdapterEventScheduler::QueueEmpty()
+                  << " idle_fast_forwards=" << idle_fast_forwards_
                   << " native_order_no=" << native_order_no_
                   << " native_order_relax=" << native_order_relax_
                   << " native_order_strong=" << native_order_strong_
@@ -637,6 +685,9 @@ class UbNetFabric {
             service->TraceConnectWithoutContext(
                 "LastPacketACKsNotify",
                 MakeCallback(&UbNetFabric::OnNativeSegmentComplete, this));
+            service->TraceConnectWithoutContext(
+                "CtpRecvNotify",
+                MakeCallback(&UbNetFabric::OnNativePacketReceived, this));
         }
         switch_node_ = CreateObject<Node>();
         switch_ = CreateObject<UbSwitch>();
@@ -878,6 +929,15 @@ class UbNetFabric {
         else if (order == OrderType::ORDER_STRONG) ++native_order_strong_;
         wqe->SetRemoteAddress(complete.wire.remote_address);
         wqe->SetRemoteTokenId(complete.wire.segment);
+        ExternalRequestContext context{};
+        context.task_id = task_id;
+        context.source_eid = complete.frame.source_eid;
+        context.destination_eid = complete.frame.destination_eid;
+        context.sequence = complete.frame.sequence;
+        context.original = complete.wire;
+        std::vector<std::uint8_t> context_bytes(sizeof(context));
+        std::memcpy(context_bytes.data(), &context, sizeof(context));
+        wqe->SetExternalContext(context_bytes);
         if (!complete.payload.empty())
             wqe->SetExplicitPayload(Create<Packet>(complete.payload.data(),
                                                    complete.payload.size()));
@@ -991,34 +1051,36 @@ class UbNetFabric {
     {
         if (request == nullptr) return completion(UbWorkExecutionResult{});
         const auto source_it = endpoint_by_node_.find(request->GetSrc());
-        auto task = native_tasks_.find(request->GetTaskId());
-        if (source_it == endpoint_by_node_.end() || task == native_tasks_.end()) {
-            LogMissingNativeTask("target-execute", request->GetTaskId(),
-                                 request->GetRequestTassn(), target);
-            throw std::runtime_error("target execution cannot resolve external WQE");
-        }
+        ExternalRequestContext context{};
+        const auto& context_bytes = request->GetExternalContext();
+        if (context_bytes.size() != sizeof(context))
+            throw std::runtime_error("target request lacks external association context");
+        std::memcpy(&context, context_bytes.data(), sizeof(context));
+        if (source_it == endpoint_by_node_.end() || context.magic != 0x55424358 ||
+            context.task_id != request->GetTaskId() ||
+            context.source_eid != endpoints_[source_it->second].eid ||
+            context.destination_eid != endpoints_.at(target).eid ||
+            request->GetDest() != endpoint_nodes_.at(target)->GetId() ||
+            TransactionOpcode(context.original.operation) != request->GetType())
+            throw std::runtime_error("invalid external request association context");
         const std::size_t source = source_it->second;
         const std::uint16_t ta_ssn = static_cast<std::uint16_t>(request->GetRequestTassn());
-        auto segment = task->second.segments.find(ta_ssn);
-        if (segment == task->second.segments.end())
-            throw std::runtime_error("target execution cannot resolve native segment");
-        ubnet::UdmaWireHeader wire{};
+        const auto offset = request->GetExternalContextOffset();
+        const auto bytes = request->GetLogicalBytes();
+        if (offset > context.original.transfer_length || bytes == 0 ||
+            bytes > context.original.transfer_length - offset ||
+            context.original.remote_address > UINT64_MAX - offset)
+            throw std::runtime_error("external request segment exceeds original range");
+        ubnet::UdmaWireHeader wire = context.original;
         wire.magic = ubnet::kUdmaWireMagic;
         wire.version = ubnet::kUdmaWireVersion;
-        wire.operation = task->second.wire.operation;
         wire.flags = ubnet::kUdmaWireCtpSegment |
                      ubnet::kUdmaWireLastFragment |
-                     (task->second.wire.flags & ubnet::kUdmaWireOrderMask);
-        wire.source_jetty = task->second.wire.source_jetty;
-        wire.destination_jetty = task->second.wire.destination_jetty;
-        wire.tpn = task->second.wire.tpn;
-        wire.segment = task->second.wire.segment;
-        wire.remote_address = task->second.wire.remote_address + segment->second.offset;
-        wire.immediate = task->second.wire.immediate;
-        wire.request_id = task->second.wire.request_id;
+                     (context.original.flags & ubnet::kUdmaWireOrderMask);
+        wire.remote_address = context.original.remote_address + offset;
         wire.ta_ssn = ta_ssn;
-        wire.transfer_length = segment->second.bytes;
-        wire.payload_offset = segment->second.offset;
+        wire.transfer_length = bytes;
+        wire.payload_offset = offset;
         if ((request->GetType() == UbTransactionOpcode::READ ||
              request->GetType() == UbTransactionOpcode::WRITE) &&
             (request->GetRemoteAddress() != wire.remote_address ||
@@ -1033,7 +1095,9 @@ class UbNetFabric {
         }
         wire.payload_length = static_cast<std::uint32_t>(payload.size());
         ubnet::Frame frame{};
-        frame.sequence = task->second.sequence;
+        frame.sequence = context.sequence;
+        if (native_tasks_.find(request->GetTaskId()) == native_tasks_.end())
+            ++native_target_after_terminal_;
         frame.source_eid = endpoints_[source].eid;
         frame.destination_eid = endpoints_[target].eid;
         frame.source_port = request->GetSport() < options_.ports ? request->GetSport() : 0;
@@ -1160,6 +1224,19 @@ class UbNetFabric {
         frame.source_port = 0;
         frame.destination_port = 0;
         QueueUdma(task->second.source, frame, wire, payload);
+    }
+
+    void OnNativePacketReceived(std::uint32_t, std::uint32_t, std::uint32_t destination_node,
+                                std::uint32_t, std::uint32_t, std::uint32_t,
+                                std::uint32_t, PacketType type, std::uint32_t,
+                                std::uint32_t task_id, UbPacketTraceTag)
+    {
+        if (type != PacketType::ACK || native_tasks_.contains(task_id)) return;
+        const auto terminal = std::find_if(recent_terminals_.rbegin(), recent_terminals_.rend(),
+            [task_id](const auto& record) { return record.task_id == task_id; });
+        if (terminal != recent_terminals_.rend() &&
+            endpoint_nodes_[terminal->source]->GetId() == destination_node)
+            ++native_late_response_received_;
     }
 
     void PrintTerminalDiagnostic(const NativeTerminalDiagnostic& record) const
@@ -1317,12 +1394,25 @@ class UbNetFabric {
          * the complete ns-3 scheduler once per synchronization quantum.  The
          * next real frame is scheduled relative to the then-current ns-3
          * clock, and the offset maps its callbacks back to protocol time. */
-        if (scheduled_packets_ == 0 && pending_target_executions_.empty()) {
+        if (scheduled_packets_ == 0 && pending_target_executions_.empty() &&
+            AdapterEventScheduler::QueueEmpty()) {
             time_offset_ps_ += static_cast<std::int64_t>(target - now);
+            ++idle_fast_forwards_;
             return;
         }
+        const bool orphan_events = scheduled_packets_ == 0 && pending_target_executions_.empty();
+        const auto events_before = Simulator::GetEventCount();
         Simulator::Schedule(PicoSeconds(target - now), [] { Simulator::Stop(); });
         Simulator::Run();
+        ++native_scheduler_runs_;
+        // Each bounded run processes our one horizon-stop event as well.
+        const auto processed = Simulator::GetEventCount() - events_before;
+        const auto model_events = processed > 0 ? processed - 1 : 0;
+        native_events_processed_ += model_events;
+        if (orphan_events) {
+            ++native_orphan_scheduler_runs_;
+            native_orphan_events_processed_ += model_events;
+        }
     }
 
     Options options_;
@@ -1338,6 +1428,13 @@ class UbNetFabric {
     std::uint64_t terminal_history_evictions_{};
     std::map<TargetExecutionKey, PendingTargetExecution> pending_target_executions_;
     std::uint64_t target_dma_drained_after_terminal_{};
+    std::uint64_t native_late_response_received_{};
+    std::uint64_t native_target_after_terminal_{};
+    std::uint64_t native_scheduler_runs_{};
+    std::uint64_t native_events_processed_{};
+    std::uint64_t native_orphan_scheduler_runs_{};
+    std::uint64_t native_orphan_events_processed_{};
+    std::uint64_t idle_fast_forwards_{};
     std::uint32_t next_native_task_id_{1};
     std::unordered_map<std::uint32_t, std::size_t> endpoint_by_node_;
     Ptr<Node> switch_node_;

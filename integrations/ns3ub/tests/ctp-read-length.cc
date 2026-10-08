@@ -18,6 +18,32 @@
 using namespace ns3;
 
 struct ReadLengthTest {
+    bool attachContext{true};
+    static std::vector<uint8_t> Context(unsigned id) {
+        return {0, 0xff, 0x55, 0xaa, static_cast<uint8_t>(id), 0, 0x7f};
+    }
+    static void TagValueRoundTrip() {
+        auto value=Context(42);
+        const auto expected=value;
+        auto packet=Create<Packet>(3);
+        packet->AddPacketTag(UbExternalRequestTag(value,4096));
+        auto copy=packet->Copy();
+        value.assign(100,0x11);
+        // Removing the original packet's tag must not invalidate a packet copy.
+        UbExternalRequestTag removed;
+        if(!packet->RemovePacketTag(removed)) throw std::runtime_error("missing original tag");
+        std::vector<uint8_t> serialized(copy->GetSerializedSize());
+        if(copy->Serialize(serialized.data(),serialized.size())==0)
+            throw std::runtime_error("packet serialization failed");
+        copy=nullptr;
+        auto restored=Create<Packet>(serialized.data(),serialized.size(),true);
+        UbExternalRequestTag recovered;
+        if(restored->GetSize()!=3 || !restored->PeekPacketTag(recovered) ||
+           recovered.GetContext()!=expected || recovered.GetOffset()!=4096)
+            throw std::runtime_error("request context is not a wire-neutral independent value");
+        auto empty=Create<Packet>();
+        if(empty->PeekPacketTag(recovered)) throw std::runtime_error("empty packet invented context");
+    }
     const std::vector<uint32_t> sizes{1,2,4,8,16,32,63,64,65,127,128,129,
                                       4095,4096,4097,4098,8193};
     std::vector<uint32_t> received, completed;
@@ -71,6 +97,12 @@ struct ReadLengthTest {
         if(id >= sizes.size()) throw std::runtime_error("unexpected task");
         const auto offset=received[id];
         const auto bytes=std::min(4096U,sizes[id]-offset);
+        if(attachContext) {
+            if(r->GetExternalContext()!=Context(id) || r->GetExternalContextOffset()!=offset)
+                throw std::runtime_error("READ request context or segment offset changed in transit");
+        } else if(!r->GetExternalContext().empty()) {
+            throw std::runtime_error("empty external context compatibility failed");
+        }
         if(r->GetType()!=UbTransactionOpcode::READ || r->GetPayloadBytes()!=0 ||
            r->GetLogicalBytes()!=bytes || r->GetResponseBytes()!=bytes ||
            r->GetRemoteAddress()!=Address(id)+offset || r->GetRemoteTokenId()!=123 ||
@@ -86,7 +118,6 @@ struct ReadLengthTest {
         done(UbWorkExecutionResult{});
     }
     void Run() {
-        Time::SetResolution(Time::PS);
         received.resize(sizes.size()); completed.resize(sizes.size());
         std::array<Ptr<Node>,2> hosts;
         auto fabric=CreateObject<Node>(); auto sw=CreateObject<UbSwitch>();
@@ -128,6 +159,13 @@ struct ReadLengthTest {
             w->SetSport(0); w->SetDport(CTP_WILDCARD_PORT); w->SetPriority(1);
             w->SetSrcEntityId(1); w->SetDstEntityId(1);
             w->SetRemoteAddress(Address(id)); w->SetRemoteTokenId(123);
+            if(attachContext) {
+                auto context=Context(id);
+                w->SetExternalContext(context);
+                context.assign(100,0x11);
+                if(w->GetExternalContext()!=Context(id))
+                    throw std::runtime_error("WQE context aliases caller storage");
+            }
             if(!ctrl->SubmitUrmaWqe(7,w,{})) throw std::runtime_error("submit");
             ctrl->GetCtpTransportService()->NotifyJettyWork(7);
         }
@@ -139,4 +177,9 @@ struct ReadLengthTest {
         Simulator::Destroy();
     }
 };
-int main() { ReadLengthTest test; test.Run(); }
+int main() {
+    Time::SetResolution(Time::PS);
+    ReadLengthTest::TagValueRoundTrip();
+    ReadLengthTest test; test.Run();
+    ReadLengthTest emptyContext; emptyContext.attachContext=false; emptyContext.Run();
+}

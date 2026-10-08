@@ -121,10 +121,17 @@ its callback/range/identity independently and strictly validates replies.
 Native delayed READ/WRITE pass with one failure, no successful completion,
 one drained target callback and no pending target DMA; malformed completion
 is rejected. All12 official no-sync regressions pass again in28.310 s.
-The first-arrival-after-terminal branch, response-cache anti-replay lifetime
-and remaining network in-flight tracking are still open. Do not mask them
-by increasing RTO or ignoring unknown tasks; no-sync passing is not timing
-acceptance.
+Follow-up [independent request/late response acceptance](ctp-request-context-20261009.md)
+removes target dependence on the live source map and gates idle fast-forward
+on the real scheduler queue. Native late-first, late READ/WRITE and malformed
+reply tests pass, including actual late response receipt. It also fixes a null
+context in late ACK parsing without creating/advancing a replacement context.
+All12 official no-sync regressions pass in29.452 s. The synchronized1 MiB
+repeat advances beyond the former failure but encounters target translation
+errors and unsupported `RmaError` completion handling. That remains open,
+together with retry timing and response-cache anti-replay lifetime. Do not
+mask these by increasing RTO or ignoring unknown tasks; no-sync passing is
+not timing acceptance.
 
 ## Multi-WQE pipeline acceptance (2026-10-08)
 

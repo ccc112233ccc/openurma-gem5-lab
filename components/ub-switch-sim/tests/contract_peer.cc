@@ -32,6 +32,7 @@ int LateDma(net::Interface& interface, bool sender, const std::string& profile)
 {
     const bool read=profile=="ctp-late-read";
     const bool badLength=profile=="ctp-late-dma-bad-length";
+    const bool lateFirst=profile=="ctp-late-first";
     const auto start = std::chrono::steady_clock::now();
     std::uint64_t now=0, due=0;
     unsigned errors=0, requests=0, acknowledgements=0;
@@ -99,7 +100,7 @@ int LateDma(net::Interface& interface, bool sender, const std::string& profile)
                                                                     : net::UdmaOperation::Write) ||
                        wire.transfer_length!=32 || wire.payload_length!=(read ? 0U : 32U) ||
                        ++requests!=1) return 8;
-                    delayed=wire; due=now+300000000;
+                    delayed=wire; due=lateFirst ? now : now+300000000;
                     std::cout<<"TARGET_ACCEPTED now_ps="<<now<<" completion_due_ps="<<due<<std::endl;
                 }
             }
@@ -109,7 +110,7 @@ int LateDma(net::Interface& interface, bool sender, const std::string& profile)
             if(next>now && next!=std::numeric_limits<std::uint64_t>::max()) now=next;
             std::this_thread::yield();
         }
-        if(now>=400000000) {
+        if(now>=(lateFirst ? 1000000000ULL : 400000000ULL)) {
             const bool valid=sender ? errors==1 : requests==1 && acknowledgements==1;
             std::cout<<"LATE_DMA_DIAGNOSTIC role="<<(sender ? "sender" : "receiver")
                      <<" now_ps="<<now<<" errors="<<errors<<" requests="<<requests
@@ -156,7 +157,7 @@ int Run(const std::string& role, const std::string& socket,
         return 4;
 
     if(profile=="ctp-late-dma" || profile=="ctp-late-read" ||
-       profile=="ctp-late-dma-bad-length") {
+       profile=="ctp-late-dma-bad-length" || profile=="ctp-late-first") {
         if(sync_mode!="required") return 2;
         return LateDma(interface,sender,profile);
     }
@@ -531,7 +532,7 @@ int main(int argc, char** argv)
         std::cerr << "usage: ub-net-contract-peer sender|receiver SOCKET SHM "
                      "off|required [raw|ctp-order|ctp-retrans|ctp-taack-loss|"
                      "ctp-exhaust|ctp-read-response-loss|ctp-late-dma|ctp-late-read|"
-                     "ctp-late-dma-bad-length]\n";
+                     "ctp-late-dma-bad-length|ctp-late-first]\n";
         return 2;
     }
     return Run(argv[1], argv[2], argv[3], argv[4],

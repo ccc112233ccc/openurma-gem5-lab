@@ -35,6 +35,8 @@ ctp_cnp_pacing_patch="$runtime_lab/integrations/ns3ub/patches/0005-ctp-cnp-pacin
 ctp_recovery_patch="$runtime_lab/integrations/ns3ub/patches/0006-ctp-recovery-shared-wakeup.patch"
 ctp_feedback_patch="$runtime_lab/integrations/ns3ub/patches/0007-ctp-queue-feedback.patch"
 ctp_full_ta_patch="$runtime_lab/integrations/ns3ub/patches/0008-ctp-full-transaction-headers.patch"
+ctp_request_context_patch="$runtime_lab/integrations/ns3ub/patches/0009-ctp-request-context.patch"
+ctp_late_response_patch="$runtime_lab/integrations/ns3ub/patches/0010-ctp-late-response-retirement.patch"
 simbricks_base_source="$runtime_lab/components/udma-device-sim/simbricks_base_portable.c"
 expected_source_revision=d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b
 
@@ -64,6 +66,8 @@ ubsim_exec git -C "$source_root" restore --source "$expected_source_revision" --
     src/unified-bus/model/protocol/ub-ctp.cc \
     src/unified-bus/model/protocol/ub-ctp.h \
     src/unified-bus/model/protocol/ub-function.cc \
+    src/unified-bus/model/ub-datatype.h \
+    src/unified-bus/model/ub-tag.h \
     src/unified-bus/model/protocol/ub-header.cc
 ubsim_exec git -C "$source_root" apply --check "$ctp_retransmission_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_retransmission_patch"
@@ -81,6 +85,10 @@ ubsim_exec git -C "$source_root" apply --check "$ctp_feedback_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_feedback_patch"
 ubsim_exec git -C "$source_root" apply --check "$ctp_full_ta_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_full_ta_patch"
+ubsim_exec git -C "$source_root" apply --check "$ctp_request_context_patch"
+ubsim_exec git -C "$source_root" apply "$ctp_request_context_patch"
+ubsim_exec git -C "$source_root" apply --check "$ctp_late_response_patch"
+ubsim_exec git -C "$source_root" apply "$ctp_late_response_patch"
 ubsim_exec rm -f "$source_root/scratch/ub-gem5-adapter.cc" \
     "$source_root/src/unified-bus/model/ub-external-adapter-protocol.h"
 ubsim_exec mkdir -p "$source_root/scratch/ubsim-ub-net"

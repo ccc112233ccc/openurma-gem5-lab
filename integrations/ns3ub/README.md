@@ -1,5 +1,14 @@
 # ns-3-UB process adapters
 
+Request association now travels by value with native packets (patch0009), so
+target execution does not require a live source WQE. The adapter validates
+wire ranges and reply identity, drains accepted DMA independently, and checks
+the actual ns-3 scheduler before idle time fast-forward. Patch0010 ignores
+late replies without an outstanding source operation rather than creating a
+new context. See [lifetime acceptance](../../docs/validation/ctp-request-context-20261009.md)
+for fast failure contracts, official-driver evidence and remaining1 MiB timing
+gaps; these changes do not constitute complete error/replay recovery support.
+
 The production boundary is `ub-net-adapter.cc`. It connects independent UDMA
 device processes through the simulator-neutral UB-NET v1 ABI and uses native
 ns-3-UB `UbSwitch`, `UbPort`, and `UbLink` objects for routing, serialization,
