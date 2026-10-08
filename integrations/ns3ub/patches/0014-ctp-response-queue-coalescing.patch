@@ -1,0 +1,225 @@
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -30,6 +30,8 @@
+ #include <limits>
+ #include <sstream>
+ #include <string>
++#include <cstdlib>
++#include <iostream>
+ 
+ namespace ns3
+ {
+@@ -1347,6 +1349,24 @@
+ void
+ UbCtpTransportService::RequestActuallySent(uint32_t outPort, Ptr<Packet> packet, Time)
+ {
++    const auto queued = m_queuedResponses.find(packet->GetUid());
++    if (queued != m_queuedResponses.end()) {
++        const auto record = m_receivedRmaRequests.find(queued->second.key);
++        if (record != m_receivedRmaRequests.end() && record->second.response == queued->second.response) {
++            --record->second.queued;
++            // Residence in a local queue is not part of the peer's retry
++            // horizon. Retain the cached response after actual serialization.
++            record->second.expires = Simulator::Now() +
++                m_retransmissionTimeout * (m_maxRetransmissionAttempts + 1);
++        }
++        if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
++            std::cerr << "CTP_RESPONSE_WIRE node=" << m_node->GetId()
++                      << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                      << " tassn=" << queued->second.key.second
++                      << " task=" << queued->second.response->GetTaskId()
++                      << " dwell_ps=" << (Simulator::Now()-queued->second.enqueued).GetPicoSeconds() << '\n';
++        m_queuedResponses.erase(queued);
++    }
+     CtpRequestAttemptTag tag;
+     if (!packet->PeekPacketTag(tag) || m_node == nullptr || tag.node != m_node->GetId()) return;
+     const auto record = m_retransmissionRecords.find({tag.key, tag.tassn});
+@@ -1938,9 +1958,15 @@
+     for (auto record = m_receivedRmaRequests.begin();
+          record != m_receivedRmaRequests.end();)
+     {
+-        if (record->second.response != nullptr &&
++        if (record->second.response != nullptr && record->second.queued == 0 &&
+             record->second.expires <= Simulator::Now())
++        {
++            if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
++                std::cerr << "CTP_RESPONSE_EXPIRE node=" << m_node->GetId()
++                          << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                          << " tassn=" << record->first.second << " queued=" << record->second.queued << '\n';
+             record = m_receivedRmaRequests.erase(record);
++        }
+         else
+             ++record;
+     }
+@@ -1959,6 +1985,20 @@
+                 ++m_duplicateReadSuppressedCount;
+             if (record->second.response != nullptr)
+             {
++                if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
++                    std::cerr << "CTP_RESPONSE_DUP node=" << m_node->GetId()
++                              << " now_ps=" << Simulator::Now().GetPicoSeconds()
++                              << " tassn=" << receiveKey.second << " queued=" << record->second.queued << '\n';
++                record->second.expires = Simulator::Now() +
++                    m_retransmissionTimeout * (m_maxRetransmissionAttempts + 1);
++                // One queued response will answer all currently observed
++                // duplicate requests. Do not enqueue a full payload per RTO
++                // behind that same response. Once physically sent, a later
++                // duplicate remains entitled to a fresh loss-recovery replay.
++                if (record->second.queued != 0) {
++                    ++m_coalescedResponseReplayCount;
++                    return true;
++                }
+                 if (reliableWrite)
+                     ++m_duplicateTaAckReplayCount;
+                 else
+@@ -2487,6 +2527,7 @@
+                                                       static_cast<uint8_t>(lbSalt & 0xff));
+         Ptr<UbCtpTxQueue> queue = GetOrCreateQueue(key, outPort, key.vl);
+         RegisterQueueIfNeeded(queue, outPort, key.vl);
++        TrackQueuedResponse(packet, response, key);
+         queue->EnqueueAck(packet);
+ 
+         Ptr<UbPort> port = DynamicCast<UbPort>(m_node->GetDevice(outPort));
+@@ -2508,6 +2549,7 @@
+                                                       static_cast<uint8_t>(lbSalt & 0xff));
+         Ptr<UbCtpTxQueue> queue = GetOrCreateQueue(key, outPort, key.vl);
+         RegisterQueueIfNeeded(queue, outPort, key.vl);
++        TrackQueuedResponse(packet, response, key);
+         queue->EnqueueData(packet);
+         response->UpdateSentBytes(progressBytes);
+ 
+@@ -2545,6 +2587,7 @@
+     response->UpdateSentBytes(payloadBytes);
+     Ptr<UbCtpTxQueue> queue = GetOrCreateQueue(key, outPort, key.vl);
+     RegisterQueueIfNeeded(queue, outPort, key.vl);
++    TrackQueuedResponse(packet, response, key);
+     queue->EnqueueData(packet);
+     Ptr<UbPort> port = DynamicCast<UbPort>(m_node->GetDevice(outPort));
+     NS_ABORT_MSG_IF(port == nullptr, "CTP response replay requires valid out port");
+@@ -2553,6 +2596,32 @@
+ }
+ 
+ void
++UbCtpTransportService::ResponseDiscardedBeforeSend(Ptr<Packet> packet)
++{
++    const auto queued = m_queuedResponses.find(packet->GetUid());
++    if (queued == m_queuedResponses.end()) return;
++    const auto record = m_receivedRmaRequests.find(queued->second.key);
++    if (record != m_receivedRmaRequests.end() && record->second.response == queued->second.response) {
++        NS_ABORT_MSG_IF(record->second.queued == 0, "CTP response discard ownership underflow");
++        --record->second.queued;
++    }
++    m_queuedResponses.erase(queued);
++}
++
++void
++UbCtpTransportService::TrackQueuedResponse(Ptr<Packet> packet, Ptr<UbWqeSegment> response,
++                                         const UbCtpEntityKey& key)
++{
++    const auto identity = std::make_pair(key, response->GetRequestTassn());
++    auto record = m_receivedRmaRequests.find(identity);
++    if (record == m_receivedRmaRequests.end() || record->second.response != response) return;
++    const bool inserted = m_queuedResponses.emplace(packet->GetUid(),
++        QueuedResponse{identity, response, Simulator::Now()}).second;
++    NS_ABORT_MSG_IF(!inserted, "CTP response packet already queued");
++    ++record->second.queued;
++}
++
++void
+ UbCtpTransportService::CompleteFromTaAck(const UbCtpEntityKey& key,
+                                          uint32_t taSsn,
+                                          Ptr<UbWqeSegment> response)
+@@ -2802,6 +2871,7 @@
+     }
+     m_retransmissionRecords.clear();
+     m_receivedRmaRequests.clear();
++    m_queuedResponses.clear();
+     for (auto& [key, state] : m_congestionStates)
+     {
+         (void)key;
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -154,6 +154,8 @@
+     uint64_t GetActiveSentRetryCount() const { return m_retransmissionCount; }
+     uint64_t GetStaleSentRetryCount() const { return m_staleSentRetryCount; }
+     uint64_t GetCancelledRetryCount() const { return m_cancelledRetryCount; }
++    uint64_t GetCoalescedResponseReplayCount() const { return m_coalescedResponseReplayCount; }
++    void ResponseDiscardedBeforeSend(Ptr<Packet> packet);
+     bool CancelStaleQueuedRequest(Ptr<Packet> packet);
+     uint64_t GetRetransmissionExhaustedCount() const;
+     void SetDropNextTaAckForTest(bool enabled);
+@@ -296,6 +298,8 @@
+                                     UbCtpCongestionKey congestionKey);
+     bool SendResponseSegment(Ptr<UbWqeSegment> response, UbCtpEntityState& state);
+     bool ReplayResponseSegment(Ptr<UbWqeSegment> response, UbCtpEntityState& state);
++    void TrackQueuedResponse(Ptr<Packet> packet, Ptr<UbWqeSegment> response,
++                             const UbCtpEntityKey& key);
+     void CompleteFromTaAck(const UbCtpEntityKey& key,
+                            uint32_t taSsn,
+                            Ptr<UbWqeSegment> response);
+@@ -395,9 +399,17 @@
+     {
+         Ptr<UbWqeSegment> response;
+         Time expires{Seconds(0)};
++        uint32_t queued{0};
+     };
+     std::map<std::pair<UbCtpEntityKey, uint32_t>, ReceivedRmaRecord>
+         m_receivedRmaRequests;
++    struct QueuedResponse {
++        std::pair<UbCtpEntityKey, uint32_t> key;
++        Ptr<UbWqeSegment> response;
++        Time enqueued;
++    };
++    std::map<uint64_t, QueuedResponse> m_queuedResponses;
++    uint64_t m_coalescedResponseReplayCount{0};
+     bool m_dropNextTaAckForTest{false};
+     bool m_dropNextReadResponseForTest{false};
+     uint64_t m_duplicateWriteSuppressedCount{0};
+--- a/src/unified-bus/model/ub-port.cc
++++ b/src/unified-bus/model/ub-port.cc
+@@ -839,8 +839,7 @@
+     if (result == false) {
+         NS_LOG_WARN("Channel transmission failed! Packet dropped at Node " << GetNode()->GetId() << " Port " << m_portId);
+         ConfirmTransmitAttempt(attemptToken);
+-        m_flowControl->OnEgressCancelled(
+-            {packet, nullptr, m_currentInPortId, m_portId, m_currentPriority});
++        DiscardTransmitPacket(packet);
+         // Reset port state so it won't remain BUSY and try next packet
+         m_sendState = SendState::READY;
+         m_currentPkt = nullptr;
+@@ -1068,6 +1067,15 @@
+ void UbPort::PktRcvNotify(Ptr<Packet> p)
+ {
+     m_tracePktRcvNotify(p);
++}
++
++void UbPort::DiscardTransmitPacket(Ptr<Packet> packet)
++{
++    auto controller = GetNode()->GetObject<UbController>();
++    auto ctp = controller ? controller->PeekCtpTransportService() : nullptr;
++    if (ctp) ctp->ResponseDiscardedBeforeSend(packet);
++    m_flowControl->OnEgressCancelled(
++        {packet, nullptr, m_currentInPortId, m_portId, m_currentPriority});
+ }
+ 
+ void UbPort::TraComEventNotify(Ptr<Packet> p, Time t)
+--- a/src/unified-bus/model/ub-port.h
++++ b/src/unified-bus/model/ub-port.h
+@@ -267,6 +267,7 @@
+     {
+         m_faultCallBack = cb;
+     }
++    void DiscardTransmitPacket(Ptr<Packet> packet);
+     
+     void TransmitPacket(Ptr<Packet>, Time delay);
+ 
+--- a/src/unified-bus/model/ub-fault.cc
++++ b/src/unified-bus/model/ub-fault.cc
+@@ -702,6 +702,7 @@
+         Simulator::Schedule(Time(0), &UbPort::TransmitComplete, ubPort);
+         Simulator::Schedule(delay, &UbPort::TransmitPacketDetached, ubPort, packet);
+     } else {
++        ubPort->DiscardTransmitPacket(packet);
+         Simulator::Schedule(Time(0), &UbPort::TransmitComplete, ubPort);
+     }
+     return 0;

@@ -16,9 +16,23 @@
 #include <stdexcept>
 using namespace ns3;
 
+class RejectResponseLink : public UbLink {
+public:
+    uint32_t targetNode{};
+    unsigned rejected{};
+    bool TransmitStart(Ptr<Packet> p, Ptr<UbPort> src, Time t, uint64_t token) override {
+        UbFlowTag flow;
+        if (!rejected && src->GetNode()->GetId()==targetNode &&
+            p->PeekPacketTag(flow) && flow.GetFlowId()==77) {
+            ++rejected; return false;
+        }
+        return UbLink::TransmitStart(p,src,t,token);
+    }
+};
+
 struct WireRetryTest {
     enum Mode { INITIAL_QUEUE, RETRY_QUEUE_ACK, RETRY_QUEUE_ABORT, DROP_FIRST, DROP_ALL,
-                RETRY_INFLIGHT } mode;
+                RETRY_INFLIGHT, RESPONSE_QUEUE, RESPONSE_REJECT } mode;
     Ptr<UbCtpTransportService> sender;
     Ptr<UbPort> sourcePort;
     Ptr<UbController> source;
@@ -109,6 +123,7 @@ struct WireRetryTest {
         Require(source->SubmitUrmaWqe(7,w,{}),"submit failed"); sender->NotifyJettyWork(7);
     }
     void Run() {
+        Ptr<RejectResponseLink> rejectingLink;
         std::array<Ptr<Node>,2> hosts;
         auto fabric=CreateObject<Node>(); auto sw=CreateObject<UbSwitch>();
         fabric->AggregateObject(sw); sw->SetNodeType(UB_SWITCH);
@@ -127,7 +142,12 @@ struct WireRetryTest {
                 if(shared) p->SetAttribute("CbfcInitCreditCell",IntegerValue(0));
             }
             hosts[i]->AddDevice(hp); fabric->AddDevice(sp);
-            auto link=CreateObject<UbLink>();
+            Ptr<UbLink> link;
+            if(mode==RESPONSE_REJECT && i==1) {
+                rejectingLink=CreateObject<RejectResponseLink>();
+                rejectingLink->targetNode=hosts[i]->GetId();
+                link=rejectingLink;
+            } else link=CreateObject<UbLink>();
             link->SetAttribute("Delay",TimeValue(mode==RETRY_INFLIGHT ? MicroSeconds(3) : NanoSeconds(100)));
             hp->Attach(link); sp->Attach(link);
             ctrl->CreateCtpEntity(1,{0}); ctrl->FreezeCtpEntities(); hs->Init();
@@ -149,6 +169,23 @@ struct WireRetryTest {
         sender->SetMaxRetransmissionAttempts(2);
         sender->SetDropNextRequestForTest(mode==DROP_FIRST);
         sender->SetDropAllRequestsForTest(mode==DROP_ALL);
+        if(mode==RESPONSE_QUEUE) {
+            auto target=hosts[1]->GetObject<UbController>()->GetCtpTransportService();
+            target->SetRetransmissionTimeout(MicroSeconds(10));
+            target->SetMaxRetransmissionAttempts(2);
+            auto targetPort=DynamicCast<UbPort>(hosts[1]->GetDevice(0));
+            targetPort->SetOutputBlocked(true);
+            Simulator::Schedule(MicroSeconds(24),[this,target] {
+                Require(executed==1 && terminal==0,"queued response executed target again");
+                Require(target->GetCoalescedResponseReplayCount()==2,
+                        "two duplicate requests did not merge into queued original response");
+                Require(target->GetDuplicateReadResponseReplayCount()==0,
+                        "queued response duplicate allocated another replay");
+            });
+            Simulator::Schedule(MicroSeconds(25),[targetPort] {
+                targetPort->SetOutputBlocked(false); targetPort->TriggerTransmit();
+            });
+        }
         fn->CreateJetty(hosts[0]->GetId(),hosts[1]->GetId(),7);
         auto jetty=fn->GetJetty(7);
         jetty->SetWqeCompletionCallback(MakeCallback(&WireRetryTest::Complete,this));
@@ -222,14 +259,16 @@ struct WireRetryTest {
         Require(terminal==1 && outcome==(failed ? UbWorkOutcome::FAILED : UbWorkOutcome::COMPLETED),
                 "incorrect final outcome");
         Require(executed==(mode==DROP_ALL ? 0U : 1U),"duplicate target execution");
-        Require(sender->GetRetransmissionCount()==(mode==DROP_ALL ? 2U :
-                (mode==DROP_FIRST || mode==RETRY_INFLIGHT) ? 1U : 0U),
+        if(mode==RESPONSE_REJECT) Require(rejectingLink->rejected==1,
+                                         "response rejection path was not exercised");
+        Require(sender->GetRetransmissionCount()==((mode==DROP_ALL || mode==RESPONSE_QUEUE) ? 2U :
+                (mode==DROP_FIRST || mode==RETRY_INFLIGHT || mode==RESPONSE_REJECT) ? 1U : 0U),
                 "wrong actual retry count or stale timer resurrection");
         Require(sender->GetRetransmissionExhaustedCount()==(mode==DROP_ALL ? 1U : 0U),
                 "unexpected retry exhaustion");
         Require(sender->GetStaleSentRetryCount()==0,"a stale retry escaped onto the wire");
-        Require(sender->GetQueuedRetryCount()==(mode==DROP_ALL ? 2U :
-                (QueuedRetry() || mode==DROP_FIRST || mode==RETRY_INFLIGHT) ? 1U : 0U),
+        Require(sender->GetQueuedRetryCount()==((mode==DROP_ALL || mode==RESPONSE_QUEUE) ? 2U :
+                (QueuedRetry() || mode==DROP_FIRST || mode==RETRY_INFLIGHT || mode==RESPONSE_REJECT) ? 1U : 0U),
                 "queued retry accounting differs from actual scheduled attempts");
         Require(sender->GetCancelledRetryCount()==(QueuedRetry() ? 1U : 0U),
                 "wrong cancellation count or an in-flight retry was cancelled");
@@ -252,7 +291,8 @@ int main() {
     Time::SetResolution(Time::PS);
     for(auto mode : {WireRetryTest::INITIAL_QUEUE, WireRetryTest::RETRY_QUEUE_ACK,
                     WireRetryTest::RETRY_QUEUE_ABORT, WireRetryTest::DROP_FIRST, WireRetryTest::DROP_ALL,
-                    WireRetryTest::RETRY_INFLIGHT}) {
+                    WireRetryTest::RETRY_INFLIGHT, WireRetryTest::RESPONSE_QUEUE,
+                    WireRetryTest::RESPONSE_REJECT}) {
         WireRetryTest test(mode); test.Run();
     }
     for(auto mode : {WireRetryTest::RETRY_QUEUE_ACK,WireRetryTest::RETRY_QUEUE_ABORT}) {

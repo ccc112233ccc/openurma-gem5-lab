@@ -512,6 +512,7 @@ class UbNetFabric {
         std::uint64_t ctp_retransmission_exhausted = 0;
         std::uint64_t ctp_retries_queued = 0, ctp_retries_active_sent = 0;
         std::uint64_t ctp_retries_stale_sent = 0, ctp_retries_cancelled = 0;
+        std::uint64_t ctp_response_replays_coalesced = 0;
         std::uint64_t duplicate_write_suppressed = 0;
         std::uint64_t duplicate_taack_replays = 0;
         std::uint64_t injected_taack_drops = 0;
@@ -530,6 +531,7 @@ class UbNetFabric {
             ctp_retries_active_sent += service->GetActiveSentRetryCount();
             ctp_retries_stale_sent += service->GetStaleSentRetryCount();
             ctp_retries_cancelled += service->GetCancelledRetryCount();
+            ctp_response_replays_coalesced += service->GetCoalescedResponseReplayCount();
             duplicate_write_suppressed += service->GetDuplicateWriteSuppressedCount();
             duplicate_taack_replays += service->GetDuplicateTaAckReplayCount();
             injected_taack_drops += service->GetInjectedTaAckDropCount();
@@ -595,6 +597,7 @@ class UbNetFabric {
                   << " ctp_retries_active_sent=" << ctp_retries_active_sent
                   << " ctp_retries_stale_sent=" << ctp_retries_stale_sent
                   << " ctp_retries_cancelled=" << ctp_retries_cancelled
+                  << " ctp_response_replays_coalesced=" << ctp_response_replays_coalesced
                   << " injected_ctp_request_drops="
                   << injected_ctp_request_drops
                   << " duplicate_write_suppressed=" << duplicate_write_suppressed

@@ -46,6 +46,15 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest partial model repair: [READ response queue coalescing](ctp-response-queue-20261009.md).
+N128's native18 failures are eliminated without changing RTO/rate; N512 still
+has56 failed WQEs and remains unaccepted. Queued duplicate responses are merged,
+actual send and ordinary discard release ownership, and real response-loss
+recovery remains tested. Ten real-port cases pass; official no-sync QEMU12/12
+regression passes (suite29.620 s, whole35.50 s). Old-request TTL/generation and
+detached fault lifecycle remain limitations. Next: N512 end-to-end TA timing,
+not another unmodified failing full-system scan.
+
 Latest attempted timing gate: [READ/SEND high concurrency](read-send-timing-20261009.md).
 SEND's previous peak/average rejection is now corrected by
 [runtime report diagnosis](perftest-bw-report-diagnostic-20261009.md): official

@@ -40,6 +40,7 @@ ctp_late_response_patch="$runtime_lab/integrations/ns3ub/patches/0010-ctp-late-r
 ctp_remote_abort_patch="$runtime_lab/integrations/ns3ub/patches/0011-ctp-remote-abort.patch"
 ctp_wire_retry_patch="$runtime_lab/integrations/ns3ub/patches/0012-ctp-actual-send-retry.patch"
 ctp_cancel_retry_patch="$runtime_lab/integrations/ns3ub/patches/0013-ctp-stale-retry-cancel.patch"
+ctp_response_queue_patch="$runtime_lab/integrations/ns3ub/patches/0014-ctp-response-queue-coalescing.patch"
 simbricks_base_source="$runtime_lab/components/udma-device-sim/simbricks_base_portable.c"
 expected_source_revision=d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b
 
@@ -75,6 +76,8 @@ ubsim_exec git -C "$source_root" restore --source "$expected_source_revision" --
     src/unified-bus/model/protocol/ub-cbfc.h \
     src/unified-bus/model/protocol/ub-cbfc.cc \
     src/unified-bus/model/ub-port.cc \
+    src/unified-bus/model/ub-port.h \
+    src/unified-bus/model/ub-fault.cc \
     src/unified-bus/model/ub-datatype.h \
     src/unified-bus/model/ub-tag.h \
     src/unified-bus/model/protocol/ub-header.cc
@@ -104,6 +107,8 @@ ubsim_exec git -C "$source_root" apply --check "$ctp_wire_retry_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_wire_retry_patch"
 ubsim_exec git -C "$source_root" apply --check "$ctp_cancel_retry_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_cancel_retry_patch"
+ubsim_exec git -C "$source_root" apply --check "$ctp_response_queue_patch"
+ubsim_exec git -C "$source_root" apply "$ctp_response_queue_patch"
 ubsim_exec rm -f "$source_root/scratch/ub-gem5-adapter.cc" \
     "$source_root/src/unified-bus/model/ub-external-adapter-protocol.h"
 ubsim_exec mkdir -p "$source_root/scratch/ubsim-ub-net"
