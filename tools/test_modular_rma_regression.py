@@ -5,7 +5,67 @@ from pathlib import Path
 from tools.run_modular_rma_regression import (
     last_gem5_tick, tick_delta, command, validate_depth_output, validate_bw_scan,
     OUTSTANDING_CASES, BOUNDARY_CASES, MULTI_CASES,
+    TIMING_SEND_CASES, validate_fences, collect_fence_deltas,
 )
+
+
+class FenceTests(unittest.TestCase):
+    def logs(self, pairs=1):
+        result = {}
+        for name in ("host0", "host1", "udma0", "udma1", "network"):
+            tag = ("UB_HOST_FENCE" if name.startswith("host") else
+                   "UDMA_FENCE" if name.startswith("udma") else "NS3_UB_NET_FENCE")
+            result[name] = "".join(
+                f"[{tag}] generation={i+1} active={1-i%2} endpoints=2\n"
+                for i in range(pairs*2))
+        return result
+
+    def test_complete_single_or_multiple_pairs(self):
+        self.assertEqual(validate_fences(self.logs()), [])
+        self.assertEqual(validate_fences(self.logs(3)), [])
+
+    def test_reject_missing_logs_close_generation_and_endpoint(self):
+        self.assertTrue(validate_fences({}))
+        for name in self.logs():
+            for replacement in ("", self.logs()[name].splitlines()[0],
+                                self.logs()[name].replace("generation=2", "generation=9"),
+                                self.logs()[name].replace("active=0", "active=1")):
+                logs = self.logs(); logs[name] = replacement
+                self.assertTrue(validate_fences(logs), (name, replacement))
+        logs = self.logs(); logs["network"] = logs["network"].replace("endpoints=2", "endpoints=1")
+        self.assertTrue(validate_fences(logs))
+        logs = {name: text.replace("generation=2", "generation=1")
+                for name, text in self.logs().items()}
+        self.assertTrue(validate_fences(logs))
+
+    def test_delta_excludes_historical_fences_and_rejects_missing_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); log = root / "input.log"
+            log.write_bytes(b"old fence\nnew fence\n")
+            logs, errors = collect_fence_deltas({"host0": log}, {"host0": 10}, root, "case")
+            self.assertEqual(logs, {"host0": "new fence\n"})
+            self.assertEqual(errors, [])
+            self.assertEqual((root / "case.host0.log").read_bytes(), b"new fence\n")
+            for offset in (None, 999):
+                logs, errors = collect_fence_deltas({"host0": log}, {"host0": offset}, root, "bad")
+                self.assertTrue(errors)
+                self.assertEqual(logs["host0"], "")
+
+    def test_timing_send_commands(self):
+        self.assertEqual([c[2] for c in TIMING_SEND_CASES], [128, 1024, 4096])
+        for _, verb, size, n, batch, cq, bidi, scan in TIMING_SEND_CASES:
+            self.assertEqual((n, batch, cq, bidi), (1024, 64, 64, False))
+            cmd = command(verb, size, n, batch, cq, 21300, "10.0.0.1", bidi, True, scan, 512)
+            self.assertIn("UBSIM_DIST_SYNC=1", cmd)
+            self.assertIn("OPENURMA_DIST_SYNC=1", cmd)
+            self.assertIn("-T 512 -R 512", cmd)
+            self.assertIn("-J 1", cmd)
+            self.assertNotIn(" -B", cmd)
+
+    def test_no_sync_command_has_no_instrumentation_alias(self):
+        cmd = command("send_bw", 128, 1024, 64, 64, 21300, None,
+                      False, False, None, 512)
+        self.assertNotIn("DIST_SYNC=", cmd)
 
 
 class DepthTests(unittest.TestCase):

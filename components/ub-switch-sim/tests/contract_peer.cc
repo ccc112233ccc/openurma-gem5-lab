@@ -137,6 +137,7 @@ int LateDma(net::Interface& interface, bool sender, const std::string& profile)
 }
 
 #include "read_burst_contract.inc"
+#include "lifecycle_contract.inc"
 
 int Run(const std::string& role, const std::string& socket,
         const std::string& shm_path, const std::string& sync_mode,
@@ -171,6 +172,11 @@ int Run(const std::string& role, const std::string& socket,
     if (SimBricksBaseIfEstablish(&establish, 1) != 0 ||
         peer_intro.version != net::kVersion)
         return 4;
+
+    if (profile == "lifecycle-idle") {
+        if (sync_mode != "off") return 2;
+        return LifecycleIdle(interface);
+    }
 
     if (profile.rfind("ctp-read-burst-", 0) == 0) {
         if (sync_mode != "required") return 2;
@@ -560,7 +566,7 @@ int main(int argc, char** argv)
                      "ctp-late-dma-bad-length|ctp-late-first|"
                      "ctp-dma-error-read-active|ctp-dma-error-write-active|"
                      "ctp-dma-error-read-loss|ctp-dma-error-write-loss|"
-                     "ctp-dma-error-read-terminal|ctp-dma-error-write-terminal]\n";
+                     "ctp-dma-error-read-terminal|ctp-dma-error-write-terminal|lifecycle-idle]\n";
         return 2;
     }
     return Run(argv[1], argv[2], argv[3], argv[4],

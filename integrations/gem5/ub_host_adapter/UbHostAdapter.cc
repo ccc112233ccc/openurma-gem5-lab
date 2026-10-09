@@ -232,6 +232,7 @@ UbHostAdapter::serviceDevice(uint64_t deadline)
         serviceTime = std::max<uint64_t>(curTick(), absolute_message_time);
         const auto type = static_cast<host_proto::D2HType>(
             host_proto::UbHostD2HInType(&interface, message));
+        bool stopAtCommit = false;
         switch (type) {
           case host_proto::D2HType::MmioCompletion:
           {
@@ -262,11 +263,16 @@ UbHostAdapter::serviceDevice(uint64_t deadline)
                 message->lifecycle.generation == lifecycleGeneration) {
                 lifecycleCommitSeen = true;
                 lifecycleCommitEnabled = message->lifecycle.enabled != 0;
+                stopAtCommit = true;
             }
             break;
         }
         host_proto::UbHostD2HInDone(&interface, message);
         serviceTime = 0;
+        // The next ring entry can already be a new-epoch SYNC. Consuming it
+        // here would lose its horizon when toggleLifecycleSync resets epochs.
+        if (stopAtCommit)
+            break;
     }
     dmaOperations.erase(
         std::remove_if(dmaOperations.begin(), dmaOperations.end(),

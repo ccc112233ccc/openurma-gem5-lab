@@ -29,6 +29,15 @@ gem5 payload-integrity or full-JFC recovery acceptance; the QEMU byte probe
 has not yet been ported to gem5. Ready restore+OOB took12.927 s rather than
 207.205 s for the repaired cold boot.
 
+Requested timing follow-up: [single-port gem5 timing gate](gem5-timing-1port-20261009.md).
+Repaired pinned instrumentation ABI mapping, native background-event fence
+blocking and premature consumption of new-epoch SYNC. Five-participant logs
+now gate acceptance. Real SEND progresses (8 SQ completions per endpoint;
+16/16 native WQEs) but asymmetric exit drain still deadlocks with one tail
+host DMA pending. No synchronized bandwidth result is accepted. Next repair
+must keep gem5 device events progressing while a guest waits at the exit fence;
+do not treat native idle lifecycle tests as full-system timing acceptance.
+
 Latest functional increment: [QEMU data/queue/multi-resource matrix](qemu-functional-matrix-20261009.md).
 Added an official-API byte/guard/completion-identity probe, non-power-of-two
 boundary sweeps, four-Jetty independent-JFR cases, two-process isolation,

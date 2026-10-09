@@ -37,6 +37,72 @@ SYNC_SMOKE_CASES = [
     ("send_bw_128_sync", "send_bw", 128, 16, 16, 16, False, None),
 ]
 
+TIMING_SEND_CASES = [
+    (f"send_bw_{size}_timing", "send_bw", size, 1024, 64, 64, False, None)
+    for size in (128, 1024, 4096)
+]
+
+
+def fence_logs(root: Path) -> dict[str, Path]:
+    return {**{f"host{n}": root / f"node{n}/gem5.log" for n in range(2)},
+            **{f"udma{n}": root / f"udma-node{n}/udma.log" for n in range(2)},
+            "network": root / "ub-switch/gem5.log"}
+
+
+def validate_fences(logs: dict[str, str]) -> list[str]:
+    """Five participants must commit identical, complete enter/leave sequences.
+
+    Every transition increments generation (enter and leave have distinct IDs).
+    Absolute epoch origins need not match: each participant rebases at entry.
+    """
+    errors = []
+    reference = None
+    for name in ("host0", "host1", "udma0", "udma1", "network"):
+        tag = ("UB_HOST_FENCE" if name.startswith("host") else
+               "UDMA_FENCE" if name.startswith("udma") else "NS3_UB_NET_FENCE")
+        lines = [line for line in logs.get(name, "").splitlines() if f"[{tag}]" in line]
+        sequence = []
+        for line in lines:
+            fields = dict(re.findall(r"(\w+)=(\d+)", line))
+            if "generation" not in fields or "active" not in fields:
+                errors.append(f"{name}: malformed fence")
+                continue
+            sequence.append((int(fields["generation"]), int(fields["active"])))
+            if name == "network" and fields.get("endpoints") != "2":
+                errors.append("network: fence must include two endpoints")
+        if not sequence or len(sequence) % 2:
+            errors.append(f"{name}: missing complete enter/leave fence pair")
+        if any(active != (1 if i % 2 == 0 else 0)
+               for i, (_, active) in enumerate(sequence)):
+            errors.append(f"{name}: fence active sequence must alternate 1,0")
+        if any(b[0] <= a[0] for a, b in zip(sequence, sequence[1:])):
+            errors.append(f"{name}: fence generations must increase")
+        if reference is None:
+            reference = sequence
+        elif sequence != reference:
+            errors.append(f"{name}: fence generations/targets differ between participants")
+    return errors
+
+
+def collect_fence_deltas(paths: dict[str, Path], offsets: dict[str, int | None],
+                         output: Path, prefix: str) -> tuple[dict[str, str], list[str]]:
+    logs, errors = {}, []
+    for name, path in paths.items():
+        start = offsets[name]
+        data = b""
+        try:
+            with path.open("rb") as stream:
+                if start is None or path.stat().st_size < start:
+                    errors.append(f"{name}: fence log missing at start or truncated")
+                else:
+                    stream.seek(start)
+                    data = stream.read()
+        except OSError as error:
+            errors.append(f"{name}: cannot read fence log: {error}")
+        (output / f"{prefix}.{name}.log").write_bytes(data)
+        logs[name] = data.decode(errors="replace")
+    return logs, errors
+
 # Explicit queue depth is essential: -l controls batching, not queue capacity.
 # Submitted operation count is 4x configured capacity, not a hardware wrap counter.
 OUTSTANDING_CASES = [
@@ -139,6 +205,9 @@ def command(verb: str, size: int, iterations: int, post_list: int,
         else ["-s", str(size)]
     )
     if dist_sync:
+        # Pinned UMDK guest binaries still read the historical instrumentation
+        # ABI name. Set both explicitly; fence validation proves it took effect.
+        parts.insert(0, "OPENURMA_DIST_SYNC=1")
         parts.insert(0, "UBSIM_DIST_SYNC=1")
     if bidirectional:
         parts.append("-B")
@@ -163,23 +232,26 @@ def main() -> int:
         help="guest simulator; QEMU functional runs do not expose gem5 tick timing",
     )
     parser.add_argument(
-        "--suite", choices=("full", "sync-smoke", "outstanding512", "boundaries", "multi"), default="full",
+        "--suite", choices=("full", "sync-smoke", "timing-send", "outstanding512", "boundaries", "multi"), default="full",
         help="full functional stress without a fine-grained fence, or a small synchronized ROI smoke suite",
     )
     args = parser.parse_args()
     if not 1 <= args.jettys <= 64:
         parser.error("--jettys must be between 1 and 64")
+    if args.suite == "timing-send" and args.jettys != 1:
+        parser.error("timing-send requires exactly one Jetty")
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "model-manifest.txt").write_text(
         (args.run_root / "run-manifest.txt").read_text()
     )
     suite_started = time.perf_counter()
     records = []
-    dist_sync = args.suite == "sync-smoke"
+    dist_sync = args.suite in ("sync-smoke", "timing-send")
     cases = {"full": FULL_CASES, "sync-smoke": SYNC_SMOKE_CASES,
+             "timing-send": TIMING_SEND_CASES,
              "outstanding512": OUTSTANDING_CASES,
              "boundaries": BOUNDARY_CASES, "multi": MULTI_CASES}[args.suite]
-    queue_depth = 512 if args.suite == "outstanding512" else (64 if args.suite in ("boundaries", "multi") else None)
+    queue_depth = 512 if args.suite in ("outstanding512", "timing-send") else (64 if args.suite in ("boundaries", "multi") else None)
     for index, (label, verb, size, iterations, post_list, cq_mod,
                 bidirectional, all_exponent) in enumerate(cases):
         port = 21300 + index
@@ -190,6 +262,9 @@ def main() -> int:
                                  port, "10.0.0.1", bidirectional, dist_sync,
                                  all_exponent, queue_depth, args.jettys)
         raw = args.output / f"{index:02d}-{label}.uart.txt"
+        paths = fence_logs(args.run_root) if dist_sync and args.simulator == "gem5" else {}
+        offsets = {name: path.stat().st_size if path.is_file() else None
+                   for name, path in paths.items()}
         ticks_before = (
             [
                 last_gem5_tick(args.run_root / f"node{node}" / "gem5.log")
@@ -228,6 +303,13 @@ def main() -> int:
                 validation_errors.append(f"expected two jetty counts {args.jettys}, got {observed}")
         if all_exponent is not None and verb.endswith("_bw"):
             validation_errors.extend(validate_bw_scan(result.stdout, all_exponent, iterations))
+        fence_evidence = []
+        if paths:
+            prefix = f"{index:02d}-{label}.fences"
+            logs, log_errors = collect_fence_deltas(paths, offsets, args.output, prefix)
+            validation_errors.extend(log_errors)
+            validation_errors.extend(validate_fences(logs))
+            fence_evidence = [f"{prefix}.{name}.log" for name in paths]
         record = {
             "case": label, "verb": verb, "size_bytes": size,
             "iterations": iterations, "post_list": post_list,
@@ -237,6 +319,7 @@ def main() -> int:
             "all_exponent": all_exponent,
             "wall_seconds": elapsed, "returncode": result.returncode,
             "validation_errors": validation_errors,
+            "fence_evidence": fence_evidence,
             "accepted": result.returncode == 0 and not validation_errors,
             "node0_sim_ticks": tick_deltas[0],
             "node1_sim_ticks": tick_deltas[1],

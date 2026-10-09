@@ -97,6 +97,24 @@ int main() {
         assert(std::remove(path) == 0);
     }
     { Fixture f; f.Commit(1); f.MustFail(); assert(!f.port.CommitSeen()); }
+    {
+        Fixture f; assert(f.port.SendPrepare(1, true)); f.Commit(1);
+        assert(PollNetworkBatch(f.port));
+        assert(f.port.CommitSeen());
+        // Simulate the peer having queued its first epoch SYNC immediately
+        // behind COMMIT. It must remain unconsumed until the reset is done.
+        auto& sync = f.Message(static_cast<net_proto::MessageType>(SIMBRICKS_PROTO_MSG_TYPE_SYNC));
+        sync.base.header.timestamp = 100000;
+        assert(!PollNetworkBatch(f.port));
+        assert(sync.base.header.own_type & SIMBRICKS_PROTO_MSG_OWN_CON);
+        f.interface.base.in_timestamp = f.interface.base.out_timestamp = 0;
+        f.interface.base.sync = true;
+        f.now = 100000;
+        f.port.FinishFence();
+        PollNetworkBatch(f.port);
+        assert(f.interface.base.in_timestamp == 100000);
+        assert(!(sync.base.header.own_type & SIMBRICKS_PROTO_MSG_OWN_CON));
+    }
     for (const auto generation : {0ULL, 2ULL}) {
         Fixture f; assert(f.port.SendPrepare(1, true));
         f.Commit(generation); f.MustFail(); assert(!f.port.CommitSeen());

@@ -400,9 +400,15 @@ class UbNetFabric {
             now = NowPs();
             for (auto& endpoint : endpoints_)
                 progress = Flush(endpoint, now) || progress;
-            if (options_.lifecycle_sync &&
+            // A lifecycle fence drains owned traffic, not the entire native
+            // scheduler: UbSwitchAllocator's periodic deadlock watchdog keeps
+            // that queue nonempty even before the first WQE. Keep all native
+            // events and absolute ns-3 time; only rebase the adapter epoch.
+            if (options_.lifecycle_sync && native_tasks_.empty() &&
                 scheduled_packets_ == 0 && pending_target_executions_.empty() &&
-                AdapterEventScheduler::QueueEmpty() && OutputsEmpty() &&
+                std::all_of(partial_wqes_.begin(), partial_wqes_.end(),
+                    [](const auto& partials) { return partials.empty(); }) &&
+                OutputsEmpty() &&
                 std::all_of(endpoints_.begin(), endpoints_.end(),
                     [](const Endpoint& endpoint) {
                         return endpoint.lifecycle_prepare;
@@ -448,9 +454,13 @@ class UbNetFabric {
                         AbsoluteNowPs());
                 }
                 lifecycle_active_ = enable;
+                // Subsequent SYNC publication belongs to the new epoch, not
+                // the absolute time sampled before this fence committed.
+                now = NowPs();
                 std::cerr << "[NS3_UB_NET_FENCE] generation=" << generation
                           << " active=" << (enable ? 1 : 0)
                           << " absolute_origin_ps=" << epoch_origin_ps_
+                          << " native_event_queue_empty=" << AdapterEventScheduler::QueueEmpty()
                           << " endpoints=" << endpoints_.size() << '\n';
             }
             if (all_terminated && scheduled_packets_ == 0 &&

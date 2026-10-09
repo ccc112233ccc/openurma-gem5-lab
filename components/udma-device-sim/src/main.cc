@@ -783,6 +783,18 @@ class NetworkPort final : public device::NetworkInterface {
     std::uint64_t async_timestamp_jump_ps_{};
 };
 
+bool PollNetworkBatch(NetworkPort& network)
+{
+    bool progress = false;
+    // COMMIT is an epoch boundary, not another message in the drain batch.
+    // Leave all following messages (including hidden base SYNCs) on the ring
+    // until the main loop resets both protocol clocks and calls FinishFence.
+    for (std::size_t count = 0; count < kPollBatch && running.load() &&
+         !network.CommitSeen() && network.Poll(); ++count)
+        progress = true;
+    return progress;
+}
+
 bool SaveDeviceState(const std::string& path, const HostPort& host,
                      const NetworkPort& network, const device::UdmaModel& model)
 {
@@ -904,9 +916,7 @@ int Run(const Options& options)
         for (std::size_t count = 0;
              count < kPollBatch && running.load() && host.Poll(); ++count)
             progress = true;
-        for (std::size_t count = 0;
-             count < kPollBatch && running.load() && network.Poll(); ++count)
-            progress = true;
+        progress = PollNetworkBatch(network) || progress;
         while (network.FlushOne()) progress = true;
         if (options.lifecycle_sync && host.PrepareSeen() &&
             !prepare_forwarded && host.PendingEmpty() &&

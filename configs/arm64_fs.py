@@ -922,9 +922,9 @@ def main():
     # per-experiment (--restore-from) to skip the boot.
     switched_to_o3 = False
     while True:
-        # Adapter synchronization runs continuously in the C++ event queue.
-        # Old guest images may still contain dist-toggle-sync instrumentation;
-        # it is a compatibility no-op and never changes the adapter state.
+        # C++ owns synchronization between fences. The pinned gem5 bundle uses
+        # the older internal event spelling; both names represent the same
+        # drained lifecycle boundary, not different synchronization algorithms.
         event = (m5.simulate(kvm_max_run_slice_ticks)
                  if kvm_max_run_slice_ticks is not None else m5.simulate())
         cause = event.getCause()
@@ -932,7 +932,7 @@ def main():
                 cause == "simulate() limit reached":
             continue
         print(f"[arm64-fs] exited @ tick {m5.curTick()} because {cause}")
-        if cause == "ubsim lifecycle sync fence":
+        if cause in ("ubsim lifecycle sync fence", "openurma lifecycle sync fence"):
             if not hasattr(root.system, "external_udma"):
                 raise RuntimeError(
                     "lifecycle synchronization requires the external UDMA adapter"

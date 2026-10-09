@@ -1850,12 +1850,17 @@ launch_node() {
     if [[ -n "$checkpoint_root" ]]; then
         sync_args+=(--restore-from="$checkpoint_root/node$node-cpt")
     fi
+    # The pinned gem5 bundle still exposes these two internal OPENURMA names.
+    # Bridge the public UBSIM configuration explicitly; otherwise the guest's
+    # toggle instruction silently becomes a no-op despite ROI sync requested.
     ubsim_exec_detached_env \
         "M5_PATH=$m5_path" \
         "UBSIM_PIPE_DATA=$pipe_data" \
         "UBSIM_TRACE_PACKETS=$packet_trace" \
         "UBSIM_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
         "UBSIM_LIFECYCLE_SYNC=$lifecycle_sync_enabled" \
+        "OPENURMA_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
+        "OPENURMA_LIFECYCLE_SYNC=$lifecycle_sync_enabled" \
         "UBSIM_EXIT_AFTER_CHECKPOINT=1" \
         "UBSIM_UDMA_HOST_SOCKET=$external_udma_socket" \
         "UBSIM_UDMA_HOST_POLL_INTERVAL=$external_udma_poll_interval" \
