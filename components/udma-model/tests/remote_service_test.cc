@@ -28,14 +28,29 @@ namespace d = ubsim::device;
 struct Host final : d::HostInterface {
     std::deque<d::Completion> pending;
     std::size_t issued{};
-    void DmaRead(std::uint64_t, std::size_t length, d::ReadCompletion done) override {
+    bool address_pattern{};
+    std::unordered_map<std::uint64_t, std::uint8_t> written;
+    static std::uint8_t Pattern(std::uint64_t address) {
+        return static_cast<std::uint8_t>((address * 37) ^ (address >> 7) ^ (address >> 13));
+    }
+    void DmaRead(std::uint64_t address, std::size_t length, d::ReadCompletion done) override {
         ++issued;
-        pending.push_back([length, done = std::move(done)](bool ok) mutable {
-            done(ok, std::vector<std::uint8_t>(ok ? length : 0, 0x42));
+        pending.push_back([this, address, length, done = std::move(done)](bool ok) mutable {
+            std::vector<std::uint8_t> data(ok ? length : 0, 0x42);
+            if (address_pattern) for (std::size_t i = 0; i < data.size(); ++i)
+                data[i] = Pattern(address + i);
+            done(ok, std::move(data));
         });
     }
-    void DmaWrite(std::uint64_t, std::vector<std::uint8_t>, d::Completion done) override {
-        ++issued; pending.push_back(std::move(done));
+    void DmaWrite(std::uint64_t address, std::vector<std::uint8_t> data, d::Completion done) override {
+        ++issued;
+        pending.push_back([this, address, data = std::move(data), done = std::move(done)](bool ok) mutable {
+            if (ok) for (std::size_t i = 0; i < data.size(); ++i) {
+                if (address_pattern) assert(written.emplace(address + i, data[i]).second);
+                else written[address + i] = data[i];
+            }
+            done(ok);
+        });
     }
     void Finish(bool ok) {
         assert(!pending.empty());
@@ -108,6 +123,44 @@ struct Fixture {
 };
 
 int main() {
+    // Byte-level DMA splitting validation, not a guest or network-fragmentation
+    // acceptance: hold all host operations and complete them in reverse order.
+    for (bool write : {false, true}) {
+        for (std::uint32_t length : {1U, 4095U, 4096U, 4097U, 65535U, 65536U, 65537U}) {
+            Fixture f;
+            for (std::uint64_t page = 1; page <= 18; ++page) {
+                f.model.iotlb_[page] = page * 4096;
+                f.model.iotlb_[(std::uint64_t{1} << 63) | page] = page * 4096;
+            }
+            f.host.address_pattern = true;
+            auto request = f.Request(write, length);
+            request.remote_address = 8191;
+            std::vector<std::uint8_t> expected(length);
+            for (std::size_t i = 0; i < length; ++i)
+                expected[i] = Host::Pattern(request.remote_address + i);
+            if (write) request.bytes = expected;
+            f.model.Receive(request);
+            const auto chunks = (length + 4094U) / 4096U + 1U;
+            assert(f.host.pending.size() == chunks);
+            while (!f.host.pending.empty()) {
+                assert(f.net.frames.empty());
+                f.AssertBusy();
+                auto done = std::move(f.host.pending.back());
+                f.host.pending.pop_back();
+                done(true);
+            }
+            assert(f.net.frames.size() == 1);
+            const auto& reply = f.net.frames.front();
+            assert(reply.operation == (write ? d::Frame::Operation::WriteAck : d::Frame::Operation::ReadResponse));
+            if (write) {
+                assert(f.host.written.size() == length);
+                for (std::size_t i = 0; i < length; ++i)
+                    assert(f.host.written.at(request.remote_address + i) == expected[i]);
+            } else assert(reply.bytes == expected);
+            f.net.Finish(true);
+            f.AssertIdle();
+        }
+    }
     for (bool write : {false, true}) {
         for (bool dma_ok : {false, true}) for (bool send_ok : {false, true}) {
             Fixture f;

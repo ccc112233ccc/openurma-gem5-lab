@@ -605,6 +605,9 @@ class NetworkPort final : public device::NetworkInterface {
         for (std::size_t i = 0; i < wire.size(); ++i) destination[i] = wire[i];
         net_proto::UbNetOutSend(&interface_, message,
             static_cast<std::uint8_t>(net_proto::MessageType::Frame));
+        auto& counts = port_counts_[frame.source_port];
+        ++counts.tx_frames;
+        counts.tx_wire_bytes += wire.size();
         return true;
     }
 
@@ -633,6 +636,9 @@ class NetworkPort final : public device::NetworkInterface {
             frame.destination_eid = message->frame.destination_eid;
             frame.source_port = message->frame.source_port;
             frame.destination_port = message->frame.destination_port;
+            auto& counts = port_counts_[frame.destination_port];
+            ++counts.rx_frames;
+            counts.rx_wire_bytes += message->frame.length;
             frame.bytes.resize(message->frame.length);
             const auto* source = reinterpret_cast<volatile std::uint8_t*>(message) +
                                  sizeof(net_proto::Message);
@@ -731,7 +737,23 @@ class NetworkPort final : public device::NetworkInterface {
         return true;
     }
 
+    void DumpPorts(std::ostream& output) const
+    {
+        // Adapter frame counts, including UDMA wire headers; not physical
+        // link byte accounting, WQE counts, or proof of payload correctness.
+        for (const auto& [port, counts] : port_counts_)
+            output << "[UDMA_PORT_PROFILE] port=" << unsigned(port)
+                   << " tx_frames=" << counts.tx_frames
+                   << " tx_wire_bytes=" << counts.tx_wire_bytes
+                   << " rx_frames=" << counts.rx_frames
+                   << " rx_wire_bytes=" << counts.rx_wire_bytes << '\n';
+    }
+
   private:
+    struct PortCounts {
+        std::uint64_t tx_frames{}, tx_wire_bytes{}, rx_frames{}, rx_wire_bytes{};
+    };
+    std::map<std::uint8_t, PortCounts> port_counts_;
     struct PendingSend {
         device::Frame frame;
         std::vector<std::vector<std::uint8_t>> fragments;
@@ -1034,6 +1056,7 @@ int Run(const Options& options)
               << " last_unknown_queue_offset=0x" << std::hex
               << model.last_unknown_queue_offset() << std::dec
               << " ubase_errors=" << model.ubase_errors() << '\n';
+    network.DumpPorts(std::cerr);
     host.DumpPending(std::cerr);
     model.DumpProgress(std::cerr);
     if (!options.state_out.empty()) {

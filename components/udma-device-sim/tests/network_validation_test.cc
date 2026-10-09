@@ -5,6 +5,7 @@
 #undef main
 #include <array>
 #include <cassert>
+#include <sstream>
 #include <unistd.h>
 
 namespace {
@@ -58,6 +59,22 @@ struct Fixture {
 };
 }
 int main() {
+    {
+        Fixture f;
+        device::Frame frame{};
+        frame.source_port = 1;
+        assert(f.port.SendWire(frame, {1, 2, 3}));
+        assert(!f.port.SendWire(frame, {4, 5})); // occupied ring: not sent
+        f.Fragment(0, 2, false);
+        assert(f.port.Poll());
+        f.Fragment(2, 2, true);
+        assert(f.port.Poll());
+        std::ostringstream counts;
+        f.port.DumpPorts(counts);
+        const auto rx_bytes = 2 * (sizeof(net_proto::UdmaWireHeader) + 2);
+        assert(counts.str() == "[UDMA_PORT_PROFILE] port=0 tx_frames=0 tx_wire_bytes=0 rx_frames=2 rx_wire_bytes=" +
+            std::to_string(rx_bytes) + "\n[UDMA_PORT_PROFILE] port=1 tx_frames=1 tx_wire_bytes=3 rx_frames=0 rx_wire_bytes=0\n");
+    }
     {
         Fixture f;
         host_proto::Interface host_interface{};

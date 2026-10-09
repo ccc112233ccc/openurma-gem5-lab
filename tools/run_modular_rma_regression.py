@@ -47,6 +47,20 @@ OUTSTANDING_CASES = [
                                      ("batch512", 512, 512))
 ]
 
+# Fragment, inline and advertised maximum boundaries, including non-powers of 2.
+BOUNDARY_CASES = [
+    (f"{verb}_{size}_boundary", verb, size, 64, 1, 1, True, None)
+    for verb in ("send_bw", "write_bw", "read_bw")
+    for size in (1, 2, 63, 64, 65, 127, 128, 129, 4095, 4096,
+                 *(() if verb == "send_bw" else (4097, 65535, 65536)))
+]
+
+MULTI_CASES = [
+    (f"{verb}_{size}_multi", verb, size, 512, 16, 16, True, None)
+    for verb in ("send_bw", "write_bw", "read_bw")
+    for size in (128, 4096)
+]
+
 
 def validate_depth_output(output: str, depth: int, size: int,
                           iterations: int) -> list[str]:
@@ -104,16 +118,22 @@ def tick_delta(before: int | None, after: int | None) -> int | None:
 def command(verb: str, size: int, iterations: int, post_list: int,
             cq_mod: int, port: int, server: str | None,
             bidirectional: bool, dist_sync: bool,
-            all_exponent: int | None, queue_depth: int | None = None) -> str:
+            all_exponent: int | None, queue_depth: int | None = None,
+            jettys: int = 1) -> str:
     parts = [
         "LD_LIBRARY_PATH=/lib:/usr/lib", "urma_perftest", verb,
         "-d", "udma0", "--eid_idx", "0", "--ctp",
-        "-P", str(port), "-J", "1", "-I", "64",
+        "-P", str(port), "-J", str(jettys), "-I", "64",
         "-n", str(iterations), "-l", str(post_list), "-Q", str(cq_mod),
         "-p", "0",
     ]
     if queue_depth is not None:
         parts.extend(["-T", str(queue_depth), "-R", str(queue_depth)])
+    if jettys > 1:
+        # This perftest revision preposts jfr_depth receives per Jetty.
+        # A single shared JFR therefore overflows before traffic starts.
+        # Keep official share_jfr enabled, but allocate one JFR per Jetty.
+        parts.extend(["--jettys_pre_jfr", "1"])
     parts.extend(
         [f"-a{all_exponent}"] if all_exponent is not None
         else ["-s", str(size)]
@@ -137,15 +157,18 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("--fail-fast", action="store_true",
                         help="stop after a failed case instead of reusing possibly wedged guests")
+    parser.add_argument("--jettys", type=int, default=1)
     parser.add_argument(
         "--simulator", choices=("gem5", "qemu"), default="gem5",
         help="guest simulator; QEMU functional runs do not expose gem5 tick timing",
     )
     parser.add_argument(
-        "--suite", choices=("full", "sync-smoke", "outstanding512"), default="full",
+        "--suite", choices=("full", "sync-smoke", "outstanding512", "boundaries", "multi"), default="full",
         help="full functional stress without a fine-grained fence, or a small synchronized ROI smoke suite",
     )
     args = parser.parse_args()
+    if not 1 <= args.jettys <= 64:
+        parser.error("--jettys must be between 1 and 64")
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "model-manifest.txt").write_text(
         (args.run_root / "run-manifest.txt").read_text()
@@ -154,17 +177,18 @@ def main() -> int:
     records = []
     dist_sync = args.suite == "sync-smoke"
     cases = {"full": FULL_CASES, "sync-smoke": SYNC_SMOKE_CASES,
-             "outstanding512": OUTSTANDING_CASES}[args.suite]
-    queue_depth = 512 if args.suite == "outstanding512" else None
+             "outstanding512": OUTSTANDING_CASES,
+             "boundaries": BOUNDARY_CASES, "multi": MULTI_CASES}[args.suite]
+    queue_depth = 512 if args.suite == "outstanding512" else (64 if args.suite in ("boundaries", "multi") else None)
     for index, (label, verb, size, iterations, post_list, cq_mod,
                 bidirectional, all_exponent) in enumerate(cases):
         port = 21300 + index
         server_command = command(verb, size, iterations, post_list, cq_mod,
                                  port, None, bidirectional, dist_sync,
-                                 all_exponent, queue_depth)
+                                 all_exponent, queue_depth, args.jettys)
         client_command = command(verb, size, iterations, post_list, cq_mod,
                                  port, "10.0.0.1", bidirectional, dist_sync,
-                                 all_exponent, queue_depth)
+                                 all_exponent, queue_depth, args.jettys)
         raw = args.output / f"{index:02d}-{label}.uart.txt"
         ticks_before = (
             [
@@ -197,7 +221,11 @@ def main() -> int:
         valid_tick_deltas = [value for value in tick_deltas if value is not None]
         raw.write_text(result.stdout)
         validation_errors = (validate_depth_output(result.stdout, queue_depth,
-                             size, iterations) if queue_depth else [])
+                             size, iterations * args.jettys) if queue_depth else [])
+        if args.jettys > 1:
+            observed = re.findall(r"Number of jettys\s*:\s*(\d+)", result.stdout)
+            if observed != [str(args.jettys)] * 2:
+                validation_errors.append(f"expected two jetty counts {args.jettys}, got {observed}")
         if all_exponent is not None and verb.endswith("_bw"):
             validation_errors.extend(validate_bw_scan(result.stdout, all_exponent, iterations))
         record = {
@@ -205,6 +233,7 @@ def main() -> int:
             "iterations": iterations, "post_list": post_list,
             "cq_mod": cq_mod, "bidirectional": bidirectional,
             "queue_depth": queue_depth,
+            "jettys": args.jettys,
             "all_exponent": all_exponent,
             "wall_seconds": elapsed, "returncode": result.returncode,
             "validation_errors": validation_errors,

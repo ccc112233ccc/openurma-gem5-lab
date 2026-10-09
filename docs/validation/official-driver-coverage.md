@@ -14,6 +14,23 @@ Sources inspected:
 
 ## Current item 2 scope: performance paths (2026-10-08)
 
+Update 2026-10-09: the user has paused performance tuning and physical-rate
+matching. The active gate is QEMU no-sync functional correctness: SEND/READ/WRITE
+payload/completions/fragment boundaries; SQ/JFR/JFC wrap, batching,512 outstanding
+and backpressure; multi-Jetty/port routing, concurrency and isolation. Historical
+timing evidence below is retained but no longer drives the current work.
+
+Latest functional increment: [QEMU data/queue/multi-resource matrix](qemu-functional-matrix-20261009.md).
+Added an official-API byte/guard/completion-identity probe, non-power-of-two
+boundary sweeps, four-Jetty independent-JFR cases, two-process isolation,
+shared-JFR rotation and genuine native512-WQE concurrency. SEND4097 exposed
+wrong error classification; model now generates official raw2/sub1 length
+error before payload DMA/network submission. Full-JFC overflow remains open:
+it preserves unread CQEs and in-flight ownership but does not retry when CI
+advances or demonstrate the official error-event path. Do not equate it to
+the accepted CEQ credit or stalled-CQ-DMA tests, and do not mark the whole
+functional scope complete yet.
+
 The user's revised scope is authoritative: implement and validate the official
 driver paths needed for performance experiments, not every UB feature. The
 historical inventory below remains evidence, not an all-command completion gate.

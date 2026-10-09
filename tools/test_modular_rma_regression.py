@@ -4,11 +4,21 @@ from pathlib import Path
 
 from tools.run_modular_rma_regression import (
     last_gem5_tick, tick_delta, command, validate_depth_output, validate_bw_scan,
-    OUTSTANDING_CASES,
+    OUTSTANDING_CASES, BOUNDARY_CASES, MULTI_CASES,
 )
 
 
 class DepthTests(unittest.TestCase):
+    def test_boundaries_and_multi_commands(self):
+        self.assertEqual(len(BOUNDARY_CASES), 36)
+        self.assertEqual(len(MULTI_CASES), 6)
+        for _, verb, size, *_ in BOUNDARY_CASES:
+            self.assertLessEqual(size, 4096 if verb == "send_bw" else 65536)
+        cmd = command("read_bw", 4096, 512, 16, 16, 21300, None,
+                      True, False, None, 64, 4)
+        self.assertIn("-J 4", cmd)
+        self.assertIn("-T 64 -R 64", cmd)
+
     def test_scan_requires_all_sizes_once_on_both_nodes(self):
         rows = "".join(f"{1 << p} 64 0.00 1.00 0.01\n" for p in range(1, 21))
         text = "--- UART 3560 ---\n" + rows + "--- UART 3570 ---\n" + rows

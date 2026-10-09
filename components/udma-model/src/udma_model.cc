@@ -1861,6 +1861,24 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         ReleaseSqFetch(jetty_id, true);
         return;
     }
+    // SEND is a single transport message limited to 4096 bytes. Reject its
+    // descriptor before reading payload or entering the network adapter.
+    // Official UDMA ABI: LOCAL_OP_ERR (2), LOCAL_LENGTH_ERR (1), mapped by
+    // udma_u_get_cr_status() to URMA_CR_LOC_LEN_ERR (not raw status 1).
+    if ((wqe.opcode() == 0 || wqe.opcode() == 1) &&
+        (wqe.inline_payload() || wqe.sge_count() == 1)) {
+        const auto length = wqe.inline_payload() ? wqe.inline_length() :
+            wqe.first_sge().length;
+        if (length > 4096) {
+            const auto index = static_cast<std::uint16_t>(
+                (state->issue + decoded_wqebbs - 1U) & (jetty.depth - 1U));
+            ReserveSq(jetty_id, decoded_wqebbs, ordered);
+            CompleteSq(jetty_id, producer, decoded_wqebbs, index,
+                wqe.opcode(), length, wqe.immediate(), wqe.completion(), 2, 1);
+            ReleaseSqFetch(jetty_id, true);
+            return;
+        }
+    }
     if (wqe.inline_payload()) {
         if (wqe.inline_length() > raw.size() - 48) return fail();
         std::vector<std::uint8_t> payload(
@@ -1993,7 +2011,7 @@ UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t /*producer*/,
                       std::uint32_t wqebbs, std::uint16_t completed_index,
                       std::uint8_t opcode, std::uint32_t byte_count,
                       std::uint64_t immediate, bool completion_enabled,
-                      std::uint8_t status)
+                      std::uint8_t status, std::uint8_t substatus)
 {
     const auto pipeline = sq_pipelines_.find(jetty_id);
     if (pipeline == sq_pipelines_.end()) { ++ubase_errors_; return; }
@@ -2007,7 +2025,7 @@ UdmaModel::CompleteSq(std::uint32_t jetty_id, std::uint32_t /*producer*/,
         return;
     }
     *entry = SqCompletion{wqebbs, completed_index, opcode, byte_count,
-                          immediate, completion_enabled, true, status};
+                          immediate, completion_enabled, true, status, substatus};
     RetireSq(jetty_id);
 }
 
@@ -2051,7 +2069,7 @@ UdmaModel::RetireSq(std::uint32_t id)
         else WriteCqe(found->second.completion_queue, false, found->second.is_jetty,
                       entry.opcode, entry.index, id, entry.bytes,
                       found->second.user_queue, entry.immediate, std::move(finish),
-                      0, 0, 0, entry.status);
+                      0, 0, 0, entry.status, entry.substatus);
     }
     state->retiring = false;
 }
@@ -2063,7 +2081,7 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                     std::uint64_t user_data, std::uint64_t immediate,
                     Completion completion, std::uint32_t remote_id,
                     std::uint32_t remote_eid, std::uint32_t tpn,
-                    std::uint8_t status)
+                    std::uint8_t status, std::uint8_t substatus)
 {
     // Producer ownership spans the consumer read, CQE DMA and notification.
     // Different Jettys sharing one JFC must not choose the same producer slot.
@@ -2076,7 +2094,7 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
     if (!slot) slot = std::make_shared<JfcPublicationQueue>();
     slot->pending.emplace_back(
         [this, jfc_id, receive, jetty, opcode, entry_index, local_id,
-         byte_count, user_data, immediate, remote_id, remote_eid, tpn, status,
+         byte_count, user_data, immediate, remote_id, remote_eid, tpn, status, substatus,
          completion = std::move(completion)](Completion released) mutable {
             WriteCqeNow(jfc_id, receive, jetty, opcode, entry_index,
                 local_id, byte_count, user_data, immediate,
@@ -2086,7 +2104,7 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                     // another WQE or request destruction reentrantly.
                     completion(ok);
                     released(ok);
-                }, remote_id, remote_eid, tpn, status);
+                }, remote_id, remote_eid, tpn, status, substatus);
         });
     PumpCompletionWork();
 }
@@ -2192,7 +2210,7 @@ UdmaModel::WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
                     std::uint64_t user_data, std::uint64_t immediate,
                     Completion completion, std::uint32_t remote_id,
                     std::uint32_t remote_eid, std::uint32_t tpn,
-                    std::uint8_t status)
+                    std::uint8_t status, std::uint8_t substatus)
 {
     // The caller reserved one notification slot before beginning CQ DMA.
     // Keep that reservation until either no event is needed, or its MSI ends.
@@ -2205,7 +2223,7 @@ UdmaModel::WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
     const std::uint64_t ci = found->second.index_iova;
     ReadToken(found->second.token, ci, 4,
         [this, jfc_id, receive, jetty, opcode, entry_index, local_id,
-         byte_count, user_data, immediate, remote_id, remote_eid, tpn, status,
+         byte_count, user_data, immediate, remote_id, remote_eid, tpn, status, substatus,
          completion = std::move(completion), finish = std::move(finish)]
         // remote identity is captured separately because it is produced by
         // the peer packet rather than the local queue context.
@@ -2221,7 +2239,7 @@ UdmaModel::WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
             const bool owner = ((jfc.producer / jfc.depth) & 1U) == 0;
             const auto cqe = abi::MakeCqe(receive, jetty, owner, opcode,
                 entry_index, local_id, byte_count, user_data, immediate,
-                remote_id, remote_eid, tpn, status);
+                remote_id, remote_eid, tpn, status, substatus);
             const std::uint64_t address = jfc.queue_iova +
                 (jfc.producer & (jfc.depth - 1U)) * abi::kCqeBytes;
             jfc.consumer = consumer;

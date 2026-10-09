@@ -294,6 +294,7 @@ class UdmaModel {
         bool enabled{};
         bool ready{};
         std::uint8_t status{};
+        std::uint8_t substatus{};
     };
     struct SqPipeline {
         std::uint64_t issue{};
@@ -328,14 +329,14 @@ class UdmaModel {
                     std::uint32_t wqebbs, std::uint16_t completed_index,
                     std::uint8_t opcode, std::uint32_t byte_count,
                     std::uint64_t immediate, bool completion_enabled,
-                    std::uint8_t status = 0);
+                    std::uint8_t status = 0, std::uint8_t substatus = 0);
     void WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                   std::uint8_t opcode, std::uint16_t entry_index,
                   std::uint32_t local_id, std::uint32_t byte_count,
                   std::uint64_t user_data, std::uint64_t immediate,
                   Completion completion, std::uint32_t remote_id = 0,
                   std::uint32_t remote_eid = 0, std::uint32_t tpn = 0,
-                  std::uint8_t status = 0);
+                  std::uint8_t status = 0, std::uint8_t substatus = 0);
     void EmitCompletionEvent(std::uint32_t jfc_id, Completion completion);
     void WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
                      std::uint8_t opcode, std::uint16_t entry_index,
@@ -343,7 +344,7 @@ class UdmaModel {
                      std::uint64_t user_data, std::uint64_t immediate,
                      Completion completion, std::uint32_t remote_id,
                      std::uint32_t remote_eid, std::uint32_t tpn,
-                     std::uint8_t status);
+                     std::uint8_t status, std::uint8_t substatus = 0);
     void ProcessJfcPublications(std::uint32_t jfc_id);
     void ReleaseCompletionEventSlot();
     void PumpCompletionWork();

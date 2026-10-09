@@ -32,10 +32,13 @@ struct Host final : d::HostInterface {
     std::deque<Write> pending;
     std::unordered_map<std::uint64_t, std::vector<std::uint8_t>> memory;
     bool delay_cq{}, delay_eq{}, delay_msi{};
+    std::uint32_t cq_consumer{};
     std::size_t eq_writes{}, cq_writes{}, msi_writes{};
     void DmaRead(std::uint64_t address, std::size_t length, d::ReadCompletion done) override {
         assert(address == Ci && length == 4);
-        done(true, std::vector<std::uint8_t>(4));
+        std::vector<std::uint8_t> bytes(4);
+        for (unsigned i = 0; i < 4; ++i) bytes[i] = cq_consumer >> (8 * i);
+        done(true, std::move(bytes));
     }
     void DmaWrite(std::uint64_t address, std::vector<std::uint8_t> bytes, d::Completion done) override {
         const bool cq = address >= Cq && address < Cq + 8192;
@@ -108,6 +111,43 @@ struct Fixture {
 };
 
 int main() {
+    // Current JFC overflow is fail-closed, NOT CEQ-like credit backpressure.
+    // Do not silently equate a held CQ DMA callback with a full hardware CQ.
+    {
+        Fixture f;
+        f.model.ceqs_.clear();
+        f.model.jfc_contexts_.at(7).depth = 2;
+        auto& sq = f.model.jetty_contexts_[9];
+        sq.depth = 8; sq.completion_queue = 7; sq.is_jetty = true;
+        auto state = std::make_shared<d::UdmaModel::SqPipeline>();
+        f.model.sq_pipelines_[9] = state;
+        // Keep fetch ownership while injecting three already-executed WQEs.
+        state->fetching = true;
+        sq.busy = true;
+        for (unsigned i = 0; i < 2; ++i) {
+            f.model.ReserveSq(9, 1, false);
+            f.model.CompleteSq(9, i + 1, 1, i, 0, 8, 0, true);
+        }
+        assert(f.host.cq_writes == 2 && sq.consumer == 2);
+        const auto first = f.host.memory.at(Cq), second = f.host.memory.at(Cq + 64);
+        const auto errors = f.model.ubase_errors();
+        f.model.ReserveSq(9, 1, false);
+        f.model.CompleteSq(9, 3, 1, 2, 0, 8, 0, true);
+        state->fetching = false;
+        assert(f.host.cq_writes == 2 && sq.consumer == 2);
+        assert(f.model.jfc_contexts_.at(7).producer == 2);
+        assert(f.host.memory.at(Cq) == first && f.host.memory.at(Cq + 64) == second);
+        assert(state->publishing && state->completions.size() == 1);
+        assert(f.model.ubase_errors() == errors + 1);
+        assert(f.model.completion_event_slots_in_use_ == 0);
+        f.AssertBusy();
+        f.host.cq_consumer = 1;
+        f.model.AdvanceTime(f.model.now_ps_ + 1000000);
+        f.model.PumpCompletionWork();
+        f.model.RetireSq(9);
+        assert(f.host.cq_writes == 2 && sq.consumer == 2 && state->publishing);
+        f.AssertBusy(); // No automatic resume merely because guest CI advanced.
+    }
     // A quiet device may still have guest-unconsumed entries. Persist those
     // credits exactly; reject old checkpoints without the consumer field.
     {

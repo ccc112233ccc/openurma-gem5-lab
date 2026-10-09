@@ -273,9 +273,27 @@ and its measured host times are summarized in
 
 The same functional matrix can be run on the dual-QEMU path with
 `./lab qemu-rma-regression`. QEMU conservative synchronization is disabled,
-so this command records wall time and validates data movement but intentionally
+so this command records wall time and checks completion/results (not payload
+contents) but intentionally
 does not report gem5 virtual ticks. The current Apple Silicon result is in
 [`results/qemu-functional-regression-20260930.md`](results/qemu-functional-regression-20260930.md).
+
+Use `UBSIM_RMA_SUITE=outstanding512` for depth512 with batch/CQ1,16,512;
+`UBSIM_RMA_SUITE=boundaries` for non-power-of-two inline/fragment boundaries;
+or `UBSIM_RMA_SUITE=multi UBSIM_RMA_JETTYS=4` for four Jettys. A configured
+depth is not a measured in-flight high-water mark; perftest alone does not
+verify payload bytes or prove resource isolation.
+
+For byte-level checks, build `scripts/build/build-urma-integrity.sh` in the
+Linux builder, then use `python3 tools/run_qemu_integrity.py OUTPUT --suite
+boundaries` on shell-ready no-sync QEMU guests. Additional suites are `wrap`,
+`concurrent`, `shared`, `large` and `send-overlimit`. The last is an expected
+length-error test, not a successful oversized SEND. `large` explores RMA
+beyond the advertised capability; `shared` rotates Jettys rather than claiming
+simultaneous shared-JFR arrival ordering. On any failure, stop the experiment
+before reusing guests. See the
+[functional acceptance record](docs/validation/qemu-functional-matrix-20261009.md)
+for evidence and open full-JFC overflow semantics.
 
 Create a new coordinated shell snapshot only when both guests and the external
 device are idle:
