@@ -46,6 +46,15 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest user-requested result: [READ without -B](read-unidirectional-20261009.md).
+Official single-direction2 B–4 KiB plus64 KiB completes all13 cases in one
+required-sync session:client26624 SQ WQEs/server0,57344 READ TAs,26 source SQ
+wraps,observed source RMA peak436,live-work drain;wall181.155 s. Average4 KiB
+3.89512 GB/s and64 KiB49.23095 GB/s, measured without halving a bidirectional
+report. The two-port400G-per-port topology is unchanged. Runner/checker now
+strictly distinguish single-direction READ, reject mixed modes and validate
+asymmetric counters. Original n16384/batch256 parameters remain a separate gate.
+
 Latest accepted sweep/sensitivity: [READ2 B–4 KiB and link rate](read-small-sweep-20261009.md).
 All12 sizes complete continuously in one required-sync session, official
 READ-B/n2048/depth512/l16/Q16:49152 WQEs, each endpoint24 SQ wraps,

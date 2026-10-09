@@ -1,9 +1,26 @@
 import unittest
 from run_qemu_timing_trial import (write_bw_command, validate_write_capabilities,
-                                   bw_command, validate_bw_capabilities, parse_args)
+                                   bw_command, validate_bw_capabilities, parse_args,
+                                   validate_unidirectional_read_output)
 
 
 class WriteTrialParametersTest(unittest.TestCase):
+    def test_single_direction_read(self):
+        original = bw_command("read_bw", 4096, 21410, 2048, 512)
+        self.assertEqual(bw_command("read_bw", 4096, 21410, 2048, 512,
+                                   unidirectional_read=True), original.replace("-B ", ""))
+        self.assertTrue(parse_args(["unused", "--bw-verb", "read_bw",
+                                    "--unidirectional-read"]).unidirectional_read)
+        for options in ([], ["--bw-verb", "send_bw"],
+                        ["--bw-verb", "read_bw", "--report-diagnostic"],
+                        ["--bw-verb", "read_bw", "--user-read-scan"]):
+            with self.assertRaises(SystemExit):
+                parse_args(["unused", "--unidirectional-read"] + options)
+        output = "--- UART 3560 ---\n4096 2048 1.1 1.0 0.1\n--- UART 3570 ---\nJFS depth : 512\n4096 2048 1.1 1.0 0.1\n"
+        self.assertEqual(validate_unidirectional_read_output(output, 512, 4096, 2048), [])
+        self.assertTrue(validate_unidirectional_read_output(output.replace("JFS depth : 512", ""), 512, 4096, 2048))
+        self.assertTrue(validate_unidirectional_read_output(output.replace("--- UART 3560 ---", "--- UART 3560 ---\nJFS depth : 512"), 512, 4096, 2048))
+
     def test_opt_in_report_diagnostic(self):
         base = bw_command("send_bw", 4096, 21410)
         self.assertEqual(bw_command("send_bw", 4096, 21410, report_diagnostic=True),

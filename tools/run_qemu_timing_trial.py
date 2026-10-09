@@ -19,7 +19,9 @@ def write_bw_command(size, port, iterations=64, depth=64, post_list=16, cq_mod=1
 
 
 def bw_command(verb, size, port, iterations=64, depth=64, post_list=16, cq_mod=16,
-               inline_size=64, report_diagnostic=False):
+               inline_size=64, report_diagnostic=False, unidirectional_read=False):
+    if unidirectional_read and (verb != "read_bw" or report_diagnostic):
+        raise ValueError("single-direction mode supports only READ without report diagnostics")
     if verb not in ("write_bw", "read_bw", "send_bw"):
         raise ValueError("unsupported bandwidth verb")
     if min(size, port, iterations, depth, post_list, cq_mod) <= 0:
@@ -40,9 +42,26 @@ def bw_command(verb, size, port, iterations=64, depth=64, post_list=16, cq_mod=1
         inline_size = 0  # Official perftest READ unconditionally disables inline.
     receive_depth = f" -R {depth}" if verb != "write_bw" else ""
     diagnostic_env = "UBSIM_BW_REPORT_DIAGNOSTIC=1 " if report_diagnostic else ""
+    direction = "" if unidirectional_read else "-B "
     return (f"{diagnostic_env}LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest {verb} "
-            f"-d udma0 --eid_idx 0 --ctp -B -s {size} -P {port} "
+            f"-d udma0 --eid_idx 0 --ctp {direction}-s {size} -P {port} "
             f"-J 1 -I {inline_size} -T {depth}{receive_depth} -n {iterations} -l {post_list} -Q {cq_mod} -p 0")
+
+
+def validate_unidirectional_read_output(output, depth, size, iterations):
+    sections = re.split(r"(?m)^--- UART \d+ ---\s*$", output)[1:]
+    if len(sections) != 2:
+        return ["expected two UART transcripts"]
+    errors = []
+    number = r"\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+    for node, section in enumerate(sections):
+        depths = re.findall(r"JFS depth\s*:\s*(\d+)", section)
+        if depths != ([] if node == 0 else [str(depth)]):
+            errors.append(f"node{node}: unexpected single-direction READ depth header {depths}")
+        row = rf"(?m)^\s*{size}\s+{iterations}\s+{number}\s+{number}\s+{number}\s*$"
+        if len(re.findall(row, section)) != 1:
+            errors.append(f"node{node}: missing or duplicate complete bandwidth result")
+    return errors
 
 
 def observe_drain(root, timeout):
@@ -125,6 +144,8 @@ def parse_args(argv=None):
     p.add_argument("--drain-timeout", type=float, default=0,
                    help="optional bounded live drain observation before stopping processes")
     p.add_argument("--bw-verb", choices=("write_bw", "read_bw", "send_bw"), default="write_bw")
+    p.add_argument("--unidirectional-read", action="store_true",
+                   help="omit -B for explicit-size READ; server prints the client's exchanged result")
     p.add_argument("--report-diagnostic", action="store_true",
                    help="request existing-sample diagnostics from an explicitly selected instrumented initrd")
     p.add_argument("--iterations", "--write-iterations", dest="write_iterations", type=int, default=64)
@@ -140,6 +161,8 @@ def parse_args(argv=None):
     p.add_argument("--read-sizes", type=int, nargs="+",
                    help="test separate READ sizes; continue after clean guest errors")
     args = p.parse_args(argv)
+    if args.unidirectional_read and (args.bw_verb != "read_bw" or args.user_read_scan or args.report_diagnostic):
+        p.error("--unidirectional-read requires explicit-size read_bw without diagnostics")
     if args.report_diagnostic and args.user_read_scan:
         p.error("report diagnostics require explicit-size bandwidth trials")
     for sizes in (args.sizes, args.read_sizes or []):
@@ -149,7 +172,8 @@ def parse_args(argv=None):
         try:
             for size in args.sizes:
                 bw_command(args.bw_verb, size, 21410, args.write_iterations, args.write_depth,
-                                 args.write_post_list, args.write_cq_mod, args.write_inline)
+                                 args.write_post_list, args.write_cq_mod, args.write_inline,
+                                 unidirectional_read=args.unidirectional_read)
         except ValueError as error:
             p.error(str(error))
     return args
@@ -270,11 +294,14 @@ def main():
         for index, size in enumerate(args.sizes):
             command = bw_command(args.bw_verb, size, 21410 + index, args.write_iterations,
                                        args.write_depth, args.write_post_list, args.write_cq_mod,
-                                       args.write_inline, args.report_diagnostic)
+                                       args.write_inline, args.report_diagnostic,
+                                       args.unidirectional_read)
             label = f"{args.bw_verb.removesuffix('_bw')}-{size}"
             if run(label, serial+["--stagger", "1", "--commands",
                      command, command+" -S 10.0.0.1"], args.timeout+10): return 1
-            errors = validate_depth_output(
+            validate_output = (validate_unidirectional_read_output if args.unidirectional_read
+                               else validate_depth_output)
+            errors = validate_output(
                 (args.output/f"{label}.txt").read_text(), args.write_depth,
                 size, args.write_iterations)
             if args.report_diagnostic:

@@ -187,6 +187,68 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(result["cases"][0]["average_GB_s"], 1.048576)
         self.assertEqual(result["nodes"][0]["observed_rma_pending_peak"], 17)
 
+    def set_unidirectional_read(self):
+        self.set_verb("read")
+        self.replace("report.json", " -B", "")
+        self.replace("read-4096.txt", " Bidirectional", "")
+        raw = (self.root / "read-4096.txt").read_text()
+        self.write("read-4096.txt", raw.replace("JFS depth : 512\n", "", 1))
+        for key in ("native_wqes_submitted", "native_wqes_completed", "ctp_request_segments",
+                    "ctp_native_completions", "ctp_read_responses"):
+            self.replace("ns3.log", f"{key}=128", f"{key}=64")
+        self.replace("ns3.log", "payload_bytes=1048576", "payload_bytes=524288")
+        for key in ("sq_wqes", "sq_completions"):
+            self.replace("udma-node0-udma.log", f"{key}=64", f"{key}=0")
+
+    def test_unidirectional_read_counts_and_units(self):
+        self.set_unidirectional_read()
+        result = audit(self.root, "read", [4096])
+        self.assertFalse(result["bidirectional"])
+        self.assertEqual([n["wqes"] for n in result["nodes"]], [0, 64])
+        self.assertEqual(result["expected_fabric_wqes"], 64)
+        self.assertEqual(result["expected_application_bytes"], 262144)
+        self.assertEqual(result["cases"][0]["average_GB_s"], 1.048576)
+        self.assertEqual(result["cases"][0]["iterations_by_node"], [0, 64])
+
+    def test_unidirectional_read_rejects_wrong_counters_headers_diagnostics(self):
+        self.set_unidirectional_read()
+        changes = [("ns3.log", "native_wqes_completed=64", "native_wqes_completed=128"),
+                   ("ns3.log", "payload_bytes=524288", "payload_bytes=1048576"),
+                   ("ns3.log", "ctp_read_responses=64", "ctp_read_responses=128"),
+                   ("udma-node0-udma.log", "sq_wqes=0", "sq_wqes=64"),
+                   ("udma-node1-udma.log", "sq_completions=64", "sq_completions=0"),
+                   ("read-4096.txt", "JFS depth : 512\n", ""),
+                   ("read-4096.txt", "URMA_READ", "URMA_READ Bidirectional"),
+                   ("read-4096.txt", "URMA_READ", "[UBSIM_BW_REPORT_DIAGNOSTIC] fake\nURMA_READ")]
+        for name, old, new in changes:
+            original = (self.root / name).read_text()
+            with self.subTest(change=old):
+                self.write(name, original.replace(old, new))
+                with self.assertRaises(AuditError): audit(self.root)
+                self.write(name, original)
+
+    def test_unidirectional_other_verbs_rejected(self):
+        self.replace("report.json", " -B", "")
+        with self.assertRaises(AuditError): audit(self.root)
+        self.set_verb("send")
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_unidirectional_mixed_endpoint_direction_rejected(self):
+        self.set_unidirectional_read()
+        report = json.loads((self.root / "report.json").read_text())
+        report["records"][-1]["command"][-1] += " -B"
+        self.write("report.json", json.dumps(report))
+        with self.assertRaises(AuditError): audit(self.root)
+
+    def test_mixed_case_direction_rejected(self):
+        self.add_second_size()
+        self.set_verb("read")
+        report = json.loads((self.root / "report.json").read_text())
+        report["records"][-1]["command"] = [c.replace(" -B", "") for c in report["records"][-1]["command"]]
+        self.write("report.json", json.dumps(report))
+        with self.assertRaisesRegex(AuditError, "mixed traffic directions"):
+            audit(self.root)
+
     def test_read_cannot_pass_write_counters(self):
         self.set_verb("read", False)
         with self.assertRaises(AuditError): audit(self.root)

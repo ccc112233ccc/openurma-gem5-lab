@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only, fail-closed audit of bidirectional WRITE/READ/SEND QEMU trials.
+"""Read-only, fail-closed audit of bidirectional WRITE/READ/SEND or one-way READ.
 
 UMDK perftest prints MiB/s under its historical MB/sec heading. A -B row
 already aggregates both directions; the exchanged endpoint rows are NOT additive.
+Without -B, only the READ client posts work; the server prints its exchanged row.
 This audits final work counters, not whole-system checkpoint consistency.
 """
 import argparse
@@ -37,9 +38,12 @@ def equal(fields, key, expected):
 def command_config(command, role=None):
     args = shlex.split(command)
     verbs = [verb for verb in ("write", "read", "send") if f"{verb}_bw" in args]
-    require("urma_perftest" in args and len(verbs) == 1 and "-B" in args,
-            "only explicit-size bidirectional write/read/send_bw is supported")
-    config = {"verb": verbs[0]}
+    require("urma_perftest" in args and len(verbs) == 1,
+            "only explicit-size write/read/send_bw is supported")
+    require(args.count("-B") <= 1, "duplicate bidirectional flag")
+    config = {"verb": verbs[0], "bidirectional": "-B" in args}
+    require(config["bidirectional"] or config["verb"] == "read",
+            "only READ supports unidirectional auditing")
     # Only modes whose reporting semantics are modeled below are accepted.
     executable = args.index("urma_perftest")
     require(all(token.startswith("LD_LIBRARY_PATH=") or token == "UBSIM_BW_REPORT_DIAGNOSTIC=1"
@@ -197,6 +201,7 @@ def audit(directory, verb=None, expected_sizes=None):
     expected_wqes = expected_payload = expected_segments = 0
     seen = set()
     trial_verb = verb
+    trial_bidirectional = None
     for record in records:
         label = record.get("label", "")
         command = record.get("command", [])
@@ -217,6 +222,10 @@ def audit(directory, verb=None, expected_sizes=None):
         if trial_verb is None:
             trial_verb = config["verb"]
         require(config["verb"] == trial_verb, "mixed verbs or requested verb mismatch")
+        if trial_bidirectional is None:
+            trial_bidirectional = config["bidirectional"]
+        require(config["bidirectional"] == trial_bidirectional, "mixed traffic directions")
+        directions = 2 if trial_bidirectional else 1
         size, count, depth = config["-s"], config["-n"], config["-T"]
         require(label == f"{trial_verb}-{size}", "label/command verb or size mismatch")
         raw = read(label + ".txt")
@@ -225,15 +234,20 @@ def audit(directory, verb=None, expected_sizes=None):
         values = []
         diagnostics = []
         no_peak, peak_scope = peak_policy(trial_verb, count)
+        if not trial_bidirectional:
+            peak_scope = "client-only measurement, server displays exchanged client result"
         for index, expected_port in ((1, manifest.get("uart0")), (3, manifest.get("uart1"))):
             port, body = blocks[index:index + 2]
             require(port == expected_port, "UART/manifest mismatch")
             rc = re.findall(r"(?m)^__UBSIM_RC_" + re.escape(port) + r"_\d+__=(-?\d+)\s*$", body)
             require(rc == ["0"], "missing/failed/duplicate guest return code")
-            require(f"URMA_{trial_verb.upper()} Bidirectional" in body, "wrong verb or non-bidirectional result")
+            require(f"URMA_{trial_verb.upper()}" in body and
+                    ("Bidirectional" in body) == trial_bidirectional,
+                    "wrong verb or direction result")
             require("BW peak[MB/sec]" in body and "BW average[MB/sec]" in body,
                     "unexpected perftest unit header; refusing unit inference")
-            require(re.findall(r"JFS depth\s*:\s*(\d+)", body) == [str(depth)], "SQ depth mismatch")
+            expected_depth = [] if not trial_bidirectional and index == 1 else [str(depth)]
+            require(re.findall(r"JFS depth\s*:\s*(\d+)", body) == expected_depth, "SQ depth mismatch")
             require(re.findall(r"CQ Moderation\s*:\s*(\d+)", body) == [str(config["-Q"])],
                     "CQ moderation mismatch")
             require(re.findall(r"Number of jettys\s*:\s*(\d+)", body) == [str(config["-J"])],
@@ -263,6 +277,7 @@ def audit(directory, verb=None, expected_sizes=None):
                 require(peak > 0, "client-only enabled SEND peak must be positive")
             values.append((peak, average, message_rate))
             lines = [line for line in body.splitlines() if line.startswith("[UBSIM_BW_REPORT_DIAGNOSTIC]")]
+            require(trial_bidirectional or not lines, "unidirectional report diagnostics not supported")
             require(len(lines) <= 1, "duplicate report diagnostics")
             diagnostics.append(check_report_diagnostic(lines[0], config, no_peak[len(values)-1]) if lines else None)
         require(values[0] == values[1], "exchanged endpoint bandwidth rows differ")
@@ -273,18 +288,22 @@ def audit(directory, verb=None, expected_sizes=None):
             require(all(abs(value-total) <= precision for value,total,precision in
                         zip(values[0], sums, (0.005001, 0.005001, 0.000000501))),
                     "summed local diagnostics disagree with printed aggregate rounding")
-        cases.append(dict(verb=trial_verb, size_bytes=size, iterations_per_endpoint=count, configured_sq_depth=depth,
+        cases.append(dict(verb=trial_verb, bidirectional=trial_bidirectional, size_bytes=size,
+                          iterations_per_endpoint=count if trial_bidirectional else None,
+                          iterations_by_node=[count, count] if trial_bidirectional else [0, count],
+                          configured_sq_depth=depth,
                           configured_receive_depth=config.get("-R"),
                           inline_size=config["-I"],
                           peak_MiB_s=peak, average_MiB_s=average,
                           message_rate_Mpps=message_rate,
-                          peak_scope=peak_scope, endpoint_no_peak=no_peak,
+                          peak_scope=peak_scope, endpoint_no_peak=no_peak if trial_bidirectional else [None, no_peak[1]],
                           report_diagnostics_checked=diagnostics[0] is not None,
                           average_GB_s=average * 1048576 / 1e9,
-                          aggregation="perftest -B combined directions, counted once"))
+                          aggregation=("perftest -B combined directions, counted once" if trial_bidirectional
+                                       else "client READ only; exchanged server row counted once")))
         expected_wqes += count
-        expected_payload += 2 * count * size
-        expected_segments += 2 * count * ((size + 4095) // 4096)
+        expected_payload += directions * count * size
+        expected_segments += directions * count * ((size + 4095) // 4096)
     require(cases, "no supported bandwidth cases")
     if expected_sizes is not None:
         require([case["size_bytes"] for case in cases] == expected_sizes,
@@ -295,9 +314,9 @@ def audit(directory, verb=None, expected_sizes=None):
         equal(fabric_progress, key, 0)
     equal(fabric_progress, "outputs_empty", 1)
     for key in ("native_wqes_submitted", "native_wqes_completed"):
-        equal(fabric_progress, key, 2 * expected_wqes)
+        equal(fabric_progress, key, directions * expected_wqes)
     for key in ("native_wqes_submitted", "native_wqes_completed"):
-        equal(fabric, key, 2 * expected_wqes)
+        equal(fabric, key, directions * expected_wqes)
     # Adapter currently counts READ logical request bytes AND response bytes;
     # this diagnostic is not on-wire payload and must not double bandwidth.
     equal(fabric, "payload_bytes", expected_payload * (2 if trial_verb == "read" else 1))
@@ -315,12 +334,13 @@ def audit(directory, verb=None, expected_sizes=None):
         equal(fabric, key, 0)
     nodes = []
     for node in range(2):
+        node_wqes = expected_wqes if trial_bidirectional or node == 1 else 0
         text = read(f"udma-node{node}-udma.log")
         profile = last_fields(text, "UDMA_PROFILE")
         progress = last_fields(text, "UDMA_PROGRESS")
         for fields in (profile, progress):
             for key in ("sq_wqes", "sq_completions"):
-                equal(fields, key, expected_wqes)
+                equal(fields, key, node_wqes)
         for key in ("sq_depth_rejects", "sq_decode_rejects", "ubase_errors", "async_timestamp_jumps"):
             equal(profile, key, 0)
         equal(progress, "quiescent", 1)
@@ -331,7 +351,7 @@ def audit(directory, verb=None, expected_sizes=None):
         equal(host, "reads", 0); equal(host, "writes", 0)
         for key in (("rma_pending_peak", "sq_consumer_wraps") if trial_verb != "send" else ("sq_consumer_wraps",)):
             require(key in profile, f"missing {key}")
-        node_result = dict(node=node, wqes=expected_wqes,
+        node_result = dict(node=node, wqes=node_wqes,
                            observed_sq_consumer_wraps=profile["sq_consumer_wraps"])
         if trial_verb != "send":
             node_result["observed_rma_pending_peak"] = profile["rma_pending_peak"]
@@ -344,7 +364,8 @@ def audit(directory, verb=None, expected_sizes=None):
                   "native_late_response_received", "ctp_retries_queued", "ctp_retries_cancelled",
                   "ctp_retries_stale_sent")
     compliance = size_compliance(directory, manifest, cases)
-    return dict(status="PASS", verb=trial_verb, cases=cases, nodes=nodes, expected_fabric_wqes=2*expected_wqes,
+    return dict(status="PASS", verb=trial_verb, bidirectional=trial_bidirectional,
+                cases=cases, nodes=nodes, expected_fabric_wqes=directions*expected_wqes,
                 expected_sizes=expected_sizes,
                 **compliance,
                 expected_application_bytes=expected_payload,
