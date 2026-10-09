@@ -214,6 +214,18 @@ def main():
             return 1
         launched = True
         shutil.copy(root / "run-manifest.txt", args.output / "run-manifest.txt")
+        manifest = dict(line.split("=", 1) for line in
+                        (root / "run-manifest.txt").read_text().splitlines() if "=" in line)
+        artifacts = {}
+        for name in ("qemu_binary", "udma_device_binary", "ns3_binary", "kernel_image", "initrd_image"):
+            path = Path(manifest[name])
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            artifacts[name] = dict(path=str(path.resolve()), sha256=digest.hexdigest())
+        records.append(dict(label="input-artifacts", artifacts=artifacts,
+                            scope="Launch executable/images only; dynamic dependencies not fingerprinted"))
         serial = ["python3", "tools/dual_serial_command.py", "--ports", "3560", "3570",
                   "--full-output", "--timeout", str(args.timeout), "--prompt-kick-after", "1"]
         # Wait for kernel/init shell-ready banners before injecting a newline.

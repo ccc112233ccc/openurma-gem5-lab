@@ -23,6 +23,9 @@ link_delay_ns="${UBSIM_PEER_LATENCY_NS:-100}"
 switch_delay_ns="${UBSIM_QEMU_SWITCH_DELAY_NS:-50}"
 host_link_delay_ns="${UBSIM_QEMU_HOST_LATENCY_NS:-500}"
 dma_max_outstanding="${UBSIM_QEMU_DMA_MAX_OUTSTANDING:-256}"
+sq_prefetch_wqebbs="${UBSIM_SQ_PREFETCH_WQEBBS:-64}"
+sq_fetch_burst_wqebbs="${UBSIM_SQ_FETCH_BURST_WQEBBS:-16}"
+sq_fetch_max_outstanding="${UBSIM_SQ_FETCH_MAX_OUTSTANDING:-4}"
 iotlb_entries="${UBSIM_QEMU_IOTLB_ENTRIES:-4096}"
 icount_shift="${UBSIM_QEMU_ICOUNT_SHIFT:-0}"
 ctp_retransmission="${UBSIM_CTP_RETRANSMISSION:-auto}"
@@ -65,6 +68,10 @@ for value in "$uart0" "$uart1" "$oob_port" "$ssh0" "$ssh1" "$rate_gbps" "$link_d
     [[ "$value" =~ ^[0-9]+$ ]] || die "ports, rates and delays must be decimal integers"
 done
 [[ "$icount_shift" =~ ^[0-9]+$ ]] || die "UBSIM_QEMU_ICOUNT_SHIFT must be a non-negative integer"
+for value in "$sq_prefetch_wqebbs" "$sq_fetch_burst_wqebbs" "$sq_fetch_max_outstanding"; do
+    [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 && value <= 4096 )) ||
+        die "SQ prefetch settings must be integers in 1..4096"
+done
 [[ "$ctp_rto_ps" =~ ^[0-9]+$ ]] && (( ctp_rto_ps > 0 )) ||
     die "UBSIM_CTP_RTO_PS must be a positive integer"
 [[ "$ctp_max_retransmissions" =~ ^[0-9]+$ ]] && (( ctp_max_retransmissions > 0 )) ||
@@ -144,6 +151,9 @@ for node in 0 1; do
         --net-sync-interval-ps "$((link_delay_ns * 1000))" \
         --eid "$((0x100 + node))" --ports 2 \
         --dma-max-outstanding "$dma_max_outstanding" \
+        --sq-prefetch-wqebbs "$sq_prefetch_wqebbs" \
+        --sq-fetch-burst-wqebbs "$sq_fetch_burst_wqebbs" \
+        --sq-fetch-max-outstanding "$sq_fetch_max_outstanding" \
         --iotlb-entries "$iotlb_entries" \
         --state-out "$run_dir/udma-node$node/state.bin"
 done
@@ -207,6 +217,18 @@ ssh1_port=$ssh1
 peer_link_rate_gbps=$rate_gbps
 host_link_latency_ns=$host_link_delay_ns
 dma_max_outstanding=$dma_max_outstanding
+sq_prefetch_wqebbs=$sq_prefetch_wqebbs
+sq_fetch_burst_wqebbs=$sq_fetch_burst_wqebbs
+sq_fetch_max_outstanding=$sq_fetch_max_outstanding
+qemu_binary=$qemu
+udma_device_binary=$udma
+ns3_binary=$ns3
+kernel_image=$kernel
+initrd_image=$initrd
+port_count=2
+cpu_type=cortex-a72
+cpu_count=1
+memory_mib=1024
 iotlb_entries=$iotlb_entries
 peer_latency_ns=$link_delay_ns
 switch_delay_ns=$switch_delay_ns

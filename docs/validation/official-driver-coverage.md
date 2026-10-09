@@ -46,6 +46,17 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest performance-path change: [bounded SQ descriptor prefetch](sq-prefetch-20261009.md).
+Official no-sync regression passes 12/12 (suite29.926 s, wrapper35.97 s);
+device/native tests10/10 and independent core counterexamples7/7 pass.
+The synchronized single-direction13-size READ sweep passes in183.890 s:
+4 KiB increases3.89512→13.12591 GB/s,64 KiB stays49.23065 GB/s.
+Logical descriptor bursts fall26624→1664 for26624 WQEs; small-message rate
+is roughly3.0–3.25 Mpps. Host/network latency and guest software are unchanged.
+This establishes prefetch sensitivity, not equivalence to real UDMA hardware
+or completion of performance-path acceptance. Remaining provider/CPU and CQ
+costs must be isolated before attributing the residual gap to one component.
+
 Latest user-requested result: [READ without -B](read-unidirectional-20261009.md).
 Official single-direction2 B–4 KiB plus64 KiB completes all13 cases in one
 required-sync session:client26624 SQ WQEs/server0,57344 READ TAs,26 source SQ

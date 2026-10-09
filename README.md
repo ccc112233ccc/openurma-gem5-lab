@@ -289,6 +289,17 @@ The checkpoint contains both gem5 architectural states and both standalone
 UDMA states.  Process shutdown prints `[UB_HOST_PROFILE]`, `[UDMA_PROFILE]` and
 `[NS3_UB_NET_STATS]` counters for boundary-level profiling.
 
+SQ descriptor prefetch is configurable on both dual-host launch paths:
+`UBSIM_SQ_PREFETCH_WQEBBS=64` bounds each SQ's cache (including pending reads),
+`UBSIM_SQ_FETCH_BURST_WQEBBS=16` bounds each contiguous descriptor read, and
+`UBSIM_SQ_FETCH_MAX_OUTSTANDING=4` bounds concurrent descriptor reads per SQ.
+One WQEBB is 64 bytes. Set all three to `1` for the serial-fetch control.
+These are model architecture parameters, not fitted physical-hardware constants;
+they do not change host-link latency or payload-DMA concurrency. Prefetch reads
+only doorbell-submitted entries and decodes them in order. The resolved manifest
+records these settings; old ready checkpoints without matching settings are not
+automatically reused.
+
 `BUILD_STOCK_UDMA=enable ./lab build umdk` now builds and links the complete
 official `deps/ummu` library by default.  The old bootstrap shim remains an
 explicit diagnostic fallback via `UBSIM_UMMU_MODE=shim`; it is not the

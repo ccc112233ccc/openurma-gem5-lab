@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <ostream>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -189,6 +190,10 @@ UdmaModel::UdmaModel(HostInterface& host, NetworkInterface& network,
     : host_(host), network_(network), config_(config)
 {
     link_up_.assign(config_.port_count, true);
+    if (!config_.sq_prefetch_wqebbs || !config_.sq_fetch_burst_wqebbs ||
+        !config_.sq_fetch_max_outstanding || config_.sq_prefetch_wqebbs > 65536 ||
+        config_.sq_fetch_burst_wqebbs > 65536 || config_.sq_fetch_max_outstanding > 4096)
+        throw std::invalid_argument("invalid SQ prefetch bounds");
     StoreLe<std::uint32_t>(ummu_registers_, 0x10, 0x00000b08);
     StoreLe<std::uint32_t>(ummu_registers_, 0x14, 0x00042208);
     // CAP2.OAS=48 is required by the stock OLK UMMU driver's 48-bit S1
@@ -1487,6 +1492,7 @@ UdmaModel::ProcessSq(std::uint32_t jetty_id, std::uint32_t producer,
     if (!slot) {
         slot = std::make_shared<SqPipeline>();
         slot->issue = found->second.consumer;
+        slot->next_fetch = slot->issue;
     }
     const auto state = slot;
     if (static_cast<std::int32_t>(producer - found->second.target_producer) > 0)
@@ -1530,7 +1536,7 @@ UdmaModel::ProcessSqOnce(std::uint32_t jetty_id, std::uint32_t producer,
         jetty.direct_pending = true;
     }
     const auto state = sq_pipelines_.at(jetty_id);
-    if (state->fetching || state->ordered) return;
+    if (state->fetching || state->ordered || state->prefetch_failed) return;
     if (static_cast<std::uint32_t>(state->issue) == jetty.target_producer) {
         jetty.direct_pending = false;
         return;
@@ -1541,49 +1547,102 @@ UdmaModel::ProcessSqOnce(std::uint32_t jetty_id, std::uint32_t producer,
         ++sq_depth_rejects_;
         return;
     }
-    jetty.busy = true;
-    state->fetching = true;
     if (jetty.direct_pending && static_cast<std::uint32_t>(state->issue + 1) == jetty.target_producer) {
+        jetty.busy = true;
+        state->fetching = true;
         jetty.direct_pending = false;
         HandleSqWqe(jetty_id, target_producer,
             std::vector<std::uint8_t>(jetty.direct_wqe.begin(),
                                       jetty.direct_wqe.end()));
         return;
     }
-    const std::uint64_t address = jetty.queue_iova +
-        (state->issue & (jetty.depth - 1U)) * abi::kWqebbBytes;
-    ++sq_dma_reads_;
-    ReadToken(jetty.token, address, abi::kWqebbBytes,
-        [this, jetty_id, target_producer]
-        (bool ok, std::vector<std::uint8_t> raw) {
-            if (!ok || raw.size() != abi::kWqebbBytes) {
-                std::cerr << "udma-model: SQ DMA read failed jetty="
-                          << jetty_id << " ok=" << ok
-                          << " bytes=" << raw.size() << '\n';
-                ReleaseSqFetch(jetty_id, false);
-                ++ubase_errors_;
+    FillSqCache(jetty_id);
+    if (state->prefetch_failed) return;
+    const auto head = state->cache.find(state->issue);
+    if (head == state->cache.end() || head->second.empty()) return;
+    std::array<std::uint8_t, abi::kWqebbBytes> first{};
+    std::copy(head->second.begin(), head->second.end(), first.begin());
+    const auto wqebbs = abi::SqWqe(first).wqebb_count();
+    if (!wqebbs || wqebbs > target_producer - static_cast<std::uint32_t>(state->issue) ||
+        wqebbs > jetty.depth) {
+        state->prefetch_failed = true;
+        ++sq_decode_rejects_;
+        ++ubase_errors_;
+        return;
+    }
+    std::vector<std::uint8_t> raw = head->second;
+    if (wqebbs <= config_.sq_prefetch_wqebbs) {
+        for (std::uint32_t i = 1; i < wqebbs; ++i) {
+            auto part = state->cache.find(state->issue + i);
+            if (part == state->cache.end() || part->second.empty()) return;
+            raw.insert(raw.end(), part->second.begin(), part->second.end());
+        }
+        sq_prefetch_cache_hits_ += wqebbs;
+        state->fetching = true;
+        jetty.busy = true;
+        HandleSqWqe(jetty_id, target_producer, std::move(raw));
+    } else {
+        // A legal WQE larger than the configured cache still uses the existing
+        // bounded continuation path. Never increase the configured cache budget.
+        ++sq_prefetch_cache_hits_;
+        state->fetching = true;
+        jetty.busy = true;
+        ContinueSqWqe(jetty_id, target_producer, std::move(raw), wqebbs - 1,
+                     (state->issue + 1) & (jetty.depth - 1U));
+    }
+}
+
+void
+UdmaModel::FillSqCache(std::uint32_t id)
+{
+    const auto state = sq_pipelines_.at(id);
+    auto& queue = jetty_contexts_.at(id);
+    state->next_fetch = std::max(state->next_fetch, state->issue);
+    while (!state->prefetch_failed &&
+           state->prefetch_inflight < config_.sq_fetch_max_outstanding &&
+           state->cache.size() < config_.sq_prefetch_wqebbs) {
+        const auto available = queue.target_producer - static_cast<std::uint32_t>(state->next_fetch);
+        if (!available || available > queue.depth) break;
+        const auto start = state->next_fetch;
+        const auto slot = start & (queue.depth - 1U);
+        const auto count = std::min<std::uint32_t>({available,
+            config_.sq_fetch_burst_wqebbs, queue.depth - static_cast<std::uint32_t>(slot),
+            config_.sq_prefetch_wqebbs - static_cast<std::uint32_t>(state->cache.size())});
+        for (std::uint32_t i = 0; i < count; ++i) state->cache.emplace(start + i, std::vector<std::uint8_t>{});
+        state->next_fetch += count;
+        ++state->prefetch_inflight;
+        queue.busy = true;
+        ++sq_dma_reads_;
+        ++sq_prefetch_dma_reads_;
+        sq_prefetch_dma_bytes_ += count * abi::kWqebbBytes;
+        sq_prefetch_inflight_peak_ = std::max<std::uint64_t>(sq_prefetch_inflight_peak_, state->prefetch_inflight);
+        sq_prefetch_cache_peak_ = std::max<std::uint64_t>(sq_prefetch_cache_peak_, state->cache.size());
+        ReadToken(queue.token, queue.queue_iova + slot * abi::kWqebbBytes,
+                  count * abi::kWqebbBytes,
+            [this, id, state, start, count](bool ok, std::vector<std::uint8_t> raw) {
+                --state->prefetch_inflight;
+                if (!ok || raw.size() != count * abi::kWqebbBytes) {
+                    state->prefetch_failed = true;
+                    ++ubase_errors_;
+                }
+                if (!state->prefetch_failed) {
+                    for (std::uint32_t i = 0; i < count; ++i) {
+                        auto entry = state->cache.find(start + i);
+                        if (entry != state->cache.end())
+                            entry->second.assign(raw.begin() + i * abi::kWqebbBytes,
+                                                 raw.begin() + (i + 1) * abi::kWqebbBytes);
+                    }
+                }
+                const auto found = jetty_contexts_.find(id);
+                if (found == jetty_contexts_.end()) return;
+                found->second.busy = state->fetching || state->prefetch_inflight || !state->completions.empty();
+                const auto producer = found->second.target_producer;
                 MaybeCompleteQueueDestroy();
-                return;
-            }
-            auto found = jetty_contexts_.find(jetty_id);
-            if (found == jetty_contexts_.end()) return;
-            std::array<std::uint8_t, abi::kWqebbBytes> first{};
-            std::copy(raw.begin(), raw.end(), first.begin());
-            const std::uint32_t wqebbs = abi::SqWqe(first).wqebb_count();
-            const std::uint32_t outstanding = target_producer -
-                static_cast<std::uint32_t>(sq_pipelines_.at(jetty_id)->issue);
-            if (!wqebbs || wqebbs > outstanding ||
-                wqebbs > found->second.depth) {
-                ReleaseSqFetch(jetty_id, false);
-                ++sq_decode_rejects_;
-                ++ubase_errors_;
-                MaybeCompleteQueueDestroy();
-                return;
-            }
-            ContinueSqWqe(jetty_id, target_producer, std::move(raw), wqebbs - 1,
-                (static_cast<std::uint32_t>(sq_pipelines_.at(jetty_id)->issue) + 1) &
-                    (found->second.depth - 1U));
-        });
+                if (!state->prefetch_failed) ProcessSq(id, producer);
+            });
+        // An immediate callback may complete a pending destroy.
+        if (jetty_contexts_.find(id) == jetty_contexts_.end()) return;
+    }
 }
 
 void
@@ -1610,6 +1669,7 @@ UdmaModel::ContinueSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         (bool ok, std::vector<std::uint8_t> continuation) mutable {
             if (!ok || continuation.size() !=
                     std::size_t(contiguous) * abi::kWqebbBytes) {
+                sq_pipelines_.at(jetty_id)->prefetch_failed = true;
                 ReleaseSqFetch(jetty_id, false);
                 ++ubase_errors_;
                 MaybeCompleteQueueDestroy();
@@ -1630,6 +1690,8 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
                        std::vector<std::uint8_t> raw)
 {
     auto fail = [this, jetty_id]() {
+        auto state = sq_pipelines_.find(jetty_id);
+        if (state != sq_pipelines_.end()) state->second->prefetch_failed = true;
         ReleaseSqFetch(jetty_id, false);
         ++ubase_errors_;
         MaybeCompleteQueueDestroy();
@@ -1642,6 +1704,10 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
     const abi::SqWqe wqe(bytes);
     QueueContext& jetty = found->second;
     const auto state = sq_pipelines_.at(jetty_id);
+    if (state->prefetch_failed) {
+        ReleaseSqFetch(jetty_id, false);
+        return;
+    }
     const bool expected_owner = ((state->issue / jetty.depth) & 1U) == 0;
     const std::uint32_t decoded_wqebbs = wqe.wqebb_count();
     const bool owner_valid = wqe.owner() == expected_owner;
@@ -1757,6 +1823,7 @@ UdmaModel::HandleSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
         [this, jetty_id, producer, raw = std::move(raw), expected = sge.length]
         (bool ok, std::vector<std::uint8_t> payload) mutable {
             if (!ok || payload.size() != expected) {
+                sq_pipelines_.at(jetty_id)->prefetch_failed = true;
                 ReleaseSqFetch(jetty_id, false);
                 ++ubase_errors_;
                 MaybeCompleteQueueDestroy();
@@ -1774,6 +1841,10 @@ UdmaModel::SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
 {
     auto found = jetty_contexts_.find(jetty_id);
     if (found == jetty_contexts_.end()) return;
+    if (sq_pipelines_.at(jetty_id)->prefetch_failed) {
+        ReleaseSqFetch(jetty_id, false);
+        return;
+    }
     std::array<std::uint8_t, abi::kWqebbBytes> bytes{};
     if (raw.size() < bytes.size()) return;
     std::copy_n(raw.begin(), bytes.size(), bytes.begin());
@@ -1846,6 +1917,7 @@ UdmaModel::ReserveSq(std::uint32_t id, std::uint32_t wqebbs, bool ordered)
     entry.wqebbs = wqebbs;
     entry.index = static_cast<std::uint16_t>((state->issue + wqebbs - 1) & (depth - 1));
     state->completions.push_back(entry);
+    for (std::uint32_t i = 0; i < wqebbs; ++i) state->cache.erase(state->issue + i);
     state->issue += wqebbs;
     state->ordered = ordered;
 }
@@ -1857,7 +1929,7 @@ UdmaModel::ReleaseSqFetch(std::uint32_t id, bool resume)
     const auto pipeline = sq_pipelines_.find(id);
     if (found == jetty_contexts_.end() || pipeline == sq_pipelines_.end()) return;
     pipeline->second->fetching = false;
-    found->second.busy = !pipeline->second->completions.empty();
+    found->second.busy = pipeline->second->prefetch_inflight || !pipeline->second->completions.empty();
     const auto producer = found->second.target_producer;
     MaybeCompleteQueueDestroy();
     if (resume) ProcessSq(id, producer);
@@ -1916,7 +1988,7 @@ UdmaModel::RetireSq(std::uint32_t id)
             state->completions.pop_front();
             state->publishing = false;
             if (state->completions.empty()) state->ordered = false;
-            queue.busy = state->fetching || !state->completions.empty();
+            queue.busy = state->fetching || state->prefetch_inflight || !state->completions.empty();
             const auto producer = queue.target_producer;
             RetireSq(id);
             MaybeCompleteQueueDestroy();
@@ -2907,7 +2979,7 @@ UdmaModel::DumpProgress(std::ostream& output) const
     for (const auto& [id, state] : sq_pipelines_) {
         const auto queue = jetty_contexts_.find(id);
         if (queue == jetty_contexts_.end()) continue;
-        if (!state->fetching && state->completions.empty() &&
+        if (!state->fetching && !state->prefetch_inflight && !state->prefetch_failed && state->completions.empty() &&
             state->issue == queue->second.target_producer) continue;
         output << "[UDMA_SQ_PROGRESS] id=" << id
                << " depth=" << queue->second.depth
@@ -2915,6 +2987,9 @@ UdmaModel::DumpProgress(std::ostream& output) const
                << " issue=" << state->issue
                << " retired=" << queue->second.consumer
                << " fetching=" << state->fetching
+               << " prefetch_inflight=" << state->prefetch_inflight
+               << " prefetch_failed=" << state->prefetch_failed
+               << " cached_wqebbs=" << state->cache.size()
                << " publishing=" << state->publishing
                << " ordered=" << state->ordered
                << " entries=" << state->completions.size()
@@ -2940,6 +3015,9 @@ UdmaModel::DumpProgress(std::ostream& output) const
 bool
 UdmaModel::IsQuiescent() const
 {
+    for (const auto& entry : sq_pipelines_)
+        if (entry.second->prefetch_inflight || entry.second->prefetch_failed || !entry.second->cache.empty())
+            return false;
     if (ubios_busy_ || ubase_busy_ || pending_queue_destroy_ ||
         remote_services_in_flight_ ||
         pending_jfc_destroy_ || pending_eq_destroy_ ||

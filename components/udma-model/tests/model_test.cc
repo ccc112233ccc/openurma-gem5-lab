@@ -68,12 +68,21 @@ class MockHost final : public device::HostInterface {
     void CompleteRead(std::uint64_t address, std::size_t length,
                       device::ReadCompletion completion)
     {
-        const auto found = memory_.find(address);
-        if (found == memory_.end() || found->second.size() != length) {
-            completion(false, {});
-            return;
+        std::vector<std::uint8_t> bytes;
+        bytes.reserve(length);
+        for (std::size_t offset = 0; offset < length; ++offset) {
+            const auto cursor = address + offset;
+            const auto found = std::find_if(memory_.begin(), memory_.end(),
+                [cursor](const auto& entry) {
+                    return cursor >= entry.first && cursor - entry.first < entry.second.size();
+                });
+            if (found == memory_.end()) {
+                completion(false, {});
+                return;
+            }
+            bytes.push_back(found->second[cursor - found->first]);
         }
-        completion(true, found->second);
+        completion(true, std::move(bytes));
     }
 
   public:

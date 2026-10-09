@@ -36,10 +36,27 @@ struct Host final : d::HostInterface {
     std::vector<std::uint8_t> statuses;
     bool hold_payload{};
     bool hold_cq{};
+    bool hold_sq{};
+    struct Read { std::uint64_t address; std::size_t length; d::ReadCompletion done; };
+    std::vector<Read> sq_reads;
+    std::vector<std::pair<std::uint64_t, std::size_t>> sq_history;
+    void FinishSq(std::size_t index, bool ok = true) {
+        auto read = std::move(sq_reads.at(index));
+        sq_reads.erase(sq_reads.begin() + index);
+        read.done(ok, ok ? std::vector<std::uint8_t>(memory.begin() + read.address,
+                    memory.begin() + read.address + read.length) : std::vector<std::uint8_t>{});
+    }
     std::deque<d::Completion> pending;
     void DmaRead(std::uint64_t addr, std::size_t len,
                  d::ReadCompletion done) override {
         assert(addr + len <= memory.size());
+        if (addr >= Sq && addr < Sq + 512) {
+            sq_history.emplace_back(addr, len);
+            if (hold_sq) {
+                sq_reads.push_back({addr, len, std::move(done)});
+                return;
+            }
+        }
         done(true, {memory.begin() + addr, memory.begin() + addr + len});
     }
     void DmaWrite(std::uint64_t addr, std::vector<std::uint8_t> bytes,
@@ -115,6 +132,7 @@ struct Fixture {
                     host.memory.begin() + Sq + ((pos + b) % 8) * 64);
         }
         model.ProcessSq(9, start + count * blocks);
+        if (host.hold_sq) return;
         const unsigned issued = expected_issued ? expected_issued : count;
         assert(net.frames.size() == issued);
         assert(model.pending_rma_.size() == issued);
@@ -150,6 +168,121 @@ struct Fixture {
 };
 
 int main() {
+    // Advertised producer, not ring capacity, bounds descriptor prefetch.
+    // Extend the doorbell while the first DMA is outstanding; later DMA
+    // callbacks may arrive first but must not execute past the missing head.
+    {
+        Fixture f;
+        f.model.config_.sq_prefetch_wqebbs = 8;
+        f.model.config_.sq_fetch_burst_wqebbs = 2;
+        f.model.config_.sq_fetch_max_outstanding = 4;
+        f.host.hold_sq = true;
+        f.Post(0, 6, 2);
+        assert(!f.host.sq_reads.empty());
+        for (auto [address, length] : f.host.sq_history)
+            assert(address >= Sq && address + length <= Sq + 2 * 64);
+        f.Post(2, 6, 2);
+        assert(f.host.sq_reads.size() == 2);
+        assert(f.net.frames.empty());
+        std::ostringstream state; assert(!f.model.SaveState(state));
+        while (f.host.sq_reads.size() > 1) {
+            f.host.FinishSq(f.host.sq_reads.size() - 1);
+            assert(f.net.frames.empty());
+        }
+        while (!f.host.sq_reads.empty()) f.host.FinishSq(0);
+        assert(f.net.frames.size() == 4);
+        assert(f.model.sq_wqes() == 4);
+        for (auto [address, length] : f.host.sq_history)
+            assert(address >= Sq && address + length <= Sq + 4 * 64);
+        for (unsigned i = 0; i < 4; ++i) f.Reply(i);
+        assert(f.model.pending_rma_.empty());
+    }
+    // Fetching across a fence is allowed, executing across it is not.
+    {
+        Fixture f;
+        f.model.config_.sq_prefetch_wqebbs = 4;
+        f.model.config_.sq_fetch_burst_wqebbs = 2;
+        f.model.config_.sq_fetch_max_outstanding = 4;
+        f.host.hold_sq = true;
+        f.Post(0, 6, 8);
+        assert(f.host.sq_reads.size() == 2); // Cache budget, not DMA limit.
+        // Corrupt the first owner after posting, before its deferred fetch.
+        f.host.memory[Sq + 3] ^= 0x80;
+        f.host.FinishSq(1);
+        assert(f.net.frames.empty());
+        f.host.FinishSq(0);
+        assert(f.net.frames.empty());
+        assert(f.model.sq_decode_rejects() > 0);
+        for (auto [address, length] : f.host.sq_history)
+            assert(address >= Sq && address + length <= Sq + 8 * 64);
+    }
+    for (unsigned flags : {2U, 8U}) {
+        Fixture f;
+        f.host.hold_sq = true;
+        f.Post(0, 6, 3, 1, 0, flags);
+        while (!f.host.sq_reads.empty()) f.host.FinishSq(f.host.sq_reads.size() - 1);
+        assert(f.net.frames.size() == 1);
+        f.Reply(0);
+        while (!f.host.sq_reads.empty()) f.host.FinishSq(0);
+        assert(f.net.frames.size() == 2);
+        f.Reply(1);
+        while (!f.host.sq_reads.empty()) f.host.FinishSq(0);
+        assert(f.net.frames.size() == 3);
+        f.Reply(2);
+    }
+    // A failed batch cannot make later cached descriptors executable. All
+    // outstanding callbacks must drain before any checkpoint can succeed.
+    {
+        Fixture f;
+        f.model.config_.sq_prefetch_wqebbs = 8;
+        f.model.config_.sq_fetch_burst_wqebbs = 2;
+        f.model.config_.sq_fetch_max_outstanding = 4;
+        f.host.hold_sq = true;
+        f.Post(0, 6, 8);
+        assert(f.host.sq_reads.size() == 4);
+        f.host.FinishSq(0, false);
+        assert(f.net.frames.empty());
+        assert(!f.model.IsQuiescent());
+        std::ostringstream state; assert(!f.model.SaveState(state));
+        while (!f.host.sq_reads.empty()) f.host.FinishSq(f.host.sq_reads.size() - 1);
+        f.model.ProcessSq(9, 8);
+        assert(f.net.frames.empty());
+        assert(f.host.sq_reads.empty());
+        assert(f.model.ubase_errors() > 0);
+    }
+    // Variable two-WQEBB WRITEs crossing owner/ring boundaries with deferred
+    // descriptor fetch; byte cache must preserve the next generation header.
+    for (unsigned cache_budget : {1U, 8U}) {
+        Fixture f;
+        f.model.config_.sq_prefetch_wqebbs = cache_budget;
+        f.model.config_.sq_fetch_burst_wqebbs = 1;
+        f.model.config_.sq_fetch_max_outstanding = 4;
+        f.model.jetty_contexts_.at(9).consumer = 7;
+        f.model.jetty_contexts_.at(9).target_producer = 7;
+        f.host.hold_sq = true;
+        f.Post(7, 3, 3);
+        while (!f.host.sq_reads.empty()) f.host.FinishSq(f.host.sq_reads.size() - 1);
+        assert(f.net.frames.size() == 3);
+        for (unsigned i = 0; i < 3; ++i) {
+            assert(f.net.frames[i].bytes == std::vector<std::uint8_t>(32, i + 1));
+            f.Reply(i);
+        }
+        assert(f.model.jetty_contexts_.at(9).consumer == 13);
+        assert(f.model.sq_consumer_wraps() == 1);
+    }
+    // Destroy cannot release a queue while a speculative descriptor DMA
+    // callback still owns it, nor issue new network work after retirement.
+    {
+        Fixture f;
+        f.host.hold_sq = true;
+        f.Post(0, 6, 2);
+        assert(!f.host.sq_reads.empty());
+        f.Destroy();
+        std::ostringstream state; assert(!f.model.SaveState(state));
+        while (!f.host.sq_reads.empty()) f.host.FinishSq(f.host.sq_reads.size() - 1);
+        assert(f.net.frames.empty());
+        assert(!f.model.pending_queue_destroy_ && f.model.jetty_count() == 0);
+    }
     // A later success cannot pass an older error; both release their slots.
     {
         Fixture f;

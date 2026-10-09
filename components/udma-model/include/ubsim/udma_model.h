@@ -143,6 +143,12 @@ class UdmaModel {
         // Number of 4-KiB token translations cached by the modeled IOTLB.
         // Zero disables caching for validation experiments.
         std::uint32_t iotlb_entries{4096};
+        // Per-SQ cache budget (including blocks with outstanding DMA), burst
+        // length (both in 64-byte WQEBBs), and concurrent burst limit.
+        // A descriptor exceeding the cache budget uses sequential continuation.
+        std::uint32_t sq_prefetch_wqebbs{64};
+        std::uint32_t sq_fetch_burst_wqebbs{16};
+        std::uint32_t sq_fetch_max_outstanding{4};
         // Temporary descriptor ABI used only by the extraction contract test.
         // Production device processes leave this false.
         bool extraction_test_abi{false};
@@ -188,7 +194,15 @@ class UdmaModel {
     std::uint64_t mmio_writes() const { return mmio_writes_; }
     std::uint64_t jetty_mmio_writes() const { return jetty_mmio_writes_; }
     std::uint64_t sq_doorbells() const { return sq_doorbells_; }
+    // Logical SQ head/prefetch requests, not physical host DMA transactions:
+    // ReadToken may split pages and oversized-WQE continuation reads are separate.
     std::uint64_t sq_dma_reads() const { return sq_dma_reads_; }
+    std::uint64_t sq_prefetch_dma_reads() const { return sq_prefetch_dma_reads_; }
+    std::uint64_t sq_prefetch_bytes() const { return sq_prefetch_dma_bytes_; }
+    // WQEBBs presented to decode (including an ordered-head retry), not a hit ratio.
+    std::uint64_t sq_prefetch_cache_hits() const { return sq_prefetch_cache_hits_; }
+    std::uint64_t sq_prefetch_inflight_peak() const { return sq_prefetch_inflight_peak_; }
+    std::uint64_t sq_prefetch_cache_peak() const { return sq_prefetch_cache_peak_; }
     std::uint64_t sq_wqes() const { return sq_wqes_; }
     std::uint64_t sq_completions() const { return sq_completions_; }
     // Process-lifetime observations, not checkpointed architectural state.
@@ -273,6 +287,11 @@ class UdmaModel {
     };
     struct SqPipeline {
         std::uint64_t issue{};
+        std::uint64_t next_fetch{};
+        std::uint32_t prefetch_inflight{};
+        bool prefetch_failed{};
+        // Empty entries reserve space for DMA callbacks; keys never alias at ring wrap.
+        std::unordered_map<std::uint64_t, std::vector<std::uint8_t>> cache;
         bool fetching{};
         bool dispatching{};
         bool retiring{};
@@ -283,6 +302,7 @@ class UdmaModel {
     };
     std::unordered_map<std::uint32_t, std::shared_ptr<SqPipeline>> sq_pipelines_;
     void ReleaseSqFetch(std::uint32_t id, bool resume);
+    void FillSqCache(std::uint32_t id);
     void ReserveSq(std::uint32_t id, std::uint32_t wqebbs, bool ordered);
     void RetireSq(std::uint32_t id);
     void ContinueSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
@@ -560,6 +580,11 @@ class UdmaModel {
     std::uint64_t jetty_mmio_writes_{0};
     std::uint64_t sq_doorbells_{0};
     std::uint64_t sq_dma_reads_{0};
+    std::uint64_t sq_prefetch_dma_reads_{0};
+    std::uint64_t sq_prefetch_dma_bytes_{0};
+    std::uint64_t sq_prefetch_cache_hits_{0};
+    std::uint64_t sq_prefetch_inflight_peak_{0};
+    std::uint64_t sq_prefetch_cache_peak_{0};
     std::uint64_t sq_wqes_{0};
     std::uint64_t sq_completions_{0};
     std::uint64_t rma_pending_peak_{0};

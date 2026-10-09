@@ -900,6 +900,9 @@ sync_mode="${UBSIM_SYNC_MODE:-adapter-local}"
 ctp_retransmission_request="${UBSIM_CTP_RETRANSMISSION:-auto}"
 ctp_rto_ps="${UBSIM_CTP_RTO_PS:-25600000}"
 ctp_max_retransmissions="${UBSIM_CTP_MAX_RETRANSMISSIONS:-7}"
+sq_prefetch_wqebbs="${UBSIM_SQ_PREFETCH_WQEBBS:-64}"
+sq_fetch_burst_wqebbs="${UBSIM_SQ_FETCH_BURST_WQEBBS:-16}"
+sq_fetch_max_outstanding="${UBSIM_SQ_FETCH_MAX_OUTSTANDING:-4}"
 peer_link_rate_gbps="${UBSIM_PEER_LINK_RATE_GBPS:-$profile_peer_link_rate_gbps}"
 peer_serialization_stages="${UBSIM_PEER_SERIALIZATION_STAGES:-$profile_peer_serialization_stages}"
 peer_switch_delay="${UBSIM_PEER_SWITCH_DELAY:-$profile_peer_switch_delay}"
@@ -1420,6 +1423,10 @@ fi
 (( sq_sge_bytes > 0 )) || die "SQ SGE bytes must be positive"
 (( udma_iotlb_entries >= 0 )) || die "UDMA IOTLB entries must be non-negative"
 (( dma_max_outstanding > 0 )) || die "DMA max outstanding must be positive"
+for value in "$sq_prefetch_wqebbs" "$sq_fetch_burst_wqebbs" "$sq_fetch_max_outstanding"; do
+    [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 && value <= 4096 )) ||
+        die "SQ prefetch settings must be integers in 1..4096"
+done
 
 print_resolved_config() {
     cat <<EOF
@@ -1578,6 +1585,9 @@ external_udma_poll_interval=$external_udma_poll_interval
 external_udma_host_latency_ns=$external_udma_host_latency_ns
 udma_iotlb_entries=$udma_iotlb_entries
 dma_max_outstanding=$dma_max_outstanding
+sq_prefetch_wqebbs=$sq_prefetch_wqebbs
+sq_fetch_burst_wqebbs=$sq_fetch_burst_wqebbs
+sq_fetch_max_outstanding=$sq_fetch_max_outstanding
 oob_link_speed=$oob_link_speed
 pipe_data=$pipe_data
 packet_trace=$packet_trace
@@ -1769,6 +1779,9 @@ ubsim_exec test -x "$udma_device_binary" ||
             --net-link-latency-ps "$((peer_latency_ns * 1000))"
             --sync-interval-ps "$((sync_quantum_ns * 1000))"
             --eid "$((0x100 + node))" --ports "$ub_port_count"
+            --sq-prefetch-wqebbs "$sq_prefetch_wqebbs"
+            --sq-fetch-burst-wqebbs "$sq_fetch_burst_wqebbs"
+            --sq-fetch-max-outstanding "$sq_fetch_max_outstanding"
         )
         (( lifecycle_sync_enabled == 0 )) || udma_args+=(--lifecycle-sync)
         if [[ -n "$checkpoint_root" ]]; then
