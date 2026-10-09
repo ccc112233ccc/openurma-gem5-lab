@@ -49,6 +49,7 @@ struct Options {
     std::uint64_t sq_prefetch_wqebbs{64};
     std::uint64_t sq_fetch_burst_wqebbs{16};
     std::uint64_t sq_fetch_max_outstanding{4};
+    std::uint64_t completion_event_slots{64};
     std::uint64_t iotlb_entries{4096};
     SimbricksBaseIfSyncMode sync_mode{kSimbricksBaseIfSyncOptional};
     bool lifecycle_sync{false};
@@ -113,6 +114,9 @@ bool ParseOptions(int argc, char** argv, Options& options)
         } else if (arg == "--sq-fetch-max-outstanding" && i + 1 < argc) {
             if (!ParseUnsigned(argv[++i], options.sq_fetch_max_outstanding) ||
                 !options.sq_fetch_max_outstanding || options.sq_fetch_max_outstanding > 4096) return false;
+        } else if (arg == "--completion-event-slots" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.completion_event_slots) ||
+                !options.completion_event_slots || options.completion_event_slots > 4096) return false;
         } else if (arg == "--iotlb-entries" && i + 1 < argc) {
             if (!ParseUnsigned(argv[++i], options.iotlb_entries) ||
                 options.iotlb_entries > (1U << 20)) return false;
@@ -828,6 +832,7 @@ int Run(const Options& options)
     model_config.sq_prefetch_wqebbs = static_cast<std::uint32_t>(options.sq_prefetch_wqebbs);
     model_config.sq_fetch_burst_wqebbs = static_cast<std::uint32_t>(options.sq_fetch_burst_wqebbs);
     model_config.sq_fetch_max_outstanding = static_cast<std::uint32_t>(options.sq_fetch_max_outstanding);
+    model_config.completion_event_slots = static_cast<std::uint32_t>(options.completion_event_slots);
     model_config.extraction_test_abi = options.extraction_test_abi;
     device::UdmaModel model(host, network, model_config);
     if (!options.state_in.empty()) {
@@ -1012,6 +1017,12 @@ int Run(const Options& options)
               << " sq_prefetch_cache_hits=" << model.sq_prefetch_cache_hits()
               << " sq_prefetch_inflight_peak=" << model.sq_prefetch_inflight_peak()
               << " sq_prefetch_cache_peak=" << model.sq_prefetch_cache_peak()
+              << " ceq_consumer_updates=" << model.ceq_consumer_updates()
+              << " ceq_consumer_rejects=" << model.ceq_consumer_rejects()
+              << " ceq_full_waits=" << model.ceq_full_waits()
+              << " event_queue_peak=" << model.event_queue_peak()
+              << " events_published=" << model.events_published()
+              << " notification_failures=" << model.notification_failures()
               << " sq_wqes=" << model.sq_wqes()
               << " sq_completions=" << model.sq_completions()
               << " rma_pending_peak=" << model.rma_pending_peak()
@@ -1051,6 +1062,7 @@ int main(int argc, char** argv)
                      "--net-link-latency-ps N] [--sync-interval-ps N] "
                      "[--eid N] [--ports N] "
                      "[--sq-prefetch-wqebbs N --sq-fetch-burst-wqebbs N --sq-fetch-max-outstanding N] "
+                     "[--completion-event-slots N] "
                      "[--lifecycle-sync] [--state-in PATH] [--state-out PATH] "
                      "[--test-abi]\n";
         return 2;

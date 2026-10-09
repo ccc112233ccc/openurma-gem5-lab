@@ -8,6 +8,33 @@ from check_qemu_write_trial import audit, AuditError, peak_policy, check_report_
 
 
 class AuditTests(unittest.TestCase):
+    def add_notification_profile(self):
+        path = self.root / "run-manifest.txt"
+        path.write_text(path.read_text() + "udma_state_format=3\ncompletion_event_slots=64\n")
+        for node in (0, 1):
+            name = f"udma-node{node}-udma.log"
+            self.replace(name, "[UDMA_PROFILE]", "[UDMA_PROFILE] ceq_consumer_rejects=0 "
+                         "notification_failures=0 ceq_consumer_updates=4 ceq_full_waits=0 "
+                         "events_published=4 event_queue_peak=2")
+            self.replace(name, "[UDMA_PROGRESS]", "[UDMA_PROGRESS] event_slots_in_use=0")
+
+    def test_bounded_notification_profile(self):
+        self.add_notification_profile()
+        self.assertEqual(audit(self.root)["nodes"][0]["completion_notifications"]["events_published"], 4)
+
+    def test_notification_profile_failures_and_missing_fields(self):
+        self.add_notification_profile()
+        path = self.root / "udma-node0-udma.log"
+        original = path.read_text()
+        for before, after in (("ceq_consumer_rejects=0", "ceq_consumer_rejects=1"),
+                              ("notification_failures=0", "notification_failures=1"),
+                              ("event_slots_in_use=0", "event_slots_in_use=1"),
+                              ("event_queue_peak=2", "event_queue_peak=65"),
+                              ("events_published=4", "")):
+            with self.subTest(field=before), self.assertRaises(AuditError):
+                path.write_text(original.replace(before, after))
+                audit(self.root)
+
     def add_second_size(self):
         report = json.loads((self.root / "report.json").read_text())
         second = json.loads(json.dumps(report["records"][-1]))

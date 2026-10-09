@@ -46,6 +46,18 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest accepted model change: [CEQ credits and notification pipeline](ceq-pipeline-20261009.md).
+Official CEQ consumer doorbells now provide bounded credit; CQ commit no longer
+waits for CEQ/MSI completion, with bounded ownership, fair JFC admission and
+checkpoint format3. Independent starvation/destroy counterexamples are fixed.
+Official no-sync regression12/12 passes (29.641 s; wrapper35.52 s), final
+device tests11/11 pass (build+test9.42 s). Required-sync matched READ controls:
+Q1 improves4 KiB0.973456→1.936080 GB/s, but Q16 changes13.313895→13.395537
+GB/s (only0.61%, single trial, not a significant improvement claim). Both
+strict audits and independent drain reviews pass; walls133.626/142.501 s.
+Next isolate guest instructions/IRQ overhead; CQ is not the sole bottleneck.
+This does not complete the performance-path scope or all arming-mode support.
+
 Latest diagnosis: [READ batch/CQ and guest instruction-time controls](read-cq-diagnosis-20261009.md).
 No model or driver change. At fixed L64, Q1/Q16/Q64 give2 B rates
 0.237664/3.255258/4.214547 Mpps and4 KiB0.973456/13.313895/17.065553 GB/s.

@@ -300,6 +300,14 @@ only doorbell-submitted entries and decodes them in order. The resolved manifest
 records these settings; old ready checkpoints without matching settings are not
 automatically reused.
 
+Completion notifications have a separate bounded pipeline:
+`UBSIM_COMPLETION_EVENT_SLOTS=64` limits the total reserved, queued and active
+notifications (valid range 1..4096). CEQ consumer doorbells return ring credits;
+a full CEQ is not overwritten. CQE commit can finish before its CEQ/MSI
+notification, but checkpoint/destroy still track the notification's lifetime.
+Device state format is now 3; format-2 snapshots are rejected, and `start-ready`
+checks the format and slot budget in the manifest before selecting a snapshot.
+
 `BUILD_STOCK_UDMA=enable ./lab build umdk` now builds and links the complete
 official `deps/ummu` library by default.  The old bootstrap shim remains an
 explicit diagnostic fallback via `UBSIM_UMMU_MODE=shim`; it is not the

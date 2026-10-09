@@ -903,6 +903,7 @@ ctp_max_retransmissions="${UBSIM_CTP_MAX_RETRANSMISSIONS:-7}"
 sq_prefetch_wqebbs="${UBSIM_SQ_PREFETCH_WQEBBS:-64}"
 sq_fetch_burst_wqebbs="${UBSIM_SQ_FETCH_BURST_WQEBBS:-16}"
 sq_fetch_max_outstanding="${UBSIM_SQ_FETCH_MAX_OUTSTANDING:-4}"
+completion_event_slots="${UBSIM_COMPLETION_EVENT_SLOTS:-64}"
 peer_link_rate_gbps="${UBSIM_PEER_LINK_RATE_GBPS:-$profile_peer_link_rate_gbps}"
 peer_serialization_stages="${UBSIM_PEER_SERIALIZATION_STAGES:-$profile_peer_serialization_stages}"
 peer_switch_delay="${UBSIM_PEER_SWITCH_DELAY:-$profile_peer_switch_delay}"
@@ -1428,6 +1429,9 @@ for value in "$sq_prefetch_wqebbs" "$sq_fetch_burst_wqebbs" "$sq_fetch_max_outst
         die "SQ prefetch settings must be integers in 1..4096"
 done
 
+[[ "$completion_event_slots" =~ ^[0-9]+$ ]] && (( completion_event_slots > 0 && completion_event_slots <= 4096 )) ||
+    die "completion event slots must be an integer in 1..4096"
+
 print_resolved_config() {
     cat <<EOF
 manifest_version=1
@@ -1588,6 +1592,8 @@ dma_max_outstanding=$dma_max_outstanding
 sq_prefetch_wqebbs=$sq_prefetch_wqebbs
 sq_fetch_burst_wqebbs=$sq_fetch_burst_wqebbs
 sq_fetch_max_outstanding=$sq_fetch_max_outstanding
+completion_event_slots=$completion_event_slots
+udma_state_format=3
 oob_link_speed=$oob_link_speed
 pipe_data=$pipe_data
 packet_trace=$packet_trace
@@ -1782,6 +1788,7 @@ ubsim_exec test -x "$udma_device_binary" ||
             --sq-prefetch-wqebbs "$sq_prefetch_wqebbs"
             --sq-fetch-burst-wqebbs "$sq_fetch_burst_wqebbs"
             --sq-fetch-max-outstanding "$sq_fetch_max_outstanding"
+            --completion-event-slots "$completion_event_slots"
         )
         (( lifecycle_sync_enabled == 0 )) || udma_args+=(--lifecycle-sync)
         if [[ -n "$checkpoint_root" ]]; then

@@ -76,6 +76,24 @@ class LabCliTest(unittest.TestCase):
         self.assertEqual(cli.main(["start-ready", "--help"]), 0)
         self.assertEqual(run.call_args.args[0][-1], "--help")
 
+    def test_checkpoint_selection_rejects_old_udma_state_format(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "checkpoints" / "ready"
+            directory.mkdir(parents=True)
+            for node in range(2):
+                (directory / f"node{node}-cpt").mkdir()
+                (directory / f"udma-node{node}.state").touch()
+            desired = {"node_count": "2", "udma_state_format": "3"}
+            with mock.patch.object(cli, "ROOT", root):
+                for version in (None, "2", "3"):
+                    manifest = "node_count=2\n"
+                    if version is not None:
+                        manifest += f"udma_state_format={version}\n"
+                    (directory / "run-manifest.txt").write_text(manifest)
+                    self.assertEqual(cli._select_compatible_checkpoint(desired),
+                                     "ready" if version == "3" else None)
+
     def test_checkpoint_selection_requires_complete_matching_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -194,6 +194,8 @@ UdmaModel::UdmaModel(HostInterface& host, NetworkInterface& network,
         !config_.sq_fetch_max_outstanding || config_.sq_prefetch_wqebbs > 65536 ||
         config_.sq_fetch_burst_wqebbs > 65536 || config_.sq_fetch_max_outstanding > 4096)
         throw std::invalid_argument("invalid SQ prefetch bounds");
+    if (!config_.completion_event_slots || config_.completion_event_slots > 4096)
+        throw std::invalid_argument("invalid completion event slot budget");
     StoreLe<std::uint32_t>(ummu_registers_, 0x10, 0x00000b08);
     StoreLe<std::uint32_t>(ummu_registers_, 0x14, 0x00042208);
     // CAP2.OAS=48 is required by the stock OLK UMMU driver's 48-bit S1
@@ -351,6 +353,7 @@ UdmaModel::WriteMmio(std::uint64_t offset, std::uint32_t length,
         ubase_command_source_ &= ~static_cast<std::uint32_t>(value);
         return true;
     }
+    if (HandleCeqConsumerMmio(offset, length, value)) return true;
     if (HandleJettyMmio(offset, length, value)) return true;
     if (offset >= abi::kUdmaMemoryOffset &&
         offset < abi::kUdmaMemoryOffset + 0x00100000) {
@@ -1190,7 +1193,8 @@ UdmaModel::ApplyUbaseMailbox(std::vector<std::uint8_t> descriptor,
             aeq_producer_ = 0;
             aeq_vector_ = dw(6) & 0xffffU;
         } else {
-            if (tag > 255) return RejectUbase(std::move(descriptor), descriptor_count, 22);
+            if (tag > 255 || shift + 6 >= 24)
+                return RejectUbase(std::move(descriptor), descriptor_count, 22);
             ceqs_[tag] = EventQueueContext{iova, 1U << (shift + 6), 0, dw(6) & 0xffffU};
         }
     } else if (command == 0x24 && context.size() >= 128) {
@@ -1404,9 +1408,58 @@ UdmaModel::MaybeCompleteJfcDestroy()
 bool
 UdmaModel::CeqBusy(std::uint32_t id) const
 {
+    // CQ DMA may have reserved notification ownership without yet enqueuing
+    // its CEQE. EQ destruction must also wait for that accepted work.
+    for (const auto& [jfc_id, ceq_id] : jfc_ceqs_) {
+        if (ceq_id != id) continue;
+        const auto publication = jfc_publications_.find(jfc_id);
+        if (publication != jfc_publications_.end() &&
+            (publication->second->running || !publication->second->pending.empty()))
+            return true;
+        const auto jfc = jfc_contexts_.find(jfc_id);
+        if (jfc != jfc_contexts_.end() && jfc->second.pending_completions &&
+            jfc->second.moderation_deadline_ps) return true;
+    }
     return (completion_event_busy_ && active_ceq_id_ == id) ||
         std::any_of(completion_events_.begin(), completion_events_.end(),
                     [id](const auto& event) { return event.ceq_id == id; });
+}
+
+bool
+UdmaModel::HandleCeqConsumerMmio(std::uint64_t offset, std::uint32_t length,
+                               std::uint64_t value)
+{
+    // ubase_update_eq_db(): resource 1 base, eqn[7:0], type[17:16], CI[55:32].
+    if (offset != abi::kUdmaMemoryOffset || length != 8 ||
+        ((value >> 16) & 3U) != 2U) return false;
+    const auto id = static_cast<std::uint32_t>(value & 0xffU);
+    const auto found = ceqs_.find(id);
+    constexpr std::uint32_t Mask = 0x00ffffffU;
+    if (found == ceqs_.end() || (value & 0xff000000fffcff00ULL)) {
+        ++ceq_consumer_rejects_;
+        return true;
+    }
+    auto& ceq = found->second;
+    const std::uint32_t next = (value >> 32) & Mask;
+    const std::uint32_t delta = (next - ceq.consumer) & Mask;
+    const std::uint32_t published = ceq.producer - ceq.consumer;
+    const bool reserved = completion_event_busy_ && ceq_write_pending_ &&
+                          active_ceq_id_ == id;
+    if (ceq.credit_fault || delta > published + (reserved ? 1U : 0U)) {
+        ++ceq_consumer_rejects_;
+        return true;
+    }
+    ++ceq_consumer_updates_;
+    if (delta > published) {
+        // The guest can see the DMA payload before its acknowledgement gets
+        // back to this process. Preserve, but do not spend, this credit yet.
+        ceq.pending_consumer = ceq.consumer + delta;
+        ceq.consumer_pending = true;
+    } else {
+        ceq.consumer += delta;
+    }
+    ProcessCompletionEvent();
+    return true;
 }
 
 bool
@@ -2016,6 +2069,9 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
     // Different Jettys sharing one JFC must not choose the same producer slot.
     if (draining_jfc_id_ && *draining_jfc_id_ == jfc_id)
         return completion(false);
+    const auto ceq = jfc_ceqs_.find(jfc_id);
+    if (draining_eq_command_ == 0x47 && ceq != jfc_ceqs_.end() &&
+        ceq->second == draining_eq_id_) return completion(false);
     auto& slot = jfc_publications_[jfc_id];
     if (!slot) slot = std::make_shared<JfcPublicationQueue>();
     slot->pending.emplace_back(
@@ -2032,12 +2088,15 @@ UdmaModel::WriteCqe(std::uint32_t jfc_id, bool receive, bool jetty,
                     released(ok);
                 }, remote_id, remote_eid, tpn, status);
         });
-    ProcessJfcPublications(jfc_id);
+    PumpCompletionWork();
 }
 
 bool
 UdmaModel::JfcPublicationBusy(std::uint32_t jfc_id) const
 {
+    const auto jfc = jfc_contexts_.find(jfc_id);
+    if (jfc != jfc_contexts_.end() && jfc->second.pending_completions &&
+        jfc->second.moderation_deadline_ps) return true;
     if ((completion_event_busy_ && active_event_jfc_id_ == jfc_id) ||
         std::any_of(completion_events_.begin(), completion_events_.end(),
                     [jfc_id](const auto& event) { return event.jfc_id == jfc_id; }))
@@ -2055,21 +2114,75 @@ UdmaModel::ProcessJfcPublications(std::uint32_t jfc_id)
     const auto state = found->second;
     if (state->dispatching || state->running) return;
     state->dispatching = true;
-    // Synchronous HostInterface callbacks drain iteratively, not recursively.
-    while (!state->running && !state->pending.empty()) {
+    // One admission per JFC per fair pump pass. Completion callbacks must
+    // return through the shared pump instead of letting a hot JFC steal slots.
+    if (!state->running && !state->pending.empty() &&
+           completion_event_slots_in_use_ < config_.completion_event_slots) {
         auto issue = std::move(state->pending.front());
         state->pending.pop_front();
         state->running = true;
-        issue([this, jfc_id, state](bool) {
+        ++completion_event_slots_in_use_;
+        last_jfc_admitted_ = jfc_id;
+        issue([this, state](bool) {
             state->running = false;
-            if (!state->dispatching) ProcessJfcPublications(jfc_id);
+            PumpCompletionWork();
         });
     }
     state->dispatching = false;
     if (!state->running && state->pending.empty()) {
         jfc_publications_.erase(jfc_id);
         MaybeCompleteJfcDestroy();
+        // Failed CQ DMA (or a CQ not requiring an event) has no CEQ callback
+        // to wake a destroy command that waited for this publication.
+        MaybeCompleteEqDestroy();
     }
+}
+
+void
+UdmaModel::ReleaseCompletionEventSlot()
+{
+    --completion_event_slots_in_use_;
+    PumpCompletionWork();
+}
+
+void
+UdmaModel::PumpCompletionWork()
+{
+    completion_work_kick_ = true;
+    if (completion_work_dispatching_) return;
+    completion_work_dispatching_ = true;
+    do {
+        completion_work_kick_ = false;
+        // Expired moderation timers get admission before further CQ work.
+        // Snapshot IDs: synchronous callbacks may destroy their contexts.
+        std::vector<std::uint32_t> expired;
+        for (const auto& [id, jfc] : jfc_contexts_)
+            if (jfc.pending_completions && jfc.moderation_deadline_ps &&
+                jfc.moderation_deadline_ps <= now_ps_) expired.push_back(id);
+        for (const auto id : expired) {
+            if (completion_event_slots_in_use_ >= config_.completion_event_slots) break;
+            const auto found = jfc_contexts_.find(id);
+            if (found == jfc_contexts_.end()) continue;
+            found->second.pending_completions = 0;
+            found->second.moderation_deadline_ps = 0;
+            ++completion_event_slots_in_use_;
+            EmitCompletionEvent(id, [this](bool ok) {
+                if (!ok) { ++ubase_errors_; ++notification_failures_; }
+                ReleaseCompletionEventSlot();
+            });
+        }
+        std::vector<std::uint32_t> ids;
+        for (const auto& [id, state] : jfc_publications_) {
+            (void)state;
+            ids.push_back(id);
+        }
+        std::sort(ids.begin(), ids.end());
+        if (last_jfc_admitted_)
+            std::rotate(ids.begin(),
+                std::upper_bound(ids.begin(), ids.end(), *last_jfc_admitted_), ids.end());
+        for (const auto id : ids) ProcessJfcPublications(id);
+    } while (completion_work_kick_);
+    completion_work_dispatching_ = false;
 }
 
 void
@@ -2081,24 +2194,30 @@ UdmaModel::WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
                     std::uint32_t remote_eid, std::uint32_t tpn,
                     std::uint8_t status)
 {
+    // The caller reserved one notification slot before beginning CQ DMA.
+    // Keep that reservation until either no event is needed, or its MSI ends.
+    Completion finish = [this, completion](bool ok) {
+        completion(ok);
+        ReleaseCompletionEventSlot();
+    };
     auto found = jfc_contexts_.find(jfc_id);
-    if (found == jfc_contexts_.end()) return completion(false);
+    if (found == jfc_contexts_.end()) return finish(false);
     const std::uint64_t ci = found->second.index_iova;
     ReadToken(found->second.token, ci, 4,
         [this, jfc_id, receive, jetty, opcode, entry_index, local_id,
          byte_count, user_data, immediate, remote_id, remote_eid, tpn, status,
-         completion = std::move(completion)]
+         completion = std::move(completion), finish = std::move(finish)]
         // remote identity is captured separately because it is produced by
         // the peer packet rather than the local queue context.
         (bool ok, std::vector<std::uint8_t> consumer_bytes) mutable {
             auto found = jfc_contexts_.find(jfc_id);
             if (!ok || consumer_bytes.size() != 4 ||
-                found == jfc_contexts_.end()) return completion(false);
+                found == jfc_contexts_.end()) return finish(false);
             QueueContext& jfc = found->second;
             const std::uint32_t consumer = abi::Load32(consumer_bytes.data()) & 0x3fffffU;
             const std::uint32_t producer = static_cast<std::uint32_t>(jfc.producer) & 0x3fffffU;
             if (((producer - consumer) & 0x3fffffU) >= jfc.depth)
-                return completion(false);
+                return finish(false);
             const bool owner = ((jfc.producer / jfc.depth) & 1U) == 0;
             const auto cqe = abi::MakeCqe(receive, jetty, owner, opcode,
                 entry_index, local_id, byte_count, user_data, immediate,
@@ -2109,12 +2228,13 @@ UdmaModel::WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
             jfc.cqe_write_pending = true;
             WriteToken(jfc.token, address,
                 std::vector<std::uint8_t>(cqe.begin(), cqe.end()),
-                [this, jfc_id, completion = std::move(completion)](bool write_ok) mutable {
+                [this, jfc_id, completion = std::move(completion),
+                 finish = std::move(finish)](bool write_ok) mutable {
                     auto found = jfc_contexts_.find(jfc_id);
                     if (found != jfc_contexts_.end())
                         found->second.cqe_write_pending = false;
                     if (!write_ok || found == jfc_contexts_.end())
-                        return completion(false);
+                        return finish(false);
                     ++found->second.producer;
                     ++found->second.pending_completions;
                     static constexpr std::array<std::uint64_t, 8> PeriodUs{
@@ -2127,19 +2247,22 @@ UdmaModel::WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
                                 PeriodUs[found->second.moderation_period] *
                                     1000000ULL;
                         }
-                        completion(true);
+                        finish(true);
                         return;
                     }
                     found->second.pending_completions = 0;
                     found->second.moderation_deadline_ps = 0;
                     // The CQE is already visible and its producer committed.
-                    // Failed notification must not replay the WQE or publish
-                    // the same CQE twice. Still wait for accepted event DMA.
+                    // Register notification ownership BEFORE releasing CQ/SQ:
+                    // a reentrant completion can request JFC destruction.
+                    // Failure of the independent notification must never
+                    // replay this WQE or undo an already visible CQE.
                     EmitCompletionEvent(jfc_id,
-                        [this, completion = std::move(completion)](bool event_ok) mutable {
-                            if (!event_ok) ++ubase_errors_;
-                            completion(true);
+                        [this](bool event_ok) {
+                            if (!event_ok) { ++ubase_errors_; ++notification_failures_; }
+                            ReleaseCompletionEventSlot();
                         });
+                    completion(true);
                 });
         });
 }
@@ -2147,70 +2270,98 @@ UdmaModel::WriteCqeNow(std::uint32_t jfc_id, bool receive, bool jetty,
 void
 UdmaModel::EmitCompletionEvent(std::uint32_t jfc_id, Completion completion)
 {
-    // Already accepted events drain; later notifications cannot extend the
-    // lifetime of a queue whose destroy command has been accepted.
+    // Reservations were acquired by accepted CQ work or its moderation timer.
+    // They still drain after destroy is requested; WriteCqe gates NEW work.
     const auto mapping = jfc_ceqs_.find(jfc_id);
     if (mapping == jfc_ceqs_.end()) {
         completion(false);
         return;
     }
     const auto ceq_id = mapping->second;
-    if (draining_eq_command_ == 0x47 && draining_eq_id_ == ceq_id) {
-        completion(false);
-        return;
-    }
     completion_events_.push_back({jfc_id, ceq_id, std::move(completion)});
+    event_queue_peak_ = std::max<std::uint64_t>(event_queue_peak_,
+        completion_events_.size() + (completion_event_busy_ ? 1U : 0U));
     ProcessCompletionEvent();
 }
 
 void
 UdmaModel::ProcessCompletionEvent()
 {
-    if (completion_event_busy_) return;
-    if (completion_events_.empty()) {
-        MaybeCompleteEqDestroy();
-        return;
+    if (completion_event_busy_ || completion_event_dispatching_) return;
+    completion_event_dispatching_ = true;
+    while (!completion_event_busy_ && !completion_events_.empty()) {
+        // A full CEQ must not head-of-line block another CEQ with credits.
+        // The first eligible event preserves ordering within each CEQ.
+        const auto next = std::find_if(completion_events_.begin(),
+            completion_events_.end(), [this](const auto& event) {
+                const auto found = ceqs_.find(event.ceq_id);
+                if (found == ceqs_.end()) return true;
+                const auto& ceq = found->second;
+                return !ceq.credit_fault && ceq.producer - ceq.consumer < ceq.depth;
+            });
+        if (next == completion_events_.end()) {
+            ++ceq_full_waits_;
+            break;
+        }
+        PendingCompletionEvent pending = std::move(*next);
+        completion_events_.erase(next);
+        const auto found = ceqs_.find(pending.ceq_id);
+        if (found == ceqs_.end()) {
+            pending.completion(false);
+            continue;
+        }
+        completion_event_busy_ = true;
+        ceq_write_pending_ = true;
+        active_ceq_id_ = pending.ceq_id;
+        active_event_jfc_id_ = pending.jfc_id;
+        auto& ceq = found->second;
+        std::vector<std::uint8_t> event(64, 0);
+        std::uint32_t word = pending.jfc_id & 0xfffffU;
+        if (!(ceq.producer & ceq.depth)) word |= 1U << 31;
+        StoreLe<std::uint32_t>(event, 0, word);
+        const std::uint32_t slot = ceq.producer & (ceq.depth - 1);
+        WriteIoVirtual(ceq.iova + std::uint64_t(slot) * 64,
+                       std::move(event),
+            [this, ceq_id = pending.ceq_id, vector = ceq.vector,
+             completion = std::move(pending.completion)](bool ok) mutable {
+                ceq_write_pending_ = false;
+                auto& ceq = ceqs_.at(ceq_id);
+                if (ok) {
+                    ++ceq.producer;
+                    ++events_published_;
+                    if (ceq.consumer_pending) {
+                        ceq.consumer = ceq.pending_consumer;
+                        ceq.consumer_pending = false;
+                    }
+                    RaiseInterrupt(vector,
+                        [this, completion = std::move(completion)]
+                        (bool interrupt_ok) mutable {
+                            completion_event_busy_ = false;
+                            completion(interrupt_ok);
+                            MaybeCompleteEqDestroy();
+                            MaybeCompleteJfcDestroy();
+                            ProcessCompletionEvent();
+                        });
+                    return;
+                }
+                if (ceq.consumer_pending) {
+                    // A consumption report combined with failed DMA has
+                    // ambiguous visibility. Do not reuse this ring slot or
+                    // checkpoint it as a clean state.
+                    ceq.consumer_pending = false;
+                    ceq.credit_fault = true;
+                    ++ceq_consumer_rejects_;
+                }
+                completion_event_busy_ = false;
+                completion(false);
+                MaybeCompleteEqDestroy();
+                MaybeCompleteJfcDestroy();
+                ProcessCompletionEvent();
+            });
     }
-    PendingCompletionEvent pending = std::move(completion_events_.front());
-    completion_events_.pop_front();
-    const auto found = ceqs_.find(pending.ceq_id);
-    if (found == ceqs_.end()) {
-        pending.completion(false);
-        ProcessCompletionEvent();
-        return;
-    }
-    completion_event_busy_ = true;
-    active_ceq_id_ = pending.ceq_id;
-    active_event_jfc_id_ = pending.jfc_id;
-    auto& ceq = found->second;
-    std::vector<std::uint8_t> event(64, 0);
-    std::uint32_t word = pending.jfc_id & 0xfffffU;
-    if (!(ceq.producer & ceq.depth)) word |= 1U << 31;
-    StoreLe<std::uint32_t>(event, 0, word);
-    const std::uint32_t slot = ceq.producer & (ceq.depth - 1);
-    WriteIoVirtual(ceq.iova + std::uint64_t(slot) * 64,
-                            std::move(event),
-        [this, ceq_id = pending.ceq_id, vector = ceq.vector,
-         completion = std::move(pending.completion)](bool ok) mutable {
-            if (ok) {
-                ++ceqs_.at(ceq_id).producer;
-                RaiseInterrupt(vector,
-                    [this, completion = std::move(completion)]
-                    (bool interrupt_ok) mutable {
-                        completion_event_busy_ = false;
-                        completion(interrupt_ok);
-                        MaybeCompleteEqDestroy();
-                        MaybeCompleteJfcDestroy();
-                        ProcessCompletionEvent();
-                    });
-                return;
-            }
-            completion_event_busy_ = false;
-            completion(false);
-            MaybeCompleteEqDestroy();
-            MaybeCompleteJfcDestroy();
-            ProcessCompletionEvent();
-        });
+    completion_event_dispatching_ = false;
+    MaybeCompleteEqDestroy();
+    MaybeCompleteJfcDestroy();
 }
 
 void
@@ -2934,26 +3085,16 @@ UdmaModel::AdvanceTime(std::uint64_t now_ps)
 {
     if (now_ps < now_ps_) return;
     now_ps_ = now_ps;
-    std::vector<std::uint32_t> expired;
-    for (auto& [jfc_id, jfc] : jfc_contexts_) {
-        if (jfc.pending_completions && jfc.moderation_deadline_ps &&
-            jfc.moderation_deadline_ps <= now_ps_) {
-            jfc.pending_completions = 0;
-            jfc.moderation_deadline_ps = 0;
-            expired.push_back(jfc_id);
-        }
-    }
-    for (const std::uint32_t jfc_id : expired) {
-        EmitCompletionEvent(jfc_id, [this](bool ok) {
-            if (!ok) ++ubase_errors_;
-        });
-    }
+    PumpCompletionWork();
 }
 
 std::uint64_t
 UdmaModel::NextEventTime() const
 {
     std::uint64_t next = std::numeric_limits<std::uint64_t>::max();
+    // A full reservation pool needs an external completion/consumer update,
+    // not repeated zero-time polling of an already expired timer.
+    if (completion_event_slots_in_use_ >= config_.completion_event_slots) return next;
     for (const auto& [jfc_id, jfc] : jfc_contexts_) {
         (void)jfc_id;
         if (jfc.pending_completions && jfc.moderation_deadline_ps)
@@ -2975,6 +3116,7 @@ UdmaModel::DumpProgress(std::ostream& output) const
            << " completion_events=" << completion_events_.size()
            << " event_busy=" << completion_event_busy_
            << " receive_busy=" << receive_busy_
+           << " event_slots_in_use=" << completion_event_slots_in_use_
            << " destroy_pending=" << bool(pending_queue_destroy_) << '\n';
     for (const auto& [id, state] : sq_pipelines_) {
         const auto queue = jetty_contexts_.find(id);
@@ -3015,6 +3157,11 @@ UdmaModel::DumpProgress(std::ostream& output) const
 bool
 UdmaModel::IsQuiescent() const
 {
+    if (completion_event_slots_in_use_) return false;
+    for (const auto& [id, ceq] : ceqs_) {
+        (void)id;
+        if (ceq.consumer_pending || ceq.credit_fault) return false;
+    }
     for (const auto& entry : sq_pipelines_)
         if (entry.second->prefetch_inflight || entry.second->prefetch_failed || !entry.second->cache.empty())
             return false;
@@ -3055,7 +3202,7 @@ bool
 UdmaModel::SaveState(std::ostream& output) const
 {
     if (!IsQuiescent()) return false;
-    const std::uint32_t version = 2;
+    const std::uint32_t version = 3;
     const std::uint8_t has_token = generic_iova_token_.has_value();
     const std::uint32_t token = generic_iova_token_.value_or(0);
     if (!WritePod(output, kStateMagic) || !WritePod(output, version) ||
@@ -3111,7 +3258,7 @@ UdmaModel::LoadState(std::istream& input)
     std::uint8_t has_token{};
     std::uint32_t token{};
     if (!ReadPod(input, magic) || magic != kStateMagic ||
-        !ReadPod(input, version) || version != 2 ||
+        !ReadPod(input, version) || version != 3 ||
         !ReadPod(input, mmio_base) || mmio_base != config_.mmio_base ||
         !ReadPod(input, port_count) || port_count != config_.port_count ||
         !ReadPod(input, endpoint_eid) || endpoint_eid != config_.endpoint_eid ||
@@ -3151,6 +3298,10 @@ UdmaModel::LoadState(std::istream& input)
         link_up_[i] = up != 0;
     }
     ubios_busy_ = ubase_busy_ = completion_event_busy_ = receive_busy_ = false;
+    ceq_write_pending_ = completion_event_dispatching_ = false;
+    completion_work_dispatching_ = completion_work_kick_ = false;
+    completion_event_slots_in_use_ = 0;
+    last_jfc_admitted_.reset();
     completion_events_.clear();
     mailbox_events_.clear();
     jfc_publications_.clear();

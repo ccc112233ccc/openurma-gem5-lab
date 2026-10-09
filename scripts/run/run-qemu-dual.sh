@@ -26,6 +26,7 @@ dma_max_outstanding="${UBSIM_QEMU_DMA_MAX_OUTSTANDING:-256}"
 sq_prefetch_wqebbs="${UBSIM_SQ_PREFETCH_WQEBBS:-64}"
 sq_fetch_burst_wqebbs="${UBSIM_SQ_FETCH_BURST_WQEBBS:-16}"
 sq_fetch_max_outstanding="${UBSIM_SQ_FETCH_MAX_OUTSTANDING:-4}"
+completion_event_slots="${UBSIM_COMPLETION_EVENT_SLOTS:-64}"
 iotlb_entries="${UBSIM_QEMU_IOTLB_ENTRIES:-4096}"
 icount_shift="${UBSIM_QEMU_ICOUNT_SHIFT:-0}"
 ctp_retransmission="${UBSIM_CTP_RETRANSMISSION:-auto}"
@@ -72,6 +73,8 @@ for value in "$sq_prefetch_wqebbs" "$sq_fetch_burst_wqebbs" "$sq_fetch_max_outst
     [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 && value <= 4096 )) ||
         die "SQ prefetch settings must be integers in 1..4096"
 done
+[[ "$completion_event_slots" =~ ^[0-9]+$ ]] && (( completion_event_slots > 0 && completion_event_slots <= 4096 )) ||
+    die "completion event slots must be an integer in 1..4096"
 [[ "$ctp_rto_ps" =~ ^[0-9]+$ ]] && (( ctp_rto_ps > 0 )) ||
     die "UBSIM_CTP_RTO_PS must be a positive integer"
 [[ "$ctp_max_retransmissions" =~ ^[0-9]+$ ]] && (( ctp_max_retransmissions > 0 )) ||
@@ -154,6 +157,7 @@ for node in 0 1; do
         --sq-prefetch-wqebbs "$sq_prefetch_wqebbs" \
         --sq-fetch-burst-wqebbs "$sq_fetch_burst_wqebbs" \
         --sq-fetch-max-outstanding "$sq_fetch_max_outstanding" \
+        --completion-event-slots "$completion_event_slots" \
         --iotlb-entries "$iotlb_entries" \
         --state-out "$run_dir/udma-node$node/state.bin"
 done
@@ -220,6 +224,8 @@ dma_max_outstanding=$dma_max_outstanding
 sq_prefetch_wqebbs=$sq_prefetch_wqebbs
 sq_fetch_burst_wqebbs=$sq_fetch_burst_wqebbs
 sq_fetch_max_outstanding=$sq_fetch_max_outstanding
+completion_event_slots=$completion_event_slots
+udma_state_format=3
 qemu_binary=$qemu
 udma_device_binary=$udma
 ns3_binary=$ns3

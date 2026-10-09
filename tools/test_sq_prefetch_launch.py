@@ -29,6 +29,20 @@ class SqPrefetchLaunchTest(unittest.TestCase):
         for key in ("qemu_binary", "udma_device_binary", "ns3_binary", "kernel_image", "initrd_image"):
             self.assertRegex(source, rf'(?m)^{key}=\$\w+$')
 
+    def test_completion_queue_limit_and_state_format(self):
+        for name in ("run-qemu-dual.sh", "run-dual.sh"):
+            source = (ROOT / "scripts/run" / name).read_text()
+            self.assertIn('--completion-event-slots "$completion_event_slots"', source)
+            self.assertIn('completion_event_slots=$completion_event_slots\n', source)
+            self.assertIn('udma_state_format=3\n', source)
+            block = re.search(r'\[\[ "\$completion_event_slots".*?\n\s*die [^\n]+', source).group()
+            for value, valid in (("1", True), ("64", True), ("4096", True),
+                                 ("0", False), ("4097", False), ("-1", False), ("no", False)):
+                with self.subTest(launcher=name, value=value):
+                    code = f'completion_event_slots={value}\ndie() {{ exit 23; }}\n{block}'
+                    result = subprocess.run(["bash", "-c", code], capture_output=True)
+                    self.assertEqual(result.returncode, 0 if valid else 23)
+
 
 if __name__ == "__main__":
     unittest.main()

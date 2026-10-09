@@ -353,6 +353,23 @@ def audit(directory, verb=None, expected_sizes=None):
             require(key in profile, f"missing {key}")
         node_result = dict(node=node, wqes=node_wqes,
                            observed_sq_consumer_wraps=profile["sq_consumer_wraps"])
+        if manifest.get("udma_state_format") == "3":
+            try:
+                slots = int(manifest["completion_event_slots"])
+            except (KeyError, ValueError) as error:
+                raise AuditError("missing/invalid completion event slot budget") from error
+            require(1 <= slots <= 4096, "invalid completion event slot budget")
+            for key in ("ceq_consumer_rejects", "notification_failures"):
+                equal(profile, key, 0)
+            equal(progress, "event_slots_in_use", 0)
+            require("event_queue_peak" in profile and
+                    0 <= profile["event_queue_peak"] <= slots,
+                    "notification event queue exceeds configured bound")
+            for key in ("ceq_consumer_updates", "ceq_full_waits", "events_published"):
+                require(key in profile, f"missing {key}")
+            node_result["completion_notifications"] = {
+                key: profile[key] for key in ("ceq_consumer_updates", "ceq_full_waits",
+                                              "events_published", "event_queue_peak")}
         if trial_verb != "send":
             node_result["observed_rma_pending_peak"] = profile["rma_pending_peak"]
         else:

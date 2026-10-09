@@ -16,6 +16,11 @@ target_compile_options(ubsim_udma_model PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(udma_ceq_credit_test tests/ceq_credit_test.cc)
+    target_link_libraries(udma_ceq_credit_test PRIVATE ubsim_udma_model)
+    target_compile_options(udma_ceq_credit_test PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    add_test(NAME udma_ceq_credit COMMAND udma_ceq_credit_test)
     add_executable(udma_sq_pipeline_test tests/sq_pipeline_test.cc)
     target_link_libraries(udma_sq_pipeline_test PRIVATE ubsim_udma_model)
     target_compile_options(udma_sq_pipeline_test PRIVATE

@@ -149,6 +149,10 @@ class UdmaModel {
         std::uint32_t sq_prefetch_wqebbs{64};
         std::uint32_t sq_fetch_burst_wqebbs{16};
         std::uint32_t sq_fetch_max_outstanding{4};
+        // Shared reservation budget for CQ publications and their subsequent
+        // CEQ/MSI notifications. Reservations precede CQ DMA, so asynchronous
+        // notification cannot create an unbounded event backlog.
+        std::uint32_t completion_event_slots{64};
         // Temporary descriptor ABI used only by the extraction contract test.
         // Production device processes leave this false.
         bool extraction_test_abi{false};
@@ -219,6 +223,12 @@ class UdmaModel {
         return last_unknown_queue_offset_;
     }
     std::uint64_t ubase_errors() const { return ubase_errors_; }
+    std::uint64_t ceq_consumer_updates() const { return ceq_consumer_updates_; }
+    std::uint64_t ceq_consumer_rejects() const { return ceq_consumer_rejects_; }
+    std::uint64_t ceq_full_waits() const { return ceq_full_waits_; }
+    std::uint64_t event_queue_peak() const { return event_queue_peak_; }
+    std::uint64_t events_published() const { return events_published_; }
+    std::uint64_t notification_failures() const { return notification_failures_; }
     std::size_t jfc_count() const { return jfc_contexts_.size(); }
     bool ceq_enabled(std::uint32_t id = 0) const { return ceqs_.count(id) != 0; }
     bool aeq_enabled() const { return aeq_iova_ != 0 && aeq_depth_ != 0; }
@@ -335,6 +345,10 @@ class UdmaModel {
                      std::uint32_t remote_eid, std::uint32_t tpn,
                      std::uint8_t status);
     void ProcessJfcPublications(std::uint32_t jfc_id);
+    void ReleaseCompletionEventSlot();
+    void PumpCompletionWork();
+    bool HandleCeqConsumerMmio(std::uint64_t offset, std::uint32_t length,
+                              std::uint64_t value);
     bool JfcPublicationBusy(std::uint32_t jfc_id) const;
     struct JfcPublicationQueue {
         std::deque<std::function<void(Completion)>> pending;
@@ -537,6 +551,12 @@ class UdmaModel {
         std::uint32_t depth{};
         std::uint32_t producer{};
         std::uint32_t vector{};
+        // Absolute modulo-24-bit indices. A DMA reservation is represented
+        // separately by completion_event_busy_ until its write commits.
+        std::uint32_t consumer{};
+        std::uint32_t pending_consumer{};
+        bool consumer_pending{};
+        bool credit_fault{};
     };
     std::unordered_map<std::uint32_t, EventQueueContext> ceqs_;
     std::unordered_map<std::uint32_t, std::uint32_t> jfc_ceqs_;
@@ -547,6 +567,18 @@ class UdmaModel {
     };
     std::deque<PendingCompletionEvent> completion_events_;
     bool completion_event_busy_{};
+    bool ceq_write_pending_{};
+    bool completion_event_dispatching_{};
+    bool completion_work_dispatching_{};
+    bool completion_work_kick_{};
+    std::uint32_t completion_event_slots_in_use_{};
+    std::optional<std::uint32_t> last_jfc_admitted_;
+    std::uint64_t ceq_consumer_updates_{};
+    std::uint64_t ceq_consumer_rejects_{};
+    std::uint64_t ceq_full_waits_{};
+    std::uint64_t event_queue_peak_{};
+    std::uint64_t events_published_{};
+    std::uint64_t notification_failures_{};
     std::uint32_t active_ceq_id_{};
     std::uint32_t active_event_jfc_id_{};
     std::unordered_map<std::uint32_t, QueueContext> jfc_contexts_;
