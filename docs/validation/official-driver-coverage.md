@@ -46,6 +46,17 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest diagnosis: [READ batch/CQ and guest instruction-time controls](read-cq-diagnosis-20261009.md).
+No model or driver change. At fixed L64, Q1/Q16/Q64 give2 B rates
+0.237664/3.255258/4.214547 Mpps and4 KiB0.973456/13.313895/17.065553 GB/s.
+L16→L64 at Q16 changes little. At L64/Q64, doubling QEMU instruction-time
+scale halves throughput (2.117733 Mpps,8.673947 GB/s). Identical artifact
+fingerprints, strict audits and live-work drain support both completion-path
+and CPU-timing sensitivity; neither CQ-only nor link-only explanations suffice.
+The four new runs cost138.837/155.678/151.632/94.285 s. Completion notification
+decoupling requires bounded CEQ credit/drain handling; no speculative fix was
+implemented in this diagnostic stage.
+
 Latest performance-path change: [bounded SQ descriptor prefetch](sq-prefetch-20261009.md).
 Official no-sync regression passes 12/12 (suite29.926 s, wrapper35.97 s);
 device/native tests10/10 and independent core counterexamples7/7 pass.
