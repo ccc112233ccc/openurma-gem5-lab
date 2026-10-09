@@ -1,5 +1,8 @@
 # Repository operating rules
 
+For the current stopped-environment handoff and retained checkpoints, read
+`docs/NEXT_SESSION.md` before resuming work.
+
 ## Full-system validation
 
 - Never cold-boot gem5 for routine feature development, debugging, or
