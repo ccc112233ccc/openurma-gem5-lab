@@ -29,7 +29,9 @@ int ReadBurst(net::Interface& interface, bool side, unsigned count)
                     wire = replies.front(); replies.pop_front();
                     max_reply_dwell_ps = std::max(max_reply_dwell_ps, now - reply_enqueued.front());
                     reply_enqueued.pop_front();
-                    std::swap(wire.source_jetty, wire.destination_jetty);
+                    const auto source_jetty = wire.source_jetty;
+                    wire.source_jetty = wire.destination_jetty;
+                    wire.destination_jetty = source_jetty;
                     wire.operation = static_cast<std::uint8_t>(net::UdmaOperation::ReadResponse);
                     wire.flags = net::kUdmaWireCtpSegment | net::kUdmaWireLastFragment;
                     wire.payload_length = wire.transfer_length;
@@ -84,7 +86,8 @@ int ReadBurst(net::Interface& interface, bool side, unsigned count)
                 }
                 if (op == net::UdmaOperation::ReadRequest) {
                     if (wire.transfer_length != 4096 || wire.payload_length ||
-                        !target_seen.emplace(wire.request_id, wire.payload_offset).second) {
+                        !target_seen.emplace(std::uint64_t(wire.request_id),
+                                             std::uint32_t(wire.payload_offset)).second) {
                         std::cerr << "BURST_BAD_TARGET now_ps=" << now << " id=" << wire.request_id
                                   << " offset=" << wire.payload_offset << " length=" << wire.transfer_length << std::endl;
                         return 8;
@@ -92,7 +95,8 @@ int ReadBurst(net::Interface& interface, bool side, unsigned count)
                     ++requests; replies.push_back(wire); reply_enqueued.push_back(now);
                 } else if (op == net::UdmaOperation::ReadResponse) {
                     if (wire.transfer_length != 4096 || wire.payload_length != 4096 ||
-                        !source_seen.emplace(wire.request_id, wire.payload_offset).second) {
+                        !source_seen.emplace(std::uint64_t(wire.request_id),
+                                             std::uint32_t(wire.payload_offset)).second) {
                         std::cerr << "BURST_BAD_RESPONSE now_ps=" << now << " id=" << wire.request_id
                                   << " offset=" << wire.payload_offset << " length=" << wire.transfer_length << std::endl;
                         return 8;

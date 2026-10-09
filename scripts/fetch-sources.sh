@@ -86,7 +86,14 @@ if [[ ! -f "$archive" ]] || ! echo "$ARM_TARBALL_SHA  $archive" | sha256sum -c -
     mv "$archive.part" "$archive"
 fi
 if [[ ! -s "$lab/system/binaries/boot.arm64" || ! -s "$lab/system/binaries/boot.arm" ]]; then
-    tar -xjf "$archive" -C "$lab/system"
+    # Fill missing resources without replacing firmware built from the pinned
+    # gem5 source (the legacy bundle predates its SME boot initialisation).
+    tar --skip-old-files -xjf "$archive" -C "$lab/system"
+    for resource in boot.arm64 boot.arm; do
+        if [[ ! -s "$lab/system/binaries/$resource" ]]; then
+            tar -xjf "$archive" -C "$lab/system" "binaries/$resource"
+        fi
+    done
 fi
 
 note "all source and firmware inputs passed revision checks"

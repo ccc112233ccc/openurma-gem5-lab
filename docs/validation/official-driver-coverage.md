@@ -20,6 +20,15 @@ payload/completions/fragment boundaries; SQ/JFR/JFC wrap, batching,512 outstandi
 and backpressure; multi-Jetty/port routing, concurrency and isolation. Historical
 timing evidence below is retained but no longer drives the current work.
 
+User-requested gem5 cross-check: [current gem5 FS regression](gem5-functional-current-20261009.md).
+After repairing stale ARM64 boot firmware and UART-history capture,27/27
+official perftest cases passed from a verified restored v3 ready checkpoint:
+baseline12, depth512/batch9, four-Jetty6. SQ wrap136 per endpoint, actual
+pending-RMA peaks512/375, both ports active, final queues drained. This is not
+gem5 payload-integrity or full-JFC recovery acceptance; the QEMU byte probe
+has not yet been ported to gem5. Ready restore+OOB took12.927 s rather than
+207.205 s for the repaired cold boot.
+
 Latest functional increment: [QEMU data/queue/multi-resource matrix](qemu-functional-matrix-20261009.md).
 Added an official-API byte/guard/completion-identity probe, non-power-of-two
 boundary sweeps, four-Jetty independent-JFR cases, two-process isolation,

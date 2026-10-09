@@ -94,11 +94,12 @@ def run_one(
             if start_delay:
                 time.sleep(start_delay)
             pre_send_len = len(b"".join(chunks))
-            status_marker = (
-                f"__UBSIM_RC_{port}_{time.monotonic_ns()}__".encode()
-            )
+            nonce = f"{port}_{time.monotonic_ns()}"
+            begin_marker = f"__UBSIM_BEGIN_{nonce}__".encode()
+            status_marker = f"__UBSIM_RC_{nonce}__".encode()
             wrapped = (
-                command.encode()
+                b"printf '\\n" + begin_marker + b"\\n'; "
+                + command.encode()
                 + b"; __ubsim_rc=$?; printf '\\n"
                 + status_marker
                 + b"=%d\\n' \"$__ubsim_rc\"\n"
@@ -114,6 +115,17 @@ def run_one(
                 chunks.append(data)
                 text = b"".join(chunks)
                 new_text = text[pre_send_len:]
+                # gem5 may replay old terminal bytes after sendall. A byte
+                # offset alone cannot distinguish that history from this run.
+                # Require the shell's standalone BEGIN line, not its echoed
+                # printf command, and tolerate markers split across recv calls.
+                begin_match = re.search(
+                    rb"(?:\r?\n)" + re.escape(begin_marker) + rb"\r?\n",
+                    new_text,
+                )
+                if begin_match is None:
+                    continue
+                new_text = new_text[begin_match.end():]
                 status_match = re.search(
                     rb"(?:\r?\n)" + re.escape(status_marker) + rb"=([0-9]+)\r?\n",
                     new_text,
@@ -124,9 +136,8 @@ def run_one(
                         new_text[status_match.end() :],
                     ) is not None
                     if prompt_seen:
-                        # Exclude bytes drained before this command. This keeps
-                        # repeated sweeps from accidentally re-parsing an old
-                        # result that was still buffered on the UART socket.
+                        # Only output after the executed BEGIN belongs to this
+                        # command, even if replayed history arrived after send.
                         transcript = new_text.decode(errors="replace")
                         status = int(status_match.group(1))
                         if status != 0:

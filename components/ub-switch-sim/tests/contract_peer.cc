@@ -66,7 +66,9 @@ int LateDma(net::Interface& interface, bool sender, const std::string& profile)
                     wire.segment=11; wire.remote_address=0x10000;
                     wire.request_id=2000; wire.transfer_length=32; wire.payload_length=read ? 0 : 32;
                 } else {
-                    std::swap(wire.source_jetty,wire.destination_jetty);
+                    const auto source_jetty = wire.source_jetty;
+                    wire.source_jetty = wire.destination_jetty;
+                    wire.destination_jetty = source_jetty;
                     wire.operation=static_cast<std::uint8_t>(read ? net::UdmaOperation::ReadResponse
                                                                : net::UdmaOperation::WriteAck);
                     wire.flags=net::kUdmaWireCtpSegment|net::kUdmaWireLastFragment;
@@ -409,7 +411,9 @@ int Run(const std::string& role, const std::string& socket,
                     output->frame.destination_eid = remote_eid;
                     output->frame.length = sizeof(net::UdmaWireHeader) +
                         (ctp_read_response_loss ? 64 : 0);
-                    std::swap(wire.source_jetty, wire.destination_jetty);
+                    const auto source_jetty = wire.source_jetty;
+                    wire.source_jetty = wire.destination_jetty;
+                    wire.destination_jetty = source_jetty;
                     wire.operation = static_cast<std::uint8_t>(
                         ctp_read_response_loss ? net::UdmaOperation::ReadResponse
                                                : net::UdmaOperation::WriteAck);

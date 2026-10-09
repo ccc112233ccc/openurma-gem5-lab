@@ -39,6 +39,20 @@ install -m 0644 \
 make -C "$gem5_root/util/term" -j"$jobs"
 [[ -x "$gem5_root/util/term/m5term" ]] || die "m5term build failed"
 
+# Keep firmware aligned with the pinned CPU model. Older downloaded boot.arm64
+# omits CPTR_EL3.ESM: Linux's early SME setup then traps to an empty EL3 vector.
+# Build upstream firmware rather than changing the guest kernel or hiding SME.
+for tool in aarch64-linux-gnu-gcc aarch64-linux-gnu-ld; do
+    command -v "$tool" >/dev/null 2>&1 ||
+        die "$tool is required for the ARM64 bootloader"
+done
+boot_build="$lab_dir/artifacts/gem5-bootloader-arm64"
+mkdir -p "$boot_build"
+make -C "$gem5_root/system/arm/bootloader/arm64" \
+    BUILDDIR="$boot_build" -j"$jobs"
+make -C "$gem5_root/system/arm/bootloader/arm64" \
+    BUILDDIR="$boot_build" DESTDIR="$lab_dir/system/binaries" install
+
 note "building ARM gem5.opt with the UB-HOST adapter only (JOBS=$jobs)"
 (
     cd "$gem5_root"

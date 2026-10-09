@@ -24,6 +24,55 @@ class ConsoleEofTests(unittest.TestCase):
                 self.assertNotIn("within 180s", results[3560])
 
 
+class CommandBoundaryTests(unittest.TestCase):
+    def run_replies(self, replies: list[bytes]) -> tuple[str, bytes]:
+        sock = mock.MagicMock()
+        sock.__enter__.return_value = sock
+        sock.recv.side_effect = [b"(ubsim-node0) ~ # ", *replies]
+        results = {}
+        with mock.patch("dual_serial_command.connect_until_ready", return_value=sock), \
+                mock.patch("dual_serial_command.time.monotonic_ns", return_value=123):
+            run_one(3560, "true", 180, 0, None, mock.Mock(), results)
+        return results[3560], sock.sendall.call_args.args[0]
+
+    def test_delayed_history_and_echo_are_excluded(self) -> None:
+        output, sent = self.run_replies([
+            b"4096 64 999 999 999\r\n(ubsim-node0) ~ # ",
+            b"printf '\\n__UBSIM_BEGIN_3560_123__\\n'; true; old echo\r\n",
+            b"old scan row\r\n\r\n__UBSIM_BEGIN_3560_123__\r\n",
+            b"current result\r\n__UBSIM_RC_3560_123__=0\r\n(ubsim-node0) ~ # ",
+        ])
+        self.assertTrue(output.startswith("current result"))
+        self.assertNotIn("old", output)
+        self.assertNotIn("999", output)
+        self.assertNotIn("BEGIN", output)
+        self.assertIn(b"printf '\\n__UBSIM_BEGIN_3560_123__\\n'; true", sent)
+
+    def test_split_begin_status_and_prompt(self) -> None:
+        output, _ = self.run_replies([
+            b"history\r\n__UBSIM_BE", b"GIN_3560_123__\r", b"\nnew\r\n__UBSIM_R",
+            b"C_3560_123__=0\r", b"\n(ubsim-", b"node0) ~ # ",
+        ])
+        self.assertTrue(output.startswith("new\r\n"))
+        self.assertNotIn("history", output)
+
+    def test_echoed_begin_and_status_without_executed_begin_are_rejected(self) -> None:
+        output, _ = self.run_replies([
+            b"printf '\\n__UBSIM_BEGIN_3560_123__\\n'; true\r\n",
+            b"__UBSIM_RC_3560_123__=0\r\n(ubsim-node0) ~ # ", b"",
+        ])
+        self.assertTrue(output.startswith("ERROR:"))
+        self.assertIn("(EOF)", output)
+
+    def test_nonzero_status_after_begin_remains_failure(self) -> None:
+        output, _ = self.run_replies([
+            b"\n__UBSIM_BEGIN_3560_123__\nfailed\n",
+            b"__UBSIM_RC_3560_123__=22\n(ubsim-node0) ~ # ",
+        ])
+        self.assertTrue(output.startswith("ERROR: command exited with status 22"))
+        self.assertIn("failed", output)
+
+
 class PromptPatternTests(unittest.TestCase):
     def test_accepts_current_and_checkpoint_hostnames(self) -> None:
         import re
