@@ -155,7 +155,14 @@ def size_compliance(directory, manifest, cases):
                                       "counter success is NOT advertised hardware support"] if excessive else []))
 
 
-def audit(directory, verb=None):
+def audit(directory, verb=None, expected_sizes=None):
+    if expected_sizes is not None:
+        require(isinstance(expected_sizes, (list, tuple)) and len(expected_sizes) > 0,
+                "expected sizes must be a nonempty sequence")
+        require(all(type(size) is int and 0 < size <= 0xffffffff for size in expected_sizes),
+                "expected sizes must be positive uint32 integers")
+        require(len(set(expected_sizes)) == len(expected_sizes), "duplicate expected sizes")
+        expected_sizes = list(expected_sizes)
     require(verb in (None, "write", "read", "send"), "unsupported requested verb")
     directory = Path(directory)
     def read(name):
@@ -279,6 +286,9 @@ def audit(directory, verb=None):
         expected_payload += 2 * count * size
         expected_segments += 2 * count * ((size + 4095) // 4096)
     require(cases, "no supported bandwidth cases")
+    if expected_sizes is not None:
+        require([case["size_bytes"] for case in cases] == expected_sizes,
+                "completed size sequence does not match expected sizes")
     fabric = last_fields(read("ns3.log"), "NS3_UB_NET_STATS")
     fabric_progress = last_fields(read("ns3.log"), "NS3_UB_NET_PROGRESS")
     for key in ("native_tasks", "pending_target_dma", "scheduled_packets", "native_wqes_failed"):
@@ -335,6 +345,7 @@ def audit(directory, verb=None):
                   "ctp_retries_stale_sent")
     compliance = size_compliance(directory, manifest, cases)
     return dict(status="PASS", verb=trial_verb, cases=cases, nodes=nodes, expected_fabric_wqes=2*expected_wqes,
+                expected_sizes=expected_sizes,
                 **compliance,
                 expected_application_bytes=expected_payload,
                 legacy_native_payload_bytes=fabric["payload_bytes"],
@@ -355,10 +366,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--verb", choices=("write", "read", "send"), help="require this verb; otherwise detect it")
+    parser.add_argument("--expected-sizes", type=int, nargs="+",
+                        help="require exactly this completed size sequence, including order")
     args = parser.parse_args()
     begin = time.monotonic()
     try:
-        result = audit(args.directory, args.verb)
+        result = audit(args.directory, args.verb, args.expected_sizes)
     except (AuditError, ValueError, TypeError, KeyError) as error:
         print(json.dumps(dict(status="FAIL", error=str(error))))
         return 1

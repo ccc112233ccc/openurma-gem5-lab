@@ -8,6 +8,38 @@ from check_qemu_write_trial import audit, AuditError, peak_policy, check_report_
 
 
 class AuditTests(unittest.TestCase):
+    def add_second_size(self):
+        report = json.loads((self.root / "report.json").read_text())
+        second = json.loads(json.dumps(report["records"][-1]))
+        second["label"] = "write-2048"
+        second["command"] = [part.replace("-s 4096", "-s 2048") for part in second["command"]]
+        report["records"].append(second)
+        self.write("report.json", json.dumps(report))
+        self.write("write-2048.txt", (self.root / "write-4096.txt").read_text().replace("4096 64", "2048 64"))
+        for field in ("native_wqes_submitted", "native_wqes_completed", "ctp_request_segments",
+                      "ctp_taacks", "ctp_native_completions"):
+            self.replace("ns3.log", f"{field}=128", f"{field}=256")
+        self.replace("ns3.log", "payload_bytes=524288", "payload_bytes=786432")
+        for node in (0, 1):
+            for field in ("sq_wqes", "sq_completions"):
+                self.replace(f"udma-node{node}-udma.log", f"{field}=64", f"{field}=128")
+
+    def test_expected_sizes_complete_and_legacy_compatible(self):
+        self.add_second_size()
+        self.assertEqual(audit(self.root, expected_sizes=[4096, 2048])["expected_sizes"], [4096, 2048])
+        self.assertIsNone(audit(self.root)["expected_sizes"])
+
+    def test_expected_sizes_missing_extra_or_reordered_rejected(self):
+        self.add_second_size()
+        for expected in ([4096, 2048, 1024], [4096], [2048, 4096]):
+            with self.subTest(expected=expected), self.assertRaisesRegex(AuditError, "size sequence"):
+                audit(self.root, expected_sizes=expected)
+
+    def test_expected_sizes_invalid_or_duplicate_rejected(self):
+        for expected in ([], [4096, 4096], [0], [-1], [2**32], [True], [4096.0], ["4096"], "4096"):
+            with self.subTest(expected=expected), self.assertRaises(AuditError):
+                audit(self.root, expected_sizes=expected)
+
     def test_runtime_reliability_profile_matches_effective_manifest(self):
         manifest = self.root / "run-manifest.txt"
         log = self.root / "ns3.log"

@@ -46,6 +46,19 @@ misleading performance results on an in-scope path still require fixes.
 
 ## Stage3 started: synchronized bandwidth (2026-10-08)
 
+Latest accepted sweep/sensitivity: [READ2 B–4 KiB and link rate](read-small-sweep-20261009.md).
+All12 sizes complete continuously in one required-sync session, official
+READ-B/n2048/depth512/l16/Q16:49152 WQEs, each endpoint24 SQ wraps,
+observed pending peak16, wall178.059 s. Average4 KiB output7.79002 GB/s;
+small-size bandwidth is approximately linear with payload at1.902 Mpps.
+Matched2 B/4 KiB/64 KiB runs at400G and200G per port pass independently:
+64 KiB93.59715→48.07115 GB/s,4 KiB7.79040→7.78942 GB/s; total wall
+145.713/148.765 s. These are perftest-B reports in the two-port topology,
+not single-port saturation or the original single-direction user command.
+The checker now optionally requires the exact expected-size sequence so a
+partial sweep cannot count as complete. Next: strict single-direction READ
+audit, batching/CQ/outstanding sensitivity and multi-resource contention.
+
 Latest accepted profile correction: [CTP reliability and READ512](ctp-reliability-profile-20261009.md).
 Synchronization no longer automatically enables our experimental TA timeout
 replay. The normative CTP implementation example relies on reliable lower-layer
