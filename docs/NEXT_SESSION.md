@@ -1,74 +1,16 @@
-# New-session handoff — 2026-10-09
+# 工作区交接说明
 
-Read `AGENTS.md` first. The user requested disk cleanup and a stopped environment
-to continue in a new conversation. Do not restart experiments automatically.
+本文件是继续本仓库工作时的入口。先阅读[文档目录](README.md)，再按任务选择[架构](architecture.md)、[同步](synchronization.md)、[官方软件栈集成](guest-driver-integration.md)、[编译与运行](build-and-run.md)、[拓扑编排](topology-orchestration.md)。以当前源码、解析后的运行 manifest 和具体镜像/checkpoint 指纹为准，不要直接沿用某次实验的“当前值”。
 
-## Code and runtime
+## 当前可用路径
 
-- Repository: `/Users/caobo/workspace/openurma-gem5-lab`.
-- Branch: `feature/ns3ub-network-backend`.
-- Latest implementation commit: `63b0d0e`; previous functional gate: `3d2ca71`.
-- Code is locally committed; these changes were NOT pushed. Do not push without
-  authorization. Cleanup did not revert code or reset the branch.
-- Docker container: `ubsim-gem5-lab`, stopped for handoff. Start it with
-  `docker start ubsim-gem5-lab` when needed.
-- No host or container simulator processes remained before cleanup.
-- Existing `ubsim` heartbeat automation was already PAUSED; keep it paused.
-- Official drivers, sources, current binaries, guest image, reports and PPTs
-  are preserved. Container-side project path: `/workspace/ubsim-gem5-lab`.
+- gem5 全系统：ARM64 官方 OLK/UMDK 客体、独立 UDMA、ns-3-UB；`modern` 声明式任务通过快速启动与 ROI 阶段的 ArmO3/跨进程同步运行。固定配置优先恢复兼容 checkpoint。
+- QEMU TCG：共享同一 UDMA/网络模型；`execution.sync=off` 是功能模式，`required` 启用 `icount` 和进程间同步。两者结果不可混作同一条性能曲线。
+- JSON 拓扑：gem5 和 QEMU 各支持 2–8 节点的单交换机布局，两节点还可直连。QEMU 可异构，gem5 节点使用同一机器 profile。详细限制见[拓扑编排](topology-orchestration.md)。
+- 4 GB `modern` gem5 客体有节点模板 checkpoint，可复用同一基础状态建立多个独立节点；其他镜像或机器参数需逐项检查兼容性。
 
-## Retained ready checkpoints
+## 工作习惯
 
-Only two current state-format-v3 checkpoints remain (~191MiB combined):
+日常功能开发用 `./lab start-ready` 恢复兼容快照；仅在明确需要新内核启动、驱动初始化或新 checkpoint 时冷启动。功能检查用非同步模式，计时结论用有共同虚拟时间轴的模式并保存完整输入和原始输出。启动前后要检查宿主机内存保护和运行目录的状态日志。
 
-- `shell-ready-functional-v3-2port`: fast/official/modular-ns3ub/no-sync/2ports.
-- `shell-ready-timing-v3-1port`: fast/official/modular-ns3ub/ROI-sync/1port.
-
-Functional launch from the macOS repository, when requested:
-
-```sh
-docker start ubsim-gem5-lab
-./lab start-ready --profile fast --provider official \
-  --network-backend modular-ns3ub --no-sync --ub-port-count 2
-./lab sync
-./lab attach 0
-# A separate terminal: ./lab attach 1
-```
-
-Use `start-ready`, not routine cold boot. `./lab sync` here initializes OOB and
-checks the timer; the no-sync launch remains a functional, not timing, test.
-
-## Accepted evidence and unresolved work
-
-- `docs/validation/gem5-functional-current-20261009.md`:27/27 official perftest
-  functional cases from a restored checkpoint; not gem5 byte-integrity proof.
-- `docs/validation/qemu-functional-matrix-20261009.md`: QEMU payload/queue/multi
-  functional evidence. Full-JFC overflow recovery remains incomplete.
-- `docs/validation/gem5-timing-1port-20261009.md`: latest bounded timing attempts.
-  No synchronized bandwidth result accepted. Do not report old no-sync BW as
-  valid performance or tune constants to match physical hardware.
-
-Timing entry ABI, ns-3 background-event gate, and COMMIT/SYNC epoch handoff were
-fixed. SEND now executes8 WQEs per endpoint (network16/16 complete), but the
-early finisher blocks inside gem5's synchronous exit-fence wait, stops advancing
-the conservative horizon, and prevents the other host's tail DMA from finishing.
-Next repair is an event-driven exit drain: pause guest CPU, continue real gem5
-device events and finite conservative horizons, then commit/rebase/resume only
-when ownership drains. Do NOT grant infinite horizons, synthesize time or skip
-pending DMA. Add asymmetric-finish/delayed-DMA evidence before claiming success.
-
-## Cleanup performed
-
-- Removed168 untracked experiment `*.shm` ring files,42.165GiB allocated.
-  Kept the logs/JSON/manifests/results; experiments now~122MiB.
-- Removed12 explicitly identified inactive container `/tmp` shared-memory
-  files (~3.3GiB logical allocation). Kept temporary logs.
-- Removed five obsolete checkpoints: `post-rma-verified`,
-  `shell-ready-full-ummu`, `shell-ready-rma-cap-fixed`, `shell-ready-v2`,
-  `shell-ready-v3` (~497MiB).
-- Deleted files were disposable runtime state, not moved to Trash; the old
-  snapshots cannot be restored without recreating them. Current ready snapshots
-  and committed code remain. Docker disk-image space reclamation may lag deletion.
-- Do not blanket-prune Docker: other CANN/HCCL images and volumes are unrelated.
-- Future native experiment cleanup should unlink ring files after all peers
-  exit; retain diagnostic logs, not shared-memory dumps.
+早期逐日实验、性能定位与修复过程原文保存在[历史交接材料](validation/handoff-history-20261021.md)。它包含不同日期、不同镜像和配置的结果，只用于追溯证据；不要把其中某一轮数字直接当作当前工程的性能。需要核对实测对照时，从[验证资料索引](validation/README.md)找到对应实验，再检查 `experiments/` 和 `results/` 的原始文件。

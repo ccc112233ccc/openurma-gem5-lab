@@ -1,0 +1,8 @@
+io_cache_size,size_bytes,iterations,device_read_window,average_mib_s,message_rate_mpps,physical_average_mib_s,physical_message_rate_mpps,transcript
+1kB,4096,16384,0,13135.31,3.362640,45172.39,11.564132,read-bw-4096-16384-pipelined-ordered.txt
+1kB,4096,16384,64,12819.78,3.281863,45172.39,11.564132,read-bw-4096-16384-window64.txt
+1kB,4096,16384,128,13006.43,3.329647,45172.39,11.564132,read-bw-4096-16384-window128.txt
+1kB,4096,16384,256,26045.68,6.667694,45172.39,11.564132,read-bw-4096-16384-window256-wakeup-defer.txt
+1kB,4096,16384,512,12970.19,3.320370,45172.39,11.564132,read-bw-4096-16384-window512.txt
+1kB,2,16384,256,12.67,6.640632,37.92,19.882045,read-bw-2-16384-window256-wakeup-defer.txt
+1kB,65536,1024,256,46734.55,0.747753,45588.18,0.729411,read-bw-65536-1024-window256-wakeup-defer.txt

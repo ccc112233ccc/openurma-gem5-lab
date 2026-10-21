@@ -1,0 +1,6 @@
+size_bytes,iterations,peak_mib_s,average_mib_s,message_rate_mpps,wall_seconds,transcript
+2,16384,0.92,0.92,0.479916,6.574,read-bw-00-s2.uart.txt
+128,16384,58.69,58.58,0.479915,6.484,read-bw-01-s128.uart.txt
+4096,16384,1878.0,1874.8,0.479948,6.544,read-bw-02-s4096.uart.txt
+65536,2048,29592.8,29491.02,0.471856,7.414,read-bw-03-s65536.uart.txt
+1048576,256,46746.45,46713.96,0.046714,9.096,read-bw-04-s1048576.uart.txt

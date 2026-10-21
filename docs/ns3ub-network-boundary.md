@@ -1,162 +1,38 @@
-# gem5 / ns-3-UB physical-port boundary
+# UDMA 与 ns-3-UB 的设备网络边界
 
-## Scope
+## 边界原则
 
-The integration boundary is the cable-facing side of each standalone UDMA
-device process. The host simulator provides CPU, memory and interrupts through
-UB-HOST; device behavior belongs to `udma-device-sim`; the switched fabric
-belongs to the ns-3-UB process.
+每台机头外有一份独立 UDMA 设备进程。机头通过 `UB-HOST` 提供客体物理内存、MMIO 和中断；UDMA 通过 `UB-NET` 与一个 ns-3-UB 网络进程相连。每项队列、延迟和状态机应在一侧计入一次，避免 CPU、设备和网络重复收费。
 
-This rule is normative: a delay, queue, state machine, or fault is modeled by
-exactly one side of the boundary.
-
-## Ownership
-
-| Behaviour | Owner |
+| 行为 | 负责组件 |
 | --- | --- |
-| Official UMDK provider and kernel drivers | guest software in gem5 |
-| Doorbells, SQ/RQ/CQ, WQE decoding and CQE generation | standalone UDMA device |
-| DMA, address translation, token checks and IOTLB | standalone UDMA device |
-| TP activation and TP-to-physical-port selection | standalone UDMA device |
-| SQE decoding and complete-WQE UB-NET envelopes | standalone UDMA device |
-| CTP segmentation, TASSN/window, WQE ordering and request retransmission | native ns-3-UB endpoint/Jetty |
-| Target DMA and initiator CQE generation | standalone UDMA device |
-| Host NIC egress queue and port selection | standalone UDMA device |
-| Endpoint-to-fabric propagation and lookahead | UB-NET boundary configured by fabric adapter |
-| Switch ingress processing and VOQ admission | ns-3-UB |
-| Switch ingress/egress queues, arbitration and forwarding | ns-3-UB |
-| Switch egress-port serialization | ns-3-UB |
-| Fabric routing, flow control, congestion and link faults | ns-3-UB |
+| 官方 provider、OLK UB/UMMU/UDMA 驱动 | gem5/QEMU 客体 |
+| 设备发现、寄存器、管理队列、资源与 TP/Jetty 上下文 | UDMA 模型 |
+| SQE/RQE/CQE、门铃、令牌与地址翻译、客体内存 DMA、MSI | UDMA 模型 |
+| WQE 解析、源物理端口选择、完整操作封套 | UDMA 模型 |
+| CTP 操作分段、TASSN、顺序、窗口和可选请求重传 | ns-3-UB 原生端点/Jetty |
+| 链路状态、端口序列化、交换队列、仲裁、转发和故障 | ns-3-UB |
+| 目标内存动作、发起端 CQE 生成 | 对应端的 UDMA 模型 |
 
-UB-NET transports one complete WQE envelope from UDMA to the native ns-3-UB
-endpoint. Large envelopes may be split into IPC-ring chunks, but those chunks
-are not transport segments. Host DMA requests and WQE completion state never
-cross this boundary. The native Jetty creates the real CTP/UPI/EID/TA packet
-stream; the adapter invokes the target UDMA for each resulting DMA operation.
+`UB-NET` 传输的是完整 WQE 的网络封套，不传递主机 DMA 请求或内部 CQE 状态。封套若超过共享内存环单条记录可承载的大小，IPC 会分片，但这种分片不等同于 CTP 包。ns-3-UB 端点将封套转为原生 CTP/UPI/EID/TA 数据流；交换机只按端口和目的地址转发，不解析 WQE 或访问客体内存。代码入口为 [`ub-net-adapter.cc`](../integrations/ns3ub/ub-net-adapter.cc)、[`protocol/ub_net`](../protocol/ub_net/) 与独立[设备进程](../components/udma-device-sim/)。
 
-## CTP transaction segmentation
+## CTP 操作生命周期
 
-The native ns-3-UB endpoint owns CTP segmentation. SEND is a single-packet
-operation and is rejected above the 4-KiB transport MTU. WRITE and READ are
-split into at most 4-KiB transaction segments. Every request segment receives
-a monotonically increasing TASSN; WRITE TAACK and READ response packets retain
-the request TASSN and transaction offset.
+- SEND 当前按单包操作处理，超过 4 KiB 传输 MTU 的请求会被拒绝。READ 和 WRITE 则以最多 4 KiB 的**有效载荷段**执行；不把 2 B、128 B 等小操作填充成 4 KiB 有效数据。
+- 原生 Jetty 为请求段分配 TASSN，维护窗口和 NO/RO/SO 顺序状态。READ 响应与 WRITE 确认带回对应请求的序号和偏移。所有段完成后，原生传输服务通知发起端 UDMA，由其产生官方格式的 CQE。
+- 目标端 UDMA 对每段分别执行地址校验、翻译与 DMA。重放时目标端应抑制重复 WRITE/READ 内存动作，并重放相应确认或响应。请求丢失、确认丢失、READ 响应丢失和重试耗尽均有局部契约测试。
+- CTP 请求超时重传是**可配置的模型功能**；当前声明式启动器的默认配置为 `off`，即按无丢包下层运行。启用重传时，超时和预算在虚拟时间中计算。拥塞反馈标记与恢复速率也属于可配置的实验模型政策，不能据此推断真实设备的具体算法。
 
-The remote UDMA performs address translation and DMA independently for every
-segment. The native CTP transaction context retires TASSNs and completes the
-WQE only after the complete byte range has finished; the initiating UDMA then
-emits the CQE. IPC ring fragmentation is therefore no longer confused with a
-CTP transaction segment.
+这些规则说明现有实现方式，不宣称覆盖公开 URMA/CTP 的全部协议细节。模型审计与尚未验证部分见[网络模型审计记录](validation/ns3ub-rma-model-audit-20261010.md)。
 
-Compact EIDs are registered as native ns-3-UB CTP Entities.  Both physical
-ports are Entity members, and the switch resolves a wildcard destination CNA
-through the Entity registry and load-balance field.  The switch does not
-segment WQEs, allocate TASSNs, access guest memory, or decide WQE completion.
+## 物理端口与延迟
 
-Official UDMA SQE `place_odr` values propagate unchanged as NO, RO or SO into
-the native WQE. Native `UbCtpTransportService` owns their admission and
-ordering state. A focused process contract checks all three values and ensures
-an SO WQE cannot overtake a previously submitted RO WQE.
+网络适配器用原生 `UbSwitch`、`UbPort`、`UbLink` 连接多个设备端口，或在两节点直连任务中仅建立一条 `UbLink`。EID 选择目标端点，物理端口号选择该端点的入口或出口；控制握手用的 IP 地址不参与 UB 数据转发。
 
-For WRITE and READ, the same native service retains the encoded request
-segment until its TAACK or READ response arrives. A virtual-time RTO requeues
-that exact packet through the original native queue and physical port;
-completion removes the retained segment. The fabric therefore owns timeout
-and retransmission, while the target UDMA still owns the physical memory
-action. Focused contracts cover both loss of one request segment and loss of
-its TAACK. After a lost TAACK, the receiver suppresses the duplicate WRITE and
-replays the cached TAACK without repeating the target DMA. An
-exhausted retry budget terminates the native WQE and is translated by UDMA to
-an official CQE with ACK-timeout status. A lost READ response follows the same
-request retry path; the target caches the completed response, suppresses the
-duplicate READ DMA, and rebuilds the response packet without executing memory
-access again.
+交换拓扑中，端点到网络的单向传播延迟位于 `UB-NET` 边界，交换处理延迟在每次交换转发时计一次。内部 `UbLink` 的传播延迟为零以避免重复。网络还独立计入端口序列化、队列和仲裁。因此配置的固定延迟之和并非完整 `read_lat`。直连没有交换处理，单条链路的单向时延分摊到两端边界。
 
-## Process topology
+## 同步与链路状态
 
-For two hosts the target timed system has five processes:
+`FRAME` 与 `SYNC` 在每个端口的 FIFO 中保持顺序；`SYNC` 公告安全时间界，不携带 EID、Jetty 或工作负载身份。同步开启时，网络进程只能推进到全部输入链路允许的最早安全时刻；背压会阻止生产者越过尚未交付的数据。同步的启停由启动器按运行模式决定，gem5 `modern` 的 ROI 生命周期与 QEMU TCG `icount` 的区别见[仿真同步与计时](synchronization.md)。
 
-```text
-gem5/QEMU 0 <=> UDMA 0 <=> ns-3-UB fabric <=> UDMA 1 <=> gem5/QEMU 1
-```
-
-An N-host run uses N host-simulator processes, N UDMA device processes and one
-ns-3-UB fabric process. Each physical port has independent link and queue state.
-
-## Adapter contract
-
-The target implementation uses simulator-neutral UB-NET v1 over the pinned
-SimBricks shared-memory transport. Each fixed-size record has a 64-byte header
-followed by either:
-
-* `FRAME`: an opaque wire-visible UB frame and its route metadata;
-* SimBricks `SYNC`: a null-message promise for conservative synchronization; or
-* `LINK_STATE`: reserved control information.
-
-EIDs choose the destination endpoint.  Physical port identifiers choose the
-source and destination port within that endpoint.  IP addresses remain part
-of the userspace resource-exchange control path and never route UB data in the
-fabric process.
-
-The positive UB-NET boundary latency represents endpoint-to-fabric propagation
-and provides conservative lookahead. ns-3 owns port serialization, switch VOQ
-admission, arbitration and queueing. Internal `UbLink` propagation is zero in
-the adapter so the boundary delay is not charged twice.
-
-The complete process and protocol implementation is reviewable in
-`integrations/ns3ub/ub-net-adapter.cc` and `protocol/ub_net/`. The public
-ns-3-UB source tree is a pinned generated dependency, not the owner of this
-lab-specific ABI.
-
-## Virtual time
-
-FRAME and SYNC share the same per-port FIFO. A SYNC record promises that the
-sender will not later publish an earlier `receive_tick` on that FIFO.  The
-positive host-link propagation delay is the conservative lookahead.
-
-The ns-3-UB process may advance only to the minimum safe horizon advertised by
-every physical ingress link. It must execute this synchronization in C++ and must
-not return to Python for every lookahead interval.  Wall-clock scheduling is
-never used as simulated latency.
-
-Synchronization starts with the simulator and uses one absolute virtual-time
-axis. SYNC terminates at the adjacent fabric adapter and carries no EID, TP,
-pair, workload or ROI state. EIDs route FRAME only. This lets independent flows
-start at different times without creating pair-specific epochs or barriers.
-
-## Current and future coverage
-
-The native fabric and full-system launcher cutover are complete. Contract
-tests cover synchronized and asynchronous execution, NO/RO/SO WQE order
-propagation, and one injected WRITE-request loss followed by virtual-time RTO
-retransmission. Full-system runs cover multiple endpoints and physical ports.
-Native flow control is active for the validated lossless runs. Request loss
-and TAACK loss plus retry exhaustion now have focused recovery contracts.
-READ-response loss now also has a focused replay contract. Congestion feedback,
-larger-scale MTP profiling and optional MPI partitioning inside ns-3-UB remain
-future work. The first congestion-feedback stage is present: a received CTP
-CNP halves the destination/EID/VL rate and gates later data fragments on
-virtual time without delaying ACK or CNP control traffic. Optional additive
-rate recovery is configured with `--ctp-recovery-interval-ps` and
-`--ctp-recovery-step-bps` (both required; disabled by default). This is an
-experimental model policy, not a claim of normative UB/DCQCN behavior.
-Recovery is calculated from elapsed virtual time when the rate is used, with
-no periodic idle timer. Shared destination/EID/VL pacing wakes all waiting
-source Entities, not only the first waiter.
-
-The focused A/B process contract measures the first-to-second data-fragment
-gap, excluding the later SO ordering wait: 0 ps without CNP and 256,000 ps
-with an injected CNP at a configured 2-Gbit/s line rate. A separate native
-test covers recovery epochs, floor/cap, shared state and VL isolation.
-Queue-triggered feedback is now available via `--ctp-mark-threshold-bytes`:
-the switch marks native CNA16 FECN above the configured egress backlog; the
-receiver returns CTP CNP through its control queue and the reverse fabric.
-`--ctp-cnp-interval-ps` bounds feedback frequency per reverse Entity key.
-Both admission and actual data-queue dequeue honor the shared congestion
-rate; ACK/CNP bypass the pacing gate. Marking is disabled by default.
-
-The three-host native contract compares disabled feedback, two-source
-contention with feedback, and single-source no-congestion operation. Each
-source has two Entities sharing the destination/VL state. See
-[queue feedback validation](validation/ctp-queue-feedback.md) for parameters,
-results, model-policy boundaries and remaining full-system validation.
+`LINK_STATE` 由网络边界向 UDMA 报告端口状态。UDMA 保留 TP 到物理端口的选择状态，并对不可用端口作相应处理。链路速率、延迟、交换处理时间和端口数由[拓扑 JSON](topology-orchestration.md)给出；正式性能报告必须保留解析后的 manifest。

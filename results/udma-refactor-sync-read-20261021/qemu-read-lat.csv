@@ -1,0 +1,6 @@
+size_bytes,iterations,samples,average_us,p99_us,wall_seconds,transcript
+2,256,256,8.58,18.34,89.465,read-lat-00-s2.uart.txt
+128,256,256,8.54,18.34,4.829,read-lat-01-s128.uart.txt
+4096,256,256,8.72,18.34,4.938,read-lat-02-s4096.uart.txt
+65536,256,256,9.97,19.66,4.774,read-lat-03-s65536.uart.txt
+1048576,256,256,29.84,39.62,8.228,read-lat-04-s1048576.uart.txt

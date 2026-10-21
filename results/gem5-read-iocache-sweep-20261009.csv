@@ -1,0 +1,10 @@
+io_cache_size,size_bytes,iterations,sequence,average_mib_s,message_rate_mpps,transcript
+1kB,2,16384,1,6.33,3.320985,read-bw-2-16384-iocache1kb-first.txt
+1kB,4096,16384,2,25643.02,6.564614,read-bw-4096-16384-iocache1kb-second.txt
+1kB,2,16384,3,13.03,6.829039,read-bw-2-16384-iocache1kb-repeat.txt
+2MB,2,16384,1,7.59,3.979547,read-bw-2-16384-iocache2mb.txt
+2MB,4096,16384,2,38409.19,9.832754,read-bw-4096-16384-iocache2mb.txt
+2MB,2,16384,3,18.30,9.596352,read-bw-2-16384-iocache2mb-repeat.txt
+2MB,2,16384,4,18.77,9.841202,read-bw-2-16384-iocache2mb-repeat2.txt
+2MB,4096,16384,5,38534.17,9.864748,read-bw-4096-16384-iocache2mb-repeat.txt
+2MB,65536,1024,7,46738.62,0.747818,read-bw-65536-1024-iocache2mb.txt

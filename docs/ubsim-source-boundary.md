@@ -1,37 +1,19 @@
-# UBSim source boundary
+# 源码归属与版本边界
 
-UBSim is the name of this lab and its stable `UBSIM_*` configuration namespace.
-The executable path does not fetch, build, or link the retired compatibility
-repository that was used during the first prototype.
+UBSim 是本项目及 `UBSIM_*` 配置命名空间的名称。运行路径不依赖早期原型的兼容仓库、SystemC 框架或替代 provider。
 
-## Current sources of truth
-
-| Responsibility | Source |
+| 职责 | 源码位置 |
 | --- | --- |
-| Linux UB/UBUS/UBASE/UBCORE/UBURMA/UDMA drivers | pinned openEuler OLK 6.6 checkout (`oe66`) |
-| UMMU kernel and userspace support | pinned openEuler UMMU checkout (`deps/ummu`) |
-| `liburma`, `urma_admin`, `urma_perftest`, UDMA provider | pinned openEuler UMDK checkout (`sources/umdk`) |
-| guest CPU, memory and platform | pinned gem5 plus `configs/arm64_fs.py` |
-| MMIO/DMA/IRQ simulator boundary | lab-owned UB-HOST protocol and thin gem5/QEMU adapters |
-| device behavior | lab-owned standalone `udma-device-sim` and `udma-model` |
-| link, switch, routing and queueing | pinned ns-3-UB plus lab-owned UB-NET adapter |
+| 官方 OLK UB/UBUS/UBASE/UBCORE/UBURMA/UDMA 驱动 | 固定版本 `oe66/` |
+| 官方 UMMU 内核与用户态支持 | 固定版本 `deps/ummu/` |
+| `liburma`、`urma_admin`、`urma_perftest`、UDMA provider | 固定版本 `sources/umdk/` |
+| gem5 主机、机器配置及薄适配器 | `gem5/`、`configs/arm64_fs.py`、`integrations/gem5/` |
+| QEMU 薄适配器 | `integrations/qemu/` |
+| 设备行为 | `components/udma-model/`、`components/udma-device-sim/` |
+| CTP、交换、直连与链路 | `sources/ns-3-ub/`、`integrations/ns3ub/` |
+| 进程间协议 | `protocol/ub_host/`、`protocol/ub_net/` |
+| 可复现的上游变更 | `patches/source/` |
 
-The official driver and provider sources are not patched to emulate hardware.
-They execute normally inside the guest. Missing hardware behavior is supplied
-outside the guest through UB-HOST; wire-visible frames cross UB-NET into the
-ns-3 process.
+`scripts/fetch-sources.sh` 与根目录 [`SOURCE_REVISIONS.md`](../SOURCE_REVISIONS.md)给出固定版本的获取方式。官方代码与项目自有仿真模型分开维护；项目自有的 `ubsim_ub_v2m.ko` 是给模拟平台提供 MSI 域的桥接模块，不是官方驱动。
 
-## Reproducibility
-
-`scripts/fetch-sources.sh` reconstructs the tree from public upstreams and the
-reviewable gem5/UMDK bundles under `patches/source/`. There is deliberately no
-legacy bundle, SystemC hardware scaffold, compatibility provider, or
-in-process peer-ring backend.
-
-Historical result documents are evidence only and are not build inputs.
-
-For operation-level support, simplifications and missing behavior, see the
-[official driver coverage audit](validation/official-driver-coverage.md).
-Module packaging or successful command completion alone is not proof of
-complete hardware behavior. The guest also includes the lab-owned
-`ubsim_ub_v2m.ko` bridge, which is not an official UB driver.
+加载模块、工具能运行或一次 benchmark 成功，不代表设备所有行为均已覆盖。操作级覆盖与假设见[驱动覆盖审计](validation/official-driver-coverage.md)。历史记录仅作证据，不是构建输入。

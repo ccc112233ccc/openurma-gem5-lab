@@ -1,79 +1,19 @@
-# KVM functional mode
+# gem5 KVM 功能模式
 
-The `kvm` profile accelerates **guest instruction execution** with gem5's
-`ArmV8KvmCPU`. It does not replace the modeled UB hardware: UDMA/UMMU, MSI and
-GIC delivery, SQ/CQ processing and the switch remain in the standalone UDMA
-and ns-3 processes. Guest memory runs as `atomic_noncaching`, so KVM
-is for bring-up and functional testing, not CPU/cache performance prediction.
+`kvm` profile 使用 gem5 的 `ArmV8KvmCPU` 加速客体指令执行。UDMA、UMMU、中断、队列以及 ns-3-UB 网络仍走本项目的独立模型。该模式的客体内存行为以快速功能执行为主，适合启动、驱动与数据正确性检查，不用于 CPU/cache 性能预测。
 
-## Prerequisites and launch
+## 条件与运行
 
-Use an ARM64 Linux host with readable and writable `/dev/kvm`. A native setup
-needs no extra option. A Docker setup must pass the device while creating the
-container:
+需要 ARM64 Linux 宿主机、可读写的 `/dev/kvm`，以及启用 ARM KVM 的 gem5 构建。启动器在进程创建前核对宿主机架构、KVM 设备及构建配置。当前 KVM 路径限制为一个 vCPU；多 vCPU 与 UB-HOST 事件队列尚未验证。
 
-```bash
-./lab --runtime native setup --jobs 8
-./lab --runtime native start --profile kvm
-
-# Or on an ARM64 Linux Docker host:
-./lab --runtime docker setup --kvm --jobs 8
+```sh
 ./lab start --profile kvm
 ```
 
-KVM defaults to **unsynchronized** adapter execution. The two gem5 guests and
-the switch run independently; DATA still crosses the same shared-memory
-adapter and retains the configured serialization/propagation timestamps, but
-no periodic SYNC horizons are generated. This is the useful KVM mode for fast
-driver, boot and functional validation. Cross-process latency numbers from it
-are not virtual-time performance results.
+默认 `UBSIM_SYNC=auto` 在 KVM profile 中关闭跨进程保守同步，以减少频繁的 KVM 退出。此时仍使用相同的数据接口和设备模型，但不同进程没有共同虚拟时间轴；客体输出的跨进程微秒数不应作为模型计时结果。`--sync` 可用于集成诊断，短前瞻量会显著增加退出开销。实际解析值应检查运行 manifest 的 `virtual_time_synchronization`。
 
-The policy is selected by `UBSIM_SYNC=auto` (the default): `kvm` and
-`kvm_server_o3` resolve to off, while Atomic/Timing/O3 profiles resolve to on.
-Use `--sync` or `--no-sync` to override it, and inspect
-`virtual_time_synchronization` in `run-dual/run-manifest.txt`. For example:
+## 平台限制
 
-```bash
-# Default fast functional KVM execution: no adapter horizons.
-./lab --runtime native start --profile kvm
+KVM 的客体 CPU 特征寄存器来自宿主机，而模型 UMMU 的能力字段由项目配置给出。若宿主机地址宽度/ASID 宽度超过模型 UMMU 的能力，OLK 会关闭 SVA 支持，官方 UDMA 初始化可能在创建 `udma0` 前返回 `-ENODEV`。这不能单独证明 UB 数据路径错误。需要可移植的功能对照时，使用 `fast` profile 与官方 provider，并检查驱动日志、能力字段和运行 manifest。
 
-# Diagnostic only: reproduce strict adapter-local KVM synchronization.
-./lab --runtime native start --profile kvm --sync
-```
-
-The synchronized override is intentionally not the default. With a 100-ns
-lookahead it bounds `ArmV8KvmCPU` to roughly 200-ns KVM slices; each exit may
-also trigger expensive ARM `KVM_GET_ONE_REG` state recovery. It is useful for
-debugging that integration, not for routine execution.
-
-The launcher checks `/dev/kvm`, host architecture, and gem5's generated
-`USE_KVM=1` / `KVM_ISA="arm"` headers before starting any processes. KVM mode
-is restricted to one vCPU because multi-vCPU host event queues have not been
-validated with the UB-HOST adapter. In default unsynchronized mode the thin
-host adapter polls the standalone UDMA process at its configured interval.
-
-## Timer topology
-
-Interpreted gem5 CPUs advertise the architected CP15 timer and hide the
-platform MMIO timer. KVM does the reverse: the upstream configuration hides
-the CP15 timer (otherwise the guest can observe the host counter), while the
-compatibility wrapper retains the MMIO timer. Hiding both causes
-`timer_probe: no matching timers found`; the wrapper logs the selected timer
-topology for every run.
-
-## Official provider caveat
-
-`--profile kvm` uses the official provider and is marked host-dependent in
-both stderr and `run-manifest.txt`. `ArmV8KvmCPU` exposes host CPU ID registers.
-OLK's `ummu_sva_supported()` requires the UMMU output-address width and ASID
-width to cover the CPU values. The current modeled UMMU advertises a 40-bit
-OAS; a wider host therefore causes OLK to clear `UMMU_FEAT_SVA` (bit 22).
-Official `udma_alloc_dev_tid()` unconditionally enables KSVA and consequently
-gets `-ENODEV` before `udma0` appears. Hardware dirty-bit support is correlated
-on the reported host, but it is not the test that clears this bit. This is not
-evidence that the modeled UB datapath failed. Compare against the portable
-Atomic path:
-
-```bash
-./lab --runtime native start --profile fast --provider official
-```
+KVM 客体计时器拓扑与解释执行的 gem5 CPU 不同；平台配置会保留适用的 MMIO 计时器，避免两个计时器接口同时不可见。macOS 不支持本工程的 gem5 KVM 路径。
