@@ -13,7 +13,7 @@ readonly GEM5_COMMIT=d7a08a8b84b0a393a91e259025c0ab123ad60a6b
 
 [[ "$(uname -s)" == Linux ]] || die "run this on Linux (native Ubuntu or the build container)"
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
-for tool in bash git install make mkdir rsync scons; do
+for tool in bash cmp git install make mkdir rsync scons; do
     command -v "$tool" >/dev/null 2>&1 || die "required command is missing: $tool"
 done
 
@@ -21,6 +21,46 @@ done
 actual=$(git -C "$gem5_root" rev-parse HEAD)
 [[ "$actual" == "$GEM5_COMMIT" ]] ||
     die "gem5 is at $actual; expected $GEM5_COMMIT"
+activation_patch="$lab_dir/patches/source/gem5/0002-Defer-thread-activation-during-external-fences.patch"
+[[ -f "$activation_patch" ]] || die "missing gem5 lifecycle activation patch"
+if git -C "$gem5_root" apply --reverse --check "$activation_patch" >/dev/null 2>&1; then
+    note "gem5 lifecycle activation patch already applied"
+else
+    git -C "$gem5_root" apply --check "$activation_patch" ||
+        die "gem5 lifecycle activation patch does not apply cleanly"
+    git -C "$gem5_root" apply "$activation_patch"
+fi
+cmp -s "$activation_patch" <(git -C "$gem5_root" diff -- \
+    src/sim/system.cc) ||
+    die "gem5 lifecycle source differs from the reviewed patch"
+exclusive_patch="$lab_dir/patches/source/gem5/0003-Exclusive-store-stream-prefetch.patch"
+[[ -f "$exclusive_patch" ]] || die "missing exclusive prefetch patch"
+if git -C "$gem5_root" apply --reverse --check "$exclusive_patch" >/dev/null 2>&1; then
+    note "gem5 exclusive prefetch patch already applied"
+else
+    git -C "$gem5_root" apply --check "$exclusive_patch" ||
+        die "gem5 exclusive prefetch patch does not apply cleanly"
+    git -C "$gem5_root" apply "$exclusive_patch"
+fi
+cmp -s "$exclusive_patch" <(git -C "$gem5_root" diff -- \
+    src/mem/cache/base.cc src/mem/cache/cache.cc src/mem/cache/mshr.cc \
+    src/mem/cache/noncoherent_cache.cc \
+    src/mem/cache/prefetch/Prefetcher.py \
+    src/mem/cache/prefetch/queued.cc src/mem/cache/prefetch/queued.hh \
+    src/mem/packet.cc src/mem/packet.hh) ||
+    die "gem5 exclusive prefetch source differs from the reviewed patch"
+serialization_patch="$lab_dir/patches/source/gem5/0005-Serialize-vector-bool.patch"
+[[ -f "$serialization_patch" ]] || die "missing gem5 serialization patch"
+if git -C "$gem5_root" apply --reverse --check "$serialization_patch" >/dev/null 2>&1; then
+    note "gem5 serialization patch already applied"
+else
+    git -C "$gem5_root" apply --check "$serialization_patch" ||
+        die "gem5 serialization patch does not apply cleanly"
+    git -C "$gem5_root" apply "$serialization_patch"
+fi
+cmp -s "$serialization_patch" <(git -C "$gem5_root" diff -- \
+    src/sim/serialize.hh) ||
+    die "gem5 serialization source differs from the reviewed patch"
 if command -v pgrep >/dev/null 2>&1 &&
    pgrep -af '[s]cons.*build/ARM/gem5[.]opt' >/dev/null 2>&1; then
     die "another gem5 SCons build is already running; wait for it to finish"
@@ -62,6 +102,14 @@ note "building ARM gem5.opt with the UB-HOST adapter only (JOBS=$jobs)"
 )
 
 [[ -x "$gem5_root/build/ARM/gem5.opt" ]] || die "gem5.opt was not produced"
+# SCons can reuse a generated ISA target after a source file is restored by a
+# copy that preserves an older timestamp. Reject the known stale DMB decoder
+# from a withdrawn experiment before considering the executable usable.
+decoder="$gem5_root/build/ARM/arch/arm/generated/decoder-ns.cc.inc"
+[[ -f "$decoder" ]] || die "generated ARM decoder is missing"
+if grep -Fq 'const uint8_t access = bits(machInst, 9, 8);' "$decoder"; then
+    die "generated ARM decoder contains the withdrawn DMB LD/ST experiment"
+fi
 "$gem5_root/build/ARM/gem5.opt" -h >/dev/null ||
     die "gem5.opt was produced but is not executable"
 note "ready: $gem5_root/build/ARM/gem5.opt"

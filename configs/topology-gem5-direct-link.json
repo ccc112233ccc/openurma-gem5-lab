@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "gem5-two-heads-direct-400g",
+  "nodes": [
+    {"id": "head-a", "simulator": "gem5", "profile": "modern"},
+    {"id": "head-b", "simulator": "gem5", "profile": "modern"}
+  ],
+  "machine": {"o3_lq_entries": 64, "o3_sq_entries": 64, "l1d_prefetcher": "stride_exclusive"},
+  "devices": [
+    {"id": "udma-a", "node": "head-a", "type": "udma", "eid": 256, "ports": 1, "max_jettys": 47},
+    {"id": "udma-b", "node": "head-b", "type": "udma", "eid": 257, "ports": 1, "max_jettys": 47}
+  ],
+  "switches": [],
+  "links": [
+    {"device": "udma-a", "device_port": 0, "peer_device": "udma-b", "peer_port": 0,
+     "rate_gbps": 400, "latency_ns": 750}
+  ],
+  "execution": {"sync": "required", "checkpoint": "auto"}
+}

@@ -1,0 +1,128 @@
+diff --git a/src/urma/tools/urma_perftest/perftest_run_test.c b/src/urma/tools/urma_perftest/perftest_run_test.c
+index dcc2d26..fbc358a 100644
+--- a/src/urma/tools/urma_perftest/perftest_run_test.c
++++ b/src/urma/tools/urma_perftest/perftest_run_test.c
+@@ -98,6 +98,7 @@ static int toggle_dist_sync(const char *phase)
+ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+ {
+     bool supported;
++    bool rma_bandwidth;
+ 
+     if (!dist_sync_requested()) {
+         return 0;
+@@ -106,14 +107,15 @@ int perftest_dist_time_rendezvous(const perftest_config_t *cfg)
+         cfg->cmd == PERFTEST_READ_LAT ||
+         cfg->cmd == PERFTEST_WRITE_LAT ||
+         (cfg->cmd == PERFTEST_SEND_BW && !cfg->bidirection) ||
+-        ((cfg->cmd == PERFTEST_READ_BW ||
+-          cfg->cmd == PERFTEST_WRITE_BW) && cfg->bidirection);
++        cfg->cmd == PERFTEST_READ_BW ||
++        cfg->cmd == PERFTEST_WRITE_BW;
++    rma_bandwidth = cfg->cmd == PERFTEST_READ_BW || cfg->cmd == PERFTEST_WRITE_BW;
+     if (!supported || cfg->time_type.bs.iterations != 1 ||
+-        cfg->pair_num != 1 || cfg->jettys != 1) {
++        cfg->pair_num != 1 || (!rma_bandwidth && cfg->jettys != 1)) {
+         (void)fprintf(stderr,
+             "Distributed virtual-time synchronization currently supports only "
+-            "iteration-mode send/read/write_lat, unidirectional send_bw, or bidirectional "
+-            "read/write_bw with one pair and one jetty.\n");
++            "iteration-mode send/read/write_lat and unidirectional send_bw with one jetty, "
++            "or read/write_bw with one pair and any positive jetty count.\n");
+         return -1;
+     }
+ 
+@@ -3371,7 +3373,7 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+         (void)fprintf(stderr, "Failed to perform warm_up, api_type: %d.\n", (int)cfg->api_type);
+         goto err_dest_jfs_wr;
+     }
+-    if (cfg->bidirection) {
++    if (cfg->bidirection || dist_sync_rma_bw(cfg)) {
+         for (i = 0; i < cfg->pair_num; i++) {
+             ret = sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].before);
+             if (ret != 0) {
+@@ -3381,7 +3383,7 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+         }
+     }
+     if (dist_sync_rma_bw(cfg)) {
+-        ret = toggle_dist_sync("enable bidirectional RMA bandwidth loop");
++        ret = toggle_dist_sync("enable RMA bandwidth loop");
+         if (ret != 0) {
+             goto err_dest_jfs_wr;
+         }
+@@ -3393,8 +3395,20 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+             cfg->size, ret, (int)cfg->api_type);
+         goto err_dest_jfs_wr;
+     }
++    /* The non-posting peer must remain synchronized until its final READ or
++     * WRITE response has been served. Handshake before leaving the ROI; the
++     * traffic timestamps above already exclude this control exchange. */
++    if (dist_sync_active && !cfg->bidirection) {
++        for (i = 0; i < cfg->pair_num; i++) {
++            ret = sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].after);
++            if (ret != 0) {
++                (void)fprintf(stderr, "Failed to sync time after one-sided RMA bandwidth loop.\n");
++                goto err_dest_jfs_wr;
++            }
++        }
++    }
+     if (dist_sync_active) {
+-        ret = toggle_dist_sync("disable bidirectional RMA bandwidth loop");
++        ret = toggle_dist_sync("disable RMA bandwidth loop");
+         dist_sync_active = false;
+         if (ret != 0) {
+             goto err_dest_jfs_wr;
+@@ -3429,7 +3443,7 @@ static int prepare_run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg,
+ 
+ err_dest_jfs_wr:
+     if (dist_sync_active) {
+-        (void)toggle_dist_sync("disable failed bidirectional RMA bandwidth loop");
++        (void)toggle_dist_sync("disable failed RMA bandwidth loop");
+     }
+     destroy_jfs_wr(ctx);
+     return -1;
+@@ -3444,12 +3458,30 @@ static int run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg)
+     uint32_t i = 0;
+     /* Handle half bidirectional test */
+     if (cfg->comm.server_ip == NULL && !cfg->bidirection) {
++        bool dist_sync_active = false;
+         for (i = 0; i < cfg->pair_num; i++) {
+-            if (sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].before) != 0 ||
+-                sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].after) != 0) {
++            if (sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].before) != 0) {
+                 (void)fprintf(stderr, "Failed to sync time in bw test in server.\n");
+                 return -1;
+             }
++            if (dist_sync_rma_bw(cfg)) {
++                if (toggle_dist_sync("enable one-sided RMA bandwidth server") != 0) {
++                    return -1;
++                }
++                dist_sync_active = true;
++            }
++            if (sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].after) != 0) {
++                (void)fprintf(stderr, "Failed to sync time after bw test in server.\n");
++                if (dist_sync_active) {
++                    (void)toggle_dist_sync("disable failed one-sided RMA bandwidth server");
++                }
++                return -1;
++            }
++            if (dist_sync_active) {
++                if (toggle_dist_sync("disable one-sided RMA bandwidth server") != 0) {
++                    return -1;
++                }
++            }
+             /* Size and iterations of local READ/WRITE/ATOMIC bw test should be filled before sync data */
+             local_bw_report.size = cfg->size;
+             local_bw_report.iters = cfg->iters;
+@@ -3479,8 +3511,10 @@ static int run_bw_once(perftest_context_t *ctx, perftest_config_t *cfg)
+     /* Handle half bidirectional test */
+     if (cfg->comm.server_ip != NULL && !cfg->bidirection) {
+         for (i = 0; i < cfg->pair_num; i++) {
+-            if (sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].before) != 0 ||
+-                sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].after) != 0) {
++            if ((!dist_sync_rma_bw(cfg) &&
++                 sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].before) != 0) ||
++                (!dist_sync_rma_bw(cfg) &&
++                 sync_time(cfg->comm.sock_fd[i], g_bi_exchange_info[cfg->api_type].after) != 0)) {
+                 (void)fprintf(stderr, "Failed to sync time in bw test in client.\n");
+                 return -1;
+             }

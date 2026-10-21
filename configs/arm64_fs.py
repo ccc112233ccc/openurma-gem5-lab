@@ -199,7 +199,7 @@ def create(args):
         "atomic_cache", "timing", "timing_full", "o3", "server_o3",
         "kvm", "kvm_server_o3"
     ))
-    if kvm_boot:
+    if kvm_boot or args.fast_boot_noncaching:
         mem_mode = "atomic_noncaching"
     else:
         mem_mode = "atomic" if args.cpu in atomic_modes or server_switch else "timing"
@@ -391,6 +391,23 @@ def create(args):
                 args.l1d_targets_per_mshr, args.l1d_write_buffers,
                 "mostly_incl",
             )
+            if args.l1d_prefetcher in (
+                "stride", "stride_exclusive", "stride_exclusive_d4",
+                "stride_exclusive_xpage"):
+                # Server cores learn the sequential CQE and SQE streams. The
+                # generic ARM example otherwise leaves every CPU data cache
+                # without a hardware prefetcher, overstating per-entry stalls.
+                cpu.dcache.prefetcher = StridePrefetcher(
+                    degree=4,
+                    distance=4 if args.l1d_prefetcher == "stride_exclusive_d4" else 2,
+                    on_read=True, on_write=True,
+                    exclusive_on_write=(
+                        args.l1d_prefetcher.startswith("stride_exclusive")),
+                )
+                if args.l1d_prefetcher == "stride_exclusive_xpage":
+                    # Translate predicted next-page addresses rather than
+                    # assuming guest physical pages are contiguous.
+                    cpu.dcache.prefetcher.registerMMU(cpu.mmu)
             if args.last_cache_level >= 2:
                 configure_cache(
                     cluster.l2, args.l2_size, args.l2_assoc,
@@ -606,6 +623,12 @@ def main():
         help="physical base of the VExpress_GEM5_V1 64-KiB gem5 pseudo-op "
              "MMIO range")
     parser.add_argument("--cpu-freq", default="3GHz")
+    parser.add_argument("--auto-o3-lifecycle", action="store_true",
+        help="switch server_o3 from Atomic to O3 at a synchronized perftest "
+             "entry fence and back after its exit fence")
+    parser.add_argument("--fast-boot-noncaching", action="store_true",
+        help="bypass caches during server_o3 Atomic boot and idle; the O3 "
+             "measurement switches back to timing mode with cold caches")
     parser.add_argument("--loops-per-jiffy", type=positive_int,
         default=19988480,
         help="Linux lpj= calibration override; scale this with --cpu-freq "
@@ -649,6 +672,10 @@ def main():
         default=8)
     parser.add_argument("--l1i-write-buffers", type=positive_int, default=8)
     parser.add_argument("--l1d-size", default="32kB")
+    parser.add_argument("--l1d-prefetcher",
+                        choices=("none", "stride", "stride_exclusive",
+                                 "stride_exclusive_d4", "stride_exclusive_xpage"),
+        default="none", help="CPU L1D stream prefetch model")
     parser.add_argument("--l1d-assoc", type=positive_int, default=2)
     parser.add_argument("--l1d-latency", type=cache_latency_triplet,
         default=(2, 2, 1), metavar="TAG,DATA,RESPONSE")
@@ -779,6 +806,10 @@ def main():
 
     if args.benchmark_cpu >= args.num_cpus:
         parser.error("--benchmark-cpu must be smaller than --num-cpus")
+    if args.auto_o3_lifecycle and args.cpu != "server_o3":
+        parser.error("--auto-o3-lifecycle requires --cpu=server_o3")
+    if args.fast_boot_noncaching and args.cpu != "server_o3":
+        parser.error("--fast-boot-noncaching requires --cpu=server_o3")
     if args.m5ops_base != VEXPRESS_GEM5_V1_M5OPS_BASE:
         parser.error("VExpress_GEM5_V1 reserves its m5ops MMIO range at "
                      "0x10010000; another address requires another platform "
@@ -921,6 +952,7 @@ def main():
     # outdir and continue. This lets us snapshot after the stack loads, then restore
     # per-experiment (--restore-from) to skip the boot.
     switched_to_o3 = False
+    lifecycle_active = False
     while True:
         # C++ owns synchronization between fences. The pinned gem5 bundle uses
         # the older internal event spelling; both names represent the same
@@ -937,7 +969,42 @@ def main():
                 raise RuntimeError(
                     "lifecycle synchronization requires the external UDMA adapter"
                 )
-            root.system.external_udma.toggleLifecycleSync()
+            if args.auto_o3_lifecycle and not lifecycle_active:
+                m5.switchCpus(root.system, root.system._switch_pairs)
+                switched_to_o3 = True
+                print("[arm64-fs] ArmO3CPU server ROI model active")
+                # switchCpus leaves the simulator drained. If the adapter
+                # suspends its O3 contexts before the next simulate(), gem5's
+                # drainResume() sees their still-Active ThreadContexts and
+                # schedules CPU ticks again. Resume the drained system at the
+                # current tick before the adapter pauses those contexts.
+                resume_event = m5.simulate(0)
+                if resume_event.getCause() != "simulate() limit reached":
+                    raise RuntimeError(
+                        "unexpected exit while resuming O3 before lifecycle drain: "
+                        + resume_event.getCause())
+            root.system.external_udma.beginLifecycleSync()
+            print("[arm64-fs] modular lifecycle synchronization draining")
+            continue
+        if cause == "ubsim lifecycle sync commit":
+            root.system.external_udma.finishLifecycleSync()
+            if (lifecycle_active and
+                    os.environ.get("UBSIM_PROFILE_LIFECYCLE_STATS") == "1"):
+                m5.stats.dump()
+                print("[arm64-fs] dumped ArmO3 lifecycle ROI stats")
+            if args.auto_o3_lifecycle and lifecycle_active:
+                reverse_pairs = [
+                    (new_cpu, old_cpu)
+                    for old_cpu, new_cpu in root.system._switch_pairs
+                ]
+                m5.switchCpus(root.system, reverse_pairs)
+                switched_to_o3 = False
+                print("[arm64-fs] AtomicSimpleCPU fast mode active")
+            lifecycle_active = not lifecycle_active
+            if (lifecycle_active and
+                    os.environ.get("UBSIM_PROFILE_LIFECYCLE_STATS") == "1"):
+                m5.stats.reset()
+                print("[arm64-fs] reset ArmO3 lifecycle ROI stats")
             print("[arm64-fs] modular lifecycle synchronization toggled")
             continue
         if "checkpoint" in cause.lower():

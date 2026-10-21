@@ -1,2 +1,3 @@
 /patches/source/**/*.patch -whitespace
 /integrations/ns3ub/*.patch -whitespace
+/integrations/ns3ub/patches/*.patch -whitespace

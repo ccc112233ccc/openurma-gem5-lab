@@ -33,9 +33,11 @@ struct Host final : d::HostInterface {
     std::unordered_map<std::uint64_t, std::vector<std::uint8_t>> memory;
     bool delay_cq{}, delay_eq{}, delay_msi{};
     std::uint32_t cq_consumer{};
+    std::size_t ci_reads{};
     std::size_t eq_writes{}, cq_writes{}, msi_writes{};
     void DmaRead(std::uint64_t address, std::size_t length, d::ReadCompletion done) override {
         assert(address == Ci && length == 4);
+        ++ci_reads;
         std::vector<std::uint8_t> bytes(4);
         for (unsigned i = 0; i < 4; ++i) bytes[i] = cq_consumer >> (8 * i);
         done(true, std::move(bytes));
@@ -111,6 +113,61 @@ struct Fixture {
 };
 
 int main() {
+    // Two completed SQ entries can own distinct CQ slots concurrently. A
+    // later CQ DMA may finish first, but SQ consumer advances only after the
+    // earlier slot is visible.
+    {
+        Fixture f;
+        f.model.config_.one_shot_jfc_notifications = true;
+        f.model.config_.pipelined_completion_dma = true;
+        f.host.delay_cq = true;
+        auto& sq = f.model.jetty_contexts_[9];
+        sq.depth = 8;
+        sq.completion_queue = 7;
+        sq.is_jetty = true;
+        sq.busy = true;
+        auto state = std::make_shared<d::UdmaModel::SqPipeline>();
+        state->fetching = true;
+        f.model.sq_pipelines_[9] = state;
+        f.model.ReserveSq(9, 1, false);
+        f.model.ReserveSq(9, 1, false);
+        f.model.CompleteSq(9, 1, 1, 0, 0, 8, 0, true);
+        f.model.CompleteSq(9, 2, 1, 1, 0, 8, 0, true);
+        assert(f.host.pending.size() == 2);
+        assert(f.host.pending[0].address == Cq &&
+               f.host.pending[1].address == Cq + 64);
+        assert(f.model.jfc_contexts_.at(7).producer == 2);
+        assert(f.host.ci_reads == 0);
+        std::swap(f.host.pending[0], f.host.pending[1]);
+        f.host.Finish();
+        assert(sq.consumer == 0 && f.model.sq_completions() == 0);
+        f.host.Finish();
+        assert(sq.consumer == 2 && f.model.sq_completions() == 2);
+        assert(f.host.eq_writes == 0 && f.host.msi_writes == 0);
+    }
+    // The official provider polls CQEs unless it arms the JFC. One arm
+    // permits one CEQ/MSI notification; subsequent polling is CQ DMA only.
+    {
+        Fixture f;
+        f.model.config_.one_shot_jfc_notifications = true;
+        f.Post();
+        assert(f.results == std::vector<bool>({true}));
+        assert(f.host.cq_writes == 1 && f.host.eq_writes == 0 &&
+               f.host.msi_writes == 0);
+        const std::uint64_t arm = (std::uint64_t{7} << 32) | (1U << 27);
+        assert(f.model.WriteMmio(0x200040, 8, arm));
+        std::stringstream saved;
+        assert(f.model.SaveState(saved));
+        Fixture restored;
+        restored.model.config_.one_shot_jfc_notifications = true;
+        assert(restored.model.LoadState(saved));
+        assert(restored.model.armed_jfcs_.at(7) == 1);
+        f.Post();
+        assert(f.host.eq_writes == 1 && f.host.msi_writes == 1);
+        f.Post();
+        assert(f.host.cq_writes == 3 && f.host.eq_writes == 1 &&
+               f.host.msi_writes == 1);
+    }
     // Current JFC overflow is fail-closed, NOT CEQ-like credit backpressure.
     // Do not silently equate a held CQ DMA callback with a full hardware CQ.
     {

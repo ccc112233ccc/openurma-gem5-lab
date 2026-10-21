@@ -4,30 +4,26 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
 source "$script_dir/../runtime.sh"
-container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
 run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"
 
-if [[ "$UBSIM_EXECUTION_MODE" == docker ]]; then
-    if ! docker inspect "$container" >/dev/null 2>&1; then
-        echo "Container does not exist: $container" >&2
-        exit 2
-    fi
-    if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != true ]; then
-        echo "Dual-node processes are already stopped with container $container."
-        exit 0
-    fi
-else
-    ubsim_runtime_validate
-fi
+ubsim_runtime_validate
 
 manifest="$run_root/run-manifest.txt"
 network_backend="$(ubsim_exec awk -F= \
     '$1 == "network_backend" { print $2; exit }' "$manifest" 2>/dev/null || true)"
-ub_switch_binary="${UBSIM_UB_SWITCH_BINARY:-$lab/sources/ns-3-ub/build-linux/scratch/ns3.44-ub-net-adapter}"
-runtime_arch="$(ubsim_exec uname -m)"
-udma_device_binary="${UBSIM_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
+if [[ "$(uname -s)" == Darwin ]]; then
+    switch_default="$lab/sources/ns-3-ub/build-macos/scratch/ns3.44-ub-net-adapter"
+    udma_default="$lab/artifacts/udma-device-sim-build-darwin-arm64/udma-device-sim"
+else
+    switch_default="$lab/sources/ns-3-ub/build-linux/scratch/ns3.44-ub-net-adapter"
+    runtime_arch="$(ubsim_exec uname -m)"
+    [[ "$runtime_arch" != arm64 ]] || runtime_arch=aarch64
+    udma_default="$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim"
+fi
+ub_switch_binary="${UBSIM_UB_SWITCH_BINARY:-$switch_default}"
+udma_device_binary="${UBSIM_UDMA_DEVICE_BINARY:-$udma_default}"
 
 stop_one() {
     label=$1
@@ -41,13 +37,17 @@ stop_one() {
         pid=$(sed -n "1p" "$pidfile")
         case "$pid" in ""|*[!0-9]*) echo "$label: invalid pid file"; exit 0;; esac
         kill -0 "$pid" 2>/dev/null || { echo "$label: already stopped"; exit 0; }
-        cmd=$(tr "\000" " " < "/proc/$pid/cmdline")
+        if test -r "/proc/$pid/cmdline"; then
+            cmd=$(tr "\000" " " < "/proc/$pid/cmdline")
+        else
+            cmd=$(ps -ww -p "$pid" -o command=)
+        fi
         printf "%s" "$cmd" | grep -Fq -- "$expected" || {
             echo "$label: refusing to signal reused/unexpected pid $pid" >&2
             exit 3
         }
         kill -TERM "$pid"
-        echo "$label: sent TERM to container pid $pid"
+        echo "$label: sent TERM to pid $pid"
     ' _ "$label" "$pidfile" "$expected"
 }
 
@@ -75,4 +75,4 @@ else
             "$lab/tools/ethernet_relay.py"
     done
 fi
-echo "The runtime environment and any separate single-node gem5 session were left untouched."
+echo "Any separate single-node gem5 session was left untouched."

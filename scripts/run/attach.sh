@@ -4,7 +4,6 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
 source "$script_dir/../runtime.sh"
-container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
 m5term="${UBSIM_M5TERM:-$lab/gem5/util/term/m5term}"
@@ -19,8 +18,6 @@ case "$takeover" in
         ;;
 esac
 
-export DOCKER_CLI_HINTS=false
-
 ubsim_runtime_start
 if ! ubsim_exec test -x "$m5term"; then
     echo "m5term is not built at $m5term" >&2
@@ -28,11 +25,9 @@ if ! ubsim_exec test -x "$m5term"; then
     exit 2
 fi
 
-# A Docker exec process can survive when its host terminal window is closed,
-# leaving gem5's single-client Terminal socket occupied.  Reclaim only an
-# exact m5term process for this UART.  This never touches gem5 or another
-# node's console.  Set UBSIM_ATTACH_TAKEOVER=0 to protect an intentional
-# attachment in another host terminal.
+# Reclaim only an exact m5term process for this UART. This never touches gem5
+# or another node's console. Set UBSIM_ATTACH_TAKEOVER=0 to protect an
+# intentional attachment in another host terminal.
 existing_pids=$(
     ubsim_exec ps -eo pid=,args= |
         awk -v wanted="$m5term localhost $port" '
@@ -75,8 +70,4 @@ fi
 
 echo "Connecting to the gem5 PL011 console on localhost:$port"
 echo "Type ~. to detach without stopping the simulated machine."
-if [[ "$UBSIM_EXECUTION_MODE" == docker ]]; then
-    exec docker exec -it "$container" "$m5term" localhost "$port"
-else
-    exec "$m5term" localhost "$port"
-fi
+exec "$m5term" localhost "$port"

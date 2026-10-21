@@ -1,0 +1,83 @@
+diff --git a/ext/drampower/src/Parametrisable.h b/ext/drampower/src/Parametrisable.h
+index 31a69190f..2b65d3c06 100644
+--- a/ext/drampower/src/Parametrisable.h
++++ b/ext/drampower/src/Parametrisable.h
+@@ -114,7 +114,7 @@ class Parametrisable {
+       *m = static_cast<T>(getParameter(paramName));
+       return true;
+     } else {
+-      *m = static_cast<T>(0);
++      *m = T{};
+       return false;
+     }
+   }
+diff --git a/ext/libfdt/fdt.c b/ext/libfdt/fdt.c
+index cae9a3ed2..41f1ae52a 100644
+--- a/ext/libfdt/fdt.c
++++ b/ext/libfdt/fdt.c
+@@ -64,7 +64,7 @@ const void *fdt_offset_ptr(const void *fdt, int offset, unsigned int len)
+ 
+         p = _fdt_offset_ptr(fdt, offset);
+ 
+-        if (p + len < p)
++        if ((uintptr_t)p + len < (uintptr_t)p)
+                 return NULL;
+         return p;
+ }
+diff --git a/src/base/cprintf_formats.hh b/src/base/cprintf_formats.hh
+index e4c1048e0..db19c2c6d 100644
+--- a/src/base/cprintf_formats.hh
++++ b/src/base/cprintf_formats.hh
+@@ -33,6 +33,7 @@
+ #include <cstring>
+ #include <ostream>
+ #include <sstream>
++#include <string>
+ 
+ #include "base/stl_helpers.hh"
+ 
+@@ -230,9 +231,7 @@ _formatString(std::ostream &out, const T &data, Format &fmt)
+         int flen = foo.str().size();
+ 
+         if (fmt.width > flen) {
+-            char spaces[fmt.width - flen + 1];
+-            std::memset(spaces, ' ', fmt.width - flen);
+-            spaces[fmt.width - flen] = 0;
++            const std::string spaces(fmt.width - flen, ' ');
+ 
+             if (fmt.flushLeft)
+                 out << foo.str() << spaces;
+diff --git a/src/python/embedded.cc b/src/python/embedded.cc
+index 4b129dd13..76086422d 100644
+--- a/src/python/embedded.cc
++++ b/src/python/embedded.cc
+@@ -48,6 +48,7 @@
+ #include <cstdlib>
+ #include <iostream>
+ #include <list>
++#include <vector>
+ 
+ namespace py = pybind11;
+ 
+@@ -75,9 +76,9 @@ EmbeddedPython::getList()
+ py::object
+ EmbeddedPython::getCode() const
+ {
+-    Bytef marshalled[len];
++    std::vector<Bytef> marshalled(len);
+     uLongf unzlen = len;
+-    int ret = uncompress(marshalled, &unzlen, (const Bytef *)code, zlen);
++    int ret = uncompress(marshalled.data(), &unzlen, (const Bytef *)code, zlen);
+     if (ret != Z_OK) {
+         std::cerr << "Could not uncompress code: " << zError(ret) << std::endl;
+         std::abort();
+@@ -85,7 +86,8 @@ EmbeddedPython::getCode() const
+     assert(unzlen == (uLongf)len);
+ 
+     auto marshal = py::module_::import("marshal");
+-    return marshal.attr("loads")(py::bytes((char *)marshalled, len));
++    return marshal.attr("loads")(
++        py::bytes(reinterpret_cast<char *>(marshalled.data()), len));
+ }
+ 
+ bool

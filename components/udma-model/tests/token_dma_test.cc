@@ -31,9 +31,19 @@ struct Host final : d::HostInterface {
     bool synchronous{};
     bool synchronous_ok{true};
     std::size_t issued{};
+    std::unordered_map<std::uint64_t, std::uint64_t> page_table;
     void DmaRead(std::uint64_t address, std::size_t length,
                  d::ReadCompletion completion) override {
         ++issued;
+        if (!page_table.empty()) {
+            const auto found = page_table.find(address);
+            if (length != 8 || found == page_table.end())
+                return completion(false, {});
+            std::vector<std::uint8_t> bytes(8);
+            for (std::size_t byte = 0; byte < bytes.size(); ++byte)
+                bytes[byte] = static_cast<std::uint8_t>(found->second >> (8 * byte));
+            return completion(true, std::move(bytes));
+        }
         auto finish = [length, completion = std::move(completion)](bool ok) mutable {
             completion(ok, std::vector<std::uint8_t>(ok ? length : 0, 7));
         };
@@ -79,6 +89,42 @@ struct Fixture {
 };
 
 int main() {
+    // The official TCT TTBA field preserves bits [11:4]. On 64-KiB Linux,
+    // a 48-bit user's 512-byte PGD can begin inside a 4-KiB physical page.
+    {
+        Fixture f;
+        std::vector<std::uint8_t> context(64, 0);
+        constexpr std::uint64_t root = 0xa081bc00;
+        context[0] = 1;
+        for (std::size_t byte = 0; byte < 8; ++byte)
+            context[16 + byte] = static_cast<std::uint8_t>(root >> (8 * byte));
+        bool completed = false;
+        f.model.CheckMapt(std::move(context), 0xfffff3950000ULL, false,
+            [&](bool ok, std::uint64_t translated_root) {
+                completed = true;
+                assert(ok && translated_root == root);
+            });
+        assert(completed);
+    }
+    // A 64-KiB TCT granule selects three levels with 13-bit table indexes.
+    {
+        Fixture f;
+        constexpr std::uint64_t address = 0x123456789abcULL;
+        constexpr std::uint64_t root = 0x10000;
+        constexpr std::uint64_t l2 = 0x20000;
+        constexpr std::uint64_t l3 = 0x30000;
+        constexpr std::uint64_t physical = 0xabcd0000;
+        f.host.page_table[root + ((address >> 42) & 0x1fffU) * 8] = l2 | 3U;
+        f.host.page_table[l2 + ((address >> 29) & 0x1fffU) * 8] = l3 | 3U;
+        f.host.page_table[l3 + ((address >> 16) & 0x1fffU) * 8] = physical | 3U;
+        bool completed = false;
+        f.model.WalkTokenPageTable(root, address, 0, 1,
+            [&](bool ok, std::uint64_t translated) {
+                completed = true;
+                assert(ok && translated == (physical | (address & 0xffffU)));
+            });
+        assert(completed && f.host.issued == 3);
+    }
     for (bool write : {false, true}) {
         // A failed DMA must not complete while another accepted DMA is live.
         for (std::size_t failed_index : {0U, 1U}) {

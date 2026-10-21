@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>UB Lab · 仿真工作台</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">UB</span><span>UB Lab</span><span class="brand-divider"></span><span class="brand-caption">仿真工作台</span></div>
+      <div class="topbar-right"><span class="local-pill"><i></i>本机工作区</span><span id="clock"></span></div>
+    </header>
+    <aside class="sidebar">
+      <div class="sidebar-label">WORKSPACE</div>
+      <nav aria-label="工作区导航">
+        <button data-page="tasks" aria-current="page"><span class="nav-icon">▦</span>任务</button>
+        <button data-page="topology"><span class="nav-icon">◇</span>编排</button>
+        <button data-page="analysis"><span class="nav-icon">▥</span>运行</button>
+      </nav>
+      <div class="sidebar-foot"><span class="sidebar-line"></span>配置 · 运行 · 复现</div>
+    </aside>
+    <main class="main">
+      <section id="page-tasks" class="page">
+        <div class="page-head"><div><div class="eyebrow">SIMULATION / TASKS</div><h1>仿真任务</h1><p class="subtle">从一个可运行拓扑开始，参数和运行记录保持对应。</p></div><button id="new-toggle" class="button primary">＋ 新建任务</button></div>
+        <section id="new-panel" class="create-panel" hidden>
+          <div class="create-head"><div><h2>新建任务</h2><p class="subtle">选择仿真器和拓扑规模，自动生成节点与连接。</p></div><button id="new-close" class="button quiet">收起</button></div>
+          <div class="form-grid">
+            <label class="field">任务名称<input id="new-name" maxlength="80" value="双机 400G READ 对照" autocomplete="off"></label>
+            <label class="field">仿真器<select id="new-simulator"><option value="gem5">gem5 · 精细计时</option><option value="qemu">QEMU · 功能验证</option></select></label>
+          </div>
+          <div class="shape-form">
+            <div class="shape-badge"><span class="shape-icon">◇ — ⬡ — ◇</span><strong>单叶交换机星型</strong><small>当前支持的拓扑类型</small></div>
+            <label class="field">主机数量<input id="new-host-count" type="number" min="2" max="8" step="1" value="2"></label>
+            <div class="shape-fixed"><span>叶子交换机</span><strong>1 台</strong><small>ns-3-UB 交换芯片</small></div>
+          </div>
+          <div class="create-bottom"><span id="new-scale-note" class="subtle"></span><button id="create-task" class="button primary">生成拓扑 <span aria-hidden="true">→</span></button></div>
+        </section>
+        <section class="card task-section"><div class="section-head"><h2>我的任务</h2><span id="task-count" class="section-extra"></span></div><div id="task-list" class="task-list"><div class="empty">正在读取任务…</div></div></section>
+      </section>
+
+      <section id="page-topology" class="page" hidden>
+        <div class="page-head"><div><div class="eyebrow">SIMULATION / TOPOLOGY</div><h1 id="topology-title">拓扑编排</h1><p id="topology-sub" class="subtle"></p></div><div class="head-actions"><span id="dirty-badge" class="dirty-badge" hidden>未保存</span><button id="copy-task" class="button">复制任务</button><button id="save-task" class="button" hidden>保存配置</button><button id="check-launch" class="button">启动前检查</button><button id="run-task" class="button primary">启动仿真 <span aria-hidden="true">↗</span></button></div></div>
+        <div id="topology-hint" class="notice" hidden></div>
+        <div id="topology-readiness" class="notice" role="status">正在检查启动条件…</div>
+        <div id="launch-preflight-list" class="preflight-list card" hidden></div>
+        <section class="card shape-card"><div class="shape-header"><div><span class="canvas-kicker">TOPOLOGY TYPE</span><h2 id="shape-title">单叶交换机星型</h2><p id="shape-note" class="subtle"></p></div><div class="shape-controls"><div><span>类型</span><strong id="shape-topology">—</strong></div><label>主机<input id="shape-host-count" type="number" min="2" max="8" step="1" value="2"></label><div><span>叶子交换机</span><strong id="shape-leaf-count">1</strong></div></div></div></section>
+        <div class="editor">
+          <section class="card canvas-wrap"><div class="canvas-top"><span class="canvas-kicker">TOPOLOGY PREVIEW</span><span id="canvas-count"></span></div><div id="graph" class="graph" aria-label="仿真拓扑"></div><div id="path-summary" class="path-summary"></div><p class="canvas-help">点击主机、交换芯片或连线，在画布下方查看和修改所选对象的参数。</p></section>
+          <section id="inspector" class="card inspector" hidden><div class="section-head compact"><h2>对象属性</h2><div class="inspector-head-actions"><span id="selection-type" class="section-extra">主机</span><button id="inspector-close" class="button quiet small" aria-label="收起对象属性">收起</button></div></div><div id="inspector-fields" class="inspector-fields"></div></section>
+        </div>
+        <section class="card execution-card"><div class="section-head compact"><h2>运行配置</h2><span class="section-extra">当前拓扑</span></div><div id="execution-fields" class="execution-fields"></div></section>
+      </section>
+
+      <section id="page-analysis" class="page" hidden>
+        <div class="page-head"><div><div class="eyebrow">SIMULATION / RUN</div><h1>运行与实验</h1><p id="run-sub" class="subtle">选择任务后查看运行状态。</p></div><div class="head-actions"><button id="refresh-run" class="button">刷新</button><button id="stop-run" class="button danger" hidden>停止仿真</button></div></div>
+        <div class="status-grid"><section class="card status-card"><span>运行状态</span><strong id="run-state">未运行</strong><small id="run-status-hint">—</small></section><section class="card status-card"><span>仿真器</span><strong id="run-simulator">—</strong><small id="run-layout">—</small></section><section class="card status-card"><span>主机</span><strong id="run-nodes">—</strong><small>点击拓扑中的主机可打开终端</small></section></div>
+        <section class="card experiment-card"><div class="section-head compact"><h2>性能实验配方</h2><span class="section-extra">双机 · 单端口 · URMA CTP</span></div>
+          <div class="recipe-grid">
+            <fieldset class="recipe-ops"><legend>测试项目</legend><label><input type="checkbox" data-operation="read_bw" checked> READ 带宽</label><label><input type="checkbox" data-operation="write_bw"> WRITE 带宽</label><label><input type="checkbox" data-operation="read_lat"> READ 延迟</label><label><input type="checkbox" data-operation="write_lat"> WRITE 延迟</label></fieldset>
+            <label class="field">消息大小 B <input id="recipe-sizes" value="2,32,128,512,2048,4096" placeholder="2,128,4096"></label>
+            <label class="field">Jetty 数量 <input id="recipe-jettys" value="1" placeholder="1,2,4,8"></label>
+            <label class="field">总操作数 <input id="recipe-ops-count" type="number" min="256" value="16384"></label>
+            <label class="field">预热次数 <input id="recipe-warmups" type="number" min="0" value="1"></label>
+            <label class="field">测量重复 <input id="recipe-repeats" type="number" min="1" value="3"></label>
+            <label class="field">队列深度 <input id="recipe-depth" type="number" min="1" value="8192"></label>
+            <label class="field">JFC 深度 <input id="recipe-jfc" type="number" min="1" value="524288"></label>
+            <label class="field">每批提交 <input id="recipe-post" type="number" min="1" value="256"></label>
+            <label class="field">单次超时 秒 <input id="recipe-timeout" type="number" min="10" value="900"></label>
+          </div>
+          <div class="recipe-foot"><p id="recipe-note" class="subtle">预热单独保存，不计入均值。延迟测试目前使用 1 个 Jetty。</p><div class="head-actions"><button id="save-recipe" class="button">保存配方</button><button id="check-experiment" class="button">启动前检查</button><button id="start-experiment" class="button primary">运行实验 ↗</button></div></div>
+          <div id="preflight-list" class="preflight-list" hidden></div>
+        </section>
+        <section class="card experiment-results"><div class="section-head compact"><h2>实验结果</h2><span class="section-extra">按测试项目、消息大小与 Jetty 数汇总</span></div><div class="results-body"><div class="results-toolbar"><select id="run-select" aria-label="选择实验记录"><option value="">暂无实验</option></select><a id="download-results" class="button" hidden>下载 CSV</a></div><p id="experiment-status" class="subtle">尚未运行实验。</p><div id="result-chart" class="result-chart" hidden></div><div id="result-table" class="result-table"></div><pre id="experiment-log" class="experiment-log" hidden></pre></div></section>
+        <section class="card log-card"><div class="section-head compact"><h2>启动日志</h2><span class="section-extra">来自当前启动进程</span></div><pre id="run-log" class="log-output">暂无启动日志。</pre></section>
+        <section class="card artifact-card"><h2>运行产物</h2><p id="run-dir" class="subtle">启动后显示实际运行目录。结果数据以运行目录与原始输出为准。</p></section>
+      </section>
+    </main>
+
+    <aside id="terminal-drawer" class="terminal-drawer" aria-hidden="true" inert>
+      <div class="terminal-head"><div><div class="eyebrow">NODE / CONSOLE</div><h2 id="terminal-title">终端</h2><p id="terminal-state" class="subtle">连接中…</p></div><div class="terminal-head-actions"><button id="terminal-expand" class="button quiet" aria-pressed="false">宽屏</button><button id="terminal-close" class="button quiet">关闭</button></div></div>
+      <div class="terminal-search"><input id="terminal-search" type="search" placeholder="搜索当前输出" aria-label="搜索终端输出"><span id="terminal-search-count">—</span><button id="terminal-prev" class="button quiet" aria-label="上一处">↑</button><button id="terminal-next" class="button quiet" aria-label="下一处">↓</button></div>
+      <pre id="terminal-output" class="terminal-output" tabindex="0" aria-label="终端输出，聚焦后可直接输入按键"></pre>
+      <form id="terminal-form" class="terminal-form"><input id="terminal-input" placeholder="输入命令并按 Enter" autocomplete="off" spellcheck="false" disabled aria-label="终端命令"><button class="button primary" type="submit" disabled>发送</button></form>
+      <p class="terminal-note">聚焦输出区后可直接输入、使用方向键、Tab 或 Ctrl+C；下方输入框适合粘贴整条命令。离线时可搜索最近记录。</p>
+    </aside>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </div>
+</body>
+</html>

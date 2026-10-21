@@ -334,6 +334,12 @@ is_static_elf "$STAGE/usr/bin/ubsim-dist-sync" || die "ubsim-dist-sync is not st
 is_arm64_elf "$STAGE/usr/bin/ubsim-checkpoint" || die "ubsim-checkpoint is not AArch64"
 is_static_elf "$STAGE/usr/bin/ubsim-checkpoint" || die "ubsim-checkpoint is not static"
 
+"$CC" -O2 -static -Wall -I"$GEM5_ROOT/include" \
+    -I"$GEM5_ROOT/util/m5/src" -I"$TOOLS_DIR" \
+    -o "$STAGE/usr/bin/ubsim-readfile" "$TOOLS_DIR/ubsim-readfile.c" "$M5_LIB"
+is_arm64_elf "$STAGE/usr/bin/ubsim-readfile" || die "ubsim-readfile is not AArch64"
+is_static_elf "$STAGE/usr/bin/ubsim-readfile" || die "ubsim-readfile is not static"
+
 # A distinct switchcpu pseudo-op lets the host configuration replace the
 # boot-fast AtomicSimpleCPUs with the configured ArmO3 CPUs at an explicit
 # guest-visible boundary.  It is not a timer and does not guess when boot is
@@ -513,11 +519,12 @@ sha256_file() {
     for ko in $EXTRA_MODULES; do printf ' %s' "$(basename "$ko")"; done
     printf '\n'
     printf 'providers=%s\n' "$available_providers"
+    printf 'udma_provider_variant=%s\n' "${UDMA_PROVIDER_VARIANT:-stock}"
     printf 'commands=urma_admin urma_perftest dropbear dropbearkey'
     if [[ -n "$UBAGG_PROVIDER" ]]; then
         printf ' ubagg_cli ubsim-ubagg-topology'
     fi
-    printf ' ubsim-dist-sync ubsim-checkpoint ubsim-cpu-switch ubsim-enable-sync ubsim-net-up ubsim-help ubsim-status ubsim-lat-server ubsim-lat-client'
+    printf ' ubsim-dist-sync ubsim-checkpoint ubsim-readfile ubsim-cpu-switch ubsim-enable-sync ubsim-net-up ubsim-help ubsim-status ubsim-lat-server ubsim-lat-client'
     for extra in $EXTRA_BINS; do printf ' %s' "$(basename "$extra")"; done
     printf '\n'
     extra_index=0
@@ -528,9 +535,10 @@ sha256_file() {
     done
     # These hashes bind the image to the mutable inputs most likely to change
     # during latency-model work. run-dual.sh compares them before boot, which
-    # catches both an old image and a transiently truncated Docker bind mount.
+    # catches an old image or a transiently truncated file.
     printf 'overlay_init_path=%s\n' "$OVERLAY_DIR/init"
     printf 'overlay_init_sha256=%s\n' "$(sha256_file "$OVERLAY_DIR/init")"
+    printf 'ubsim_readfile_source_sha256=%s\n' "$(sha256_file "$TOOLS_DIR/ubsim-readfile.c")"
     printf 'ubsim_cpu_switch_path=%s\n' "$OVERLAY_DIR/usr/local/bin/ubsim-cpu-switch"
     printf 'ubsim_cpu_switch_sha256=%s\n' "$(sha256_file "$OVERLAY_DIR/usr/local/bin/ubsim-cpu-switch")"
     printf 'ubsim_lat_server_path=%s\n' "$OVERLAY_DIR/usr/local/bin/ubsim-lat-server"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build helper shared by native Ubuntu and the Docker wrapper.
+# Build helper for ARM64 Ubuntu.
 set -euo pipefail
 
 : "${MOONCAKE_DIR:?MOONCAKE_DIR is required}"

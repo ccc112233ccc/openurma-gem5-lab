@@ -17,10 +17,11 @@ can also be supplied through the environment variable shown below.
 
 Profiles:
   --nodes N                     UBSIM_NODE_COUNT (default: 2; 2..8)
-  --profile fast|kvm|server|udma400
+  --profile fast|kvm|server|modern|udma400
                                 UBSIM_DUAL_PROFILE (default: fast;
                                 fast is the AtomicSimpleCPU functional path)
   --restore-checkpoint NAME     restore coordinated state from checkpoints/NAME
+  --make-template               cold boot to a node-neutral checkpoint boundary
 
 CPU, cache, and memory:
   --cpu-mode MODE               UBSIM_CPU_MODE (atomic_fast is portable;
@@ -53,6 +54,7 @@ CPU, cache, and memory:
   --l1i-targets N               UBSIM_L1I_TARGETS
   --l1i-write-buffers N         UBSIM_L1I_WRITE_BUFFERS
   --l1d-size SIZE               UBSIM_L1D_SIZE
+  --l1d-prefetcher none|stride|stride_exclusive|stride_exclusive_d4|stride_exclusive_xpage  UBSIM_L1D_PREFETCHER
   --l1d-assoc N                 UBSIM_L1D_ASSOC
   --l1d-latency T,D,R           UBSIM_L1D_LATENCY
   --l1d-mshrs N                 UBSIM_L1D_MSHRS
@@ -162,6 +164,10 @@ UDMA front end:
   --udma-poll-interval TIME     UBSIM_UDMA_POLL_INTERVAL
   --udma-iotlb-entries N        UBSIM_UDMA_IOTLB_ENTRIES
   --dma-max-outstanding N       UBSIM_DMA_MAX_OUTSTANDING
+  --write-payload-read-window N UBSIM_WRITE_PAYLOAD_READ_WINDOW
+  --max-read-outstanding N       UBSIM_UDMA_MAX_READ_OUTSTANDING (0: unlimited)
+  --max-jettys N                 UBSIM_UDMA_MAX_JETTYS (advertised total)
+  --public-jettys N              UBSIM_UDMA_PUBLIC_JETTYS (reserved range)
 
 Other:
   --provider official           UBSIM_PROVIDER (only supported path; loads
@@ -207,6 +213,7 @@ cli_l1i_mshrs=""
 cli_l1i_targets=""
 cli_l1i_write_buffers=""
 cli_l1d_size=""
+cli_l1d_prefetcher=""
 cli_l1d_assoc=""
 cli_l1d_latency=""
 cli_l1d_mshrs=""
@@ -295,8 +302,13 @@ cli_payload_dma_rate_gbps=""
 cli_udma_poll_interval=""
 cli_udma_iotlb_entries=""
 cli_dma_max_outstanding=""
+cli_write_payload_read_window=""
+cli_max_read_outstanding=""
+cli_max_jettys=""
+cli_public_jettys=""
 cli_provider=""
 restore_checkpoint="${UBSIM_RESTORE_CHECKPOINT:-}"
+make_template=0
 print_config=0
 
 need_value() {
@@ -365,6 +377,8 @@ while (( $# > 0 )); do
         --l1i-write-buffers=*) cli_l1i_write_buffers=${1#*=}; shift ;;
         --l1d-size) need_value "$@"; cli_l1d_size=$2; shift 2 ;;
         --l1d-size=*) cli_l1d_size=${1#*=}; shift ;;
+        --l1d-prefetcher) need_value "$@"; cli_l1d_prefetcher=$2; shift 2 ;;
+        --l1d-prefetcher=*) cli_l1d_prefetcher=${1#*=}; shift ;;
         --l1d-assoc) need_value "$@"; cli_l1d_assoc=$2; shift 2 ;;
         --l1d-assoc=*) cli_l1d_assoc=${1#*=}; shift ;;
         --l1d-latency) need_value "$@"; cli_l1d_latency=$2; shift 2 ;;
@@ -542,10 +556,19 @@ while (( $# > 0 )); do
         --udma-iotlb-entries=*) cli_udma_iotlb_entries=${1#*=}; shift ;;
         --dma-max-outstanding) need_value "$@"; cli_dma_max_outstanding=$2; shift 2 ;;
         --dma-max-outstanding=*) cli_dma_max_outstanding=${1#*=}; shift ;;
+        --write-payload-read-window) need_value "$@"; cli_write_payload_read_window=$2; shift 2 ;;
+        --write-payload-read-window=*) cli_write_payload_read_window=${1#*=}; shift ;;
+        --max-read-outstanding) need_value "$@"; cli_max_read_outstanding=$2; shift 2 ;;
+        --max-read-outstanding=*) cli_max_read_outstanding=${1#*=}; shift ;;
+        --max-jettys) need_value "$@"; cli_max_jettys=$2; shift 2 ;;
+        --max-jettys=*) cli_max_jettys=${1#*=}; shift ;;
+        --public-jettys) need_value "$@"; cli_public_jettys=$2; shift 2 ;;
+        --public-jettys=*) cli_public_jettys=${1#*=}; shift ;;
         --provider) need_value "$@"; cli_provider=$2; shift 2 ;;
         --provider=*) cli_provider=${1#*=}; shift ;;
         --restore-checkpoint) need_value "$@"; restore_checkpoint=$2; shift 2 ;;
         --restore-checkpoint=*) restore_checkpoint=${1#*=}; shift ;;
+        --make-template) make_template=1; shift ;;
         --print-config) print_config=1; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; (( $# == 0 )) || die "unexpected positional argument: $1" ;;
@@ -587,6 +610,7 @@ profile_l1i_mshrs=4
 profile_l1i_targets=8
 profile_l1i_write_buffers=8
 profile_l1d_size=32kB
+profile_l1d_prefetcher=none
 profile_l1d_assoc=2
 profile_l1d_latency=2,2,1
 profile_l1d_mshrs=16
@@ -651,11 +675,20 @@ profile_mem_ctrl_backend_latency=10ns
 profile_mem_ctrl_command_window=10ns
 profile_ub_port_count=1
 profile_peer_topology=l1-switch
+profile_peer_latency_ns=100
+profile_sync_quantum_ns=""
 profile_peer_port_map=""
 profile_peer_port_selection=tp-context
 profile_udma_poll_interval=10ns
 profile_udma_iotlb_entries=64
 profile_dma_max_outstanding=16
+profile_write_payload_read_window=8
+profile_max_jfs_depth=1024
+profile_max_jfr_depth=1024
+profile_max_jfc_depth=4096
+profile_max_read_outstanding=0
+profile_max_jettys=1152
+profile_public_jettys=128
 case "$profile" in
     fast)
         # Fast functional path: keep the official UMDK/provider/driver stack
@@ -709,7 +742,7 @@ case "$profile" in
         # boot is not interrupted by high-frequency adapter events.
         profile_udma_poll_interval=1ms
         ;;
-    server)
+    server|modern)
         # Generic reduced-core Arm server slice.  It deliberately does not
         # claim to reproduce a named CPU: stock gem5 ArmO3 supplies the core,
         # and the cache/memory capacities are explicit, overrideable inputs.
@@ -767,6 +800,43 @@ case "$profile" in
         profile_sq_wqebb_latency=0ns
         profile_payload_dma_latency=0ns
         profile_payload_dma_rate_gbps=0
+        if [[ "$profile" == modern ]]; then
+            # Generic recent Arm server slice. DDR5_6400_4x8 models one
+            # 32-bit subchannel; 16 controllers represent eight dual-
+            # subchannel DIMM channels, not sixteen DIMMs. The 32-GiB
+            # controller capacity is 16 x 2 GiB, with 2 GiB visible to Linux.
+            # The v4 guest image adds synchronized one-sided RMA bandwidth;
+            # a v3 shell checkpoint retains the older perftest in guest RAM.
+            profile_revision=modern-arm-o3-ddr5-6400-v4
+            profile_cpu_freq=3.2GHz
+            profile_mem_size=32GB
+            profile_guest_mem_limit=2GB
+            profile_mem_type=DDR5_6400_4x8
+            profile_mem_channels=16
+            # A 1-KiB DMA coherence cache thrashed on CQE/payload traffic.
+            # The 2-MiB geometry improves matched READ bandwidth tests while
+            # retaining the same coherent DMA path and timing parameters.
+            profile_io_cache_size=2MB
+            # The physical topology has one switch traversed once by each
+            # READ request and response; 500 ns is per traversal.
+            # Each endpoint-to-switch propagation leg is 375 ns. Together
+            # with the switch, this gives a 1.25 us one-way network path.
+            # Keep the host/device link and synchronization quantum at their
+            # original 100 ns while calibrating only the network path.
+            profile_peer_latency_ns=375
+            profile_sync_quantum_ns=100
+            profile_peer_switch_delay=500ns
+            profile_max_jfs_depth=8192
+            profile_max_jfr_depth=8192
+            profile_max_jfc_depth=524288
+            # Device issue credits are independent of advertised guest queue
+            # capacities. Limit simulator in-flight READ work at high depth.
+            profile_max_read_outstanding=256
+            # The target's reported hardware Jetty limit is 47. Keep one
+            # reserved public ID and expose the other 46 in the standard pool.
+            profile_max_jettys=47
+            profile_public_jettys=1
+        fi
         ;;
     udma400)
         profile_provider=official
@@ -794,7 +864,7 @@ case "$profile" in
         # second, synthetic bandwidth term in the default profile.
         profile_payload_dma_rate_gbps=0
         ;;
-    *) die "unknown profile '$profile'; expected fast, kvm, server, or udma400" ;;
+    *) die "unknown profile '$profile'; expected fast, kvm, server, modern, or udma400" ;;
 esac
 
 cpu_mode="${UBSIM_CPU_MODE:-${UBSIM_DUAL_CPU:-$profile_cpu_mode}}"
@@ -825,6 +895,7 @@ l1i_mshrs="${UBSIM_L1I_MSHRS:-$profile_l1i_mshrs}"
 l1i_targets="${UBSIM_L1I_TARGETS:-$profile_l1i_targets}"
 l1i_write_buffers="${UBSIM_L1I_WRITE_BUFFERS:-$profile_l1i_write_buffers}"
 l1d_size="${UBSIM_L1D_SIZE:-$profile_l1d_size}"
+l1d_prefetcher="${UBSIM_L1D_PREFETCHER:-$profile_l1d_prefetcher}"
 l1d_assoc="${UBSIM_L1D_ASSOC:-$profile_l1d_assoc}"
 l1d_latency="${UBSIM_L1D_LATENCY:-$profile_l1d_latency}"
 l1d_mshrs="${UBSIM_L1D_MSHRS:-$profile_l1d_mshrs}"
@@ -889,12 +960,13 @@ mem_ctrl_backend_latency="${UBSIM_MEM_CTRL_BACKEND_LATENCY:-$profile_mem_ctrl_ba
 mem_ctrl_command_window="${UBSIM_MEM_CTRL_COMMAND_WINDOW:-$profile_mem_ctrl_command_window}"
 ub_port_count="${UBSIM_UB_PORT_COUNT:-$profile_ub_port_count}"
 network_backend="${UBSIM_NETWORK_BACKEND:-modular-ns3ub}"
+ub_fabric_layout="${UBSIM_UB_FABRIC_LAYOUT:-switch}"
 ub_transport="${UBSIM_UB_TRANSPORT:-switch-adapter}"
 peer_topology="${UBSIM_PEER_TOPOLOGY:-$profile_peer_topology}"
 peer_port_map="${UBSIM_PEER_PORT_MAP:-$profile_peer_port_map}"
 peer_port_selection="${UBSIM_PEER_PORT_SELECTION:-$profile_peer_port_selection}"
-peer_latency_ns="${UBSIM_PEER_LATENCY_NS:-100}"
-sync_quantum_ns="${UBSIM_SYNC_QUANTUM_NS:-$peer_latency_ns}"
+peer_latency_ns="${UBSIM_PEER_LATENCY_NS:-$profile_peer_latency_ns}"
+sync_quantum_ns="${UBSIM_SYNC_QUANTUM_NS:-${profile_sync_quantum_ns:-$peer_latency_ns}}"
 sync_request="${UBSIM_SYNC:-auto}"
 sync_mode="${UBSIM_SYNC_MODE:-adapter-local}"
 ctp_retransmission_request="${UBSIM_CTP_RETRANSMISSION:-auto}"
@@ -904,6 +976,12 @@ sq_prefetch_wqebbs="${UBSIM_SQ_PREFETCH_WQEBBS:-64}"
 sq_fetch_burst_wqebbs="${UBSIM_SQ_FETCH_BURST_WQEBBS:-16}"
 sq_fetch_max_outstanding="${UBSIM_SQ_FETCH_MAX_OUTSTANDING:-4}"
 completion_event_slots="${UBSIM_COMPLETION_EVENT_SLOTS:-64}"
+max_jfs_depth="${UBSIM_UDMA_MAX_JFS_DEPTH:-$profile_max_jfs_depth}"
+max_jfr_depth="${UBSIM_UDMA_MAX_JFR_DEPTH:-$profile_max_jfr_depth}"
+max_jfc_depth="${UBSIM_UDMA_MAX_JFC_DEPTH:-$profile_max_jfc_depth}"
+max_read_outstanding="${UBSIM_UDMA_MAX_READ_OUTSTANDING:-$profile_max_read_outstanding}"
+max_jettys="${UBSIM_UDMA_MAX_JETTYS:-$profile_max_jettys}"
+public_jettys="${UBSIM_UDMA_PUBLIC_JETTYS:-$profile_public_jettys}"
 peer_link_rate_gbps="${UBSIM_PEER_LINK_RATE_GBPS:-$profile_peer_link_rate_gbps}"
 peer_serialization_stages="${UBSIM_PEER_SERIALIZATION_STAGES:-$profile_peer_serialization_stages}"
 peer_switch_delay="${UBSIM_PEER_SWITCH_DELAY:-$profile_peer_switch_delay}"
@@ -919,9 +997,9 @@ payload_dma_latency="${UBSIM_PAYLOAD_DMA_LATENCY:-$profile_payload_dma_latency}"
 payload_dma_rate_gbps="${UBSIM_PAYLOAD_DMA_RATE_GBPS:-$profile_payload_dma_rate_gbps}"
 udma_poll_interval="${UBSIM_UDMA_POLL_INTERVAL:-$profile_udma_poll_interval}"
 external_udma_poll_interval="${UBSIM_UDMA_HOST_POLL_INTERVAL:-1us}"
-external_udma_host_latency_ns="${UBSIM_UDMA_HOST_LATENCY_NS:-$sync_quantum_ns}"
 udma_iotlb_entries="${UBSIM_UDMA_IOTLB_ENTRIES:-$profile_udma_iotlb_entries}"
 dma_max_outstanding="${UBSIM_DMA_MAX_OUTSTANDING:-$profile_dma_max_outstanding}"
+write_payload_read_window="${UBSIM_WRITE_PAYLOAD_READ_WINDOW:-$profile_write_payload_read_window}"
 provider="${UBSIM_PROVIDER:-official}"
 
 [[ -n "$cli_cpu_mode" ]] && cpu_mode=$cli_cpu_mode
@@ -952,6 +1030,7 @@ provider="${UBSIM_PROVIDER:-official}"
 [[ -n "$cli_l1i_targets" ]] && l1i_targets=$cli_l1i_targets
 [[ -n "$cli_l1i_write_buffers" ]] && l1i_write_buffers=$cli_l1i_write_buffers
 [[ -n "$cli_l1d_size" ]] && l1d_size=$cli_l1d_size
+[[ -n "$cli_l1d_prefetcher" ]] && l1d_prefetcher=$cli_l1d_prefetcher
 [[ -n "$cli_l1d_assoc" ]] && l1d_assoc=$cli_l1d_assoc
 [[ -n "$cli_l1d_latency" ]] && l1d_latency=$cli_l1d_latency
 [[ -n "$cli_l1d_mshrs" ]] && l1d_mshrs=$cli_l1d_mshrs
@@ -1022,9 +1101,43 @@ provider="${UBSIM_PROVIDER:-official}"
 [[ -n "$cli_peer_port_selection" ]] && peer_port_selection=$cli_peer_port_selection
 [[ -n "$cli_peer_latency_ns" ]] && peer_latency_ns=$cli_peer_latency_ns
 [[ -n "$cli_sync_quantum_ns" ]] && sync_quantum_ns=$cli_sync_quantum_ns
+# Derive the default only after command-line overrides are applied.  Topology
+# launches set the quantum explicitly, so an earlier default would leave the
+# host-link latency at the profile's stale value.
+external_udma_host_latency_ns="${UBSIM_UDMA_HOST_LATENCY_NS:-$sync_quantum_ns}"
 [[ -n "$cli_sync" ]] && sync_request=$cli_sync
 [[ -n "$cli_sync_mode" ]] && sync_mode=$cli_sync_mode
 [[ -n "$cli_peer_link_rate_gbps" ]] && peer_link_rate_gbps=$cli_peer_link_rate_gbps
+
+# The topology compiler may override the UB boundary and physical line rate
+# separately for each endpoint.  The existing global values remain defaults
+# for direct launcher calls and for the out-of-band control network.
+[[ "$node_count" =~ ^[0-9]+$ ]] && (( node_count >= 2 && node_count <= 8 )) ||
+    die "node count must be in 2..8"
+node_link_delay_ns=()
+node_link_rate_gbps=()
+if [[ -n "${UBSIM_NODE_LINK_LATENCIES_NS:-}" ]]; then
+    IFS=',' read -r -a node_link_delay_ns <<<"$UBSIM_NODE_LINK_LATENCIES_NS"
+fi
+if [[ -n "${UBSIM_NODE_LINK_RATES_GBPS:-}" ]]; then
+    IFS=',' read -r -a node_link_rate_gbps <<<"$UBSIM_NODE_LINK_RATES_GBPS"
+fi
+if (( ${#node_link_delay_ns[@]} > 0 && ${#node_link_delay_ns[@]} != node_count )); then
+    die "UBSIM_NODE_LINK_LATENCIES_NS needs one entry per node"
+fi
+if (( ${#node_link_rate_gbps[@]} > 0 && ${#node_link_rate_gbps[@]} != node_count )); then
+    die "UBSIM_NODE_LINK_RATES_GBPS needs one entry per node"
+fi
+for ((node = 0; node < node_count; ++node)); do
+    node_link_delay_ns[node]="${node_link_delay_ns[node]:-$peer_latency_ns}"
+    node_link_rate_gbps[node]="${node_link_rate_gbps[node]:-$peer_link_rate_gbps}"
+    [[ "${node_link_delay_ns[node]}" =~ ^[0-9]+$ ]] &&
+        (( node_link_delay_ns[node] >= sync_quantum_ns )) ||
+        die "node$node UB propagation delay must be >= sync quantum"
+    [[ "${node_link_rate_gbps[node]}" =~ ^[0-9]+$ ]] &&
+        (( node_link_rate_gbps[node] > 0 )) ||
+        die "node$node UB link rate must be positive"
+done
 [[ -n "$cli_peer_serialization_stages" ]] && peer_serialization_stages=$cli_peer_serialization_stages
 [[ -n "$cli_peer_switch_delay" ]] && peer_switch_delay=$cli_peer_switch_delay
 [[ -n "$cli_peer_link_overhead_bytes" ]] && peer_link_overhead_bytes=$cli_peer_link_overhead_bytes
@@ -1040,7 +1153,15 @@ provider="${UBSIM_PROVIDER:-official}"
 [[ -n "$cli_udma_poll_interval" ]] && udma_poll_interval=$cli_udma_poll_interval
 [[ -n "$cli_udma_iotlb_entries" ]] && udma_iotlb_entries=$cli_udma_iotlb_entries
 [[ -n "$cli_dma_max_outstanding" ]] && dma_max_outstanding=$cli_dma_max_outstanding
+[[ -n "$cli_write_payload_read_window" ]] && write_payload_read_window=$cli_write_payload_read_window
+[[ -n "$cli_max_read_outstanding" ]] && max_read_outstanding=$cli_max_read_outstanding
+[[ -n "$cli_max_jettys" ]] && max_jettys=$cli_max_jettys
+[[ -n "$cli_public_jettys" ]] && public_jettys=$cli_public_jettys
 [[ -n "$cli_provider" ]] && provider=$cli_provider
+case "$l1d_prefetcher" in
+    none|stride|stride_exclusive|stride_exclusive_d4|stride_exclusive_xpage) ;;
+    *) die "invalid L1D prefetcher '$l1d_prefetcher'" ;;
+esac
 
 # CPU mode may be overridden independently of --profile. Preserve an explicit
 # CLI/environment poll value, but never accidentally pair KVM with the generic
@@ -1125,6 +1246,15 @@ case "$sync_request" in
     off|0|false|no) sync_enabled=0; lifecycle_sync_enabled=0 ;;
     *) die "UBSIM_SYNC must be auto, on, roi, or off" ;;
 esac
+auto_o3_lifecycle=0
+fast_boot_noncaching=0
+if [[ "$profile" == modern && "$cpu_mode" == server_o3 ]] &&
+   (( lifecycle_sync_enabled )); then
+    auto_o3_lifecycle=1
+    fast_boot_noncaching=1
+    initial_memory_mode=atomic_noncaching
+    cpu_switch_policy=perftest_lifecycle_enter_o3_exit_atomic
+fi
 if (( lifecycle_sync_enabled )); then
     [[ "$network_backend" == modular-ns3ub ]] ||
         die "ROI lifecycle synchronization requires --network-backend modular-ns3ub"
@@ -1147,6 +1277,7 @@ esac
 lab_host="$(cd "$script_dir/../.." && pwd)"
 lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$lab_host")}"
 checkpoint_root=""
+template_restore=0
 if [[ -n "$restore_checkpoint" ]]; then
     case "$restore_checkpoint" in
         *[!A-Za-z0-9._-]*|.|..) die "checkpoint name must use letters, digits, '.', '_' or '-'" ;;
@@ -1154,19 +1285,45 @@ if [[ -n "$restore_checkpoint" ]]; then
     checkpoint_root="$lab/checkpoints/$restore_checkpoint"
     ubsim_exec test -r "$checkpoint_root/run-manifest.txt" ||
         die "checkpoint does not exist: checkpoints/$restore_checkpoint"
+    if ubsim_exec grep -qx 'checkpoint_kind=node-template-v1' \
+            "$checkpoint_root/checkpoint-manifest.txt" 2>/dev/null; then
+        template_restore=1
+        ubsim_exec test -s "$checkpoint_root/template-cpt/m5.cpt" ||
+            die "template checkpoint has no gem5 state"
+    fi
 fi
-container="$UBSIM_CONTAINER"
-gem5="${UBSIM_GEM5:-$lab/gem5/build/ARM/gem5.opt}"
+(( ! make_template || ! template_restore )) ||
+    die "--make-template cannot be used with a restored template"
+(( ! make_template || ${#restore_checkpoint} == 0 )) ||
+    die "--make-template requires a cold boot"
+if (( make_template || template_restore )); then
+    [[ "$profile" == modern ]] || die "node templates currently require --profile modern"
+    [[ -z "${UBSIM_GUEST_READFILE:-}" ]] ||
+        die "node templates reserve gem5 readfile for node identity"
+fi
+if [[ "$(uname -s)" == Darwin ]]; then
+    native_gem5_default="$lab/gem5/build/ARM_MAC/gem5.opt"
+    native_switch_default="${UBSIM_NS3UB_ROOT:-$lab/sources/ns-3-ub}/build-macos/scratch/ns3.44-ub-net-adapter"
+    native_udma_default="$lab/artifacts/udma-device-sim-build-darwin-arm64/udma-device-sim"
+else
+    native_gem5_default="$lab/gem5/build/ARM/gem5.opt"
+    native_switch_default="${UBSIM_NS3UB_ROOT:-$lab/sources/ns-3-ub}/build-linux/scratch/ns3.44-ub-net-adapter"
+    runtime_arch="${UBSIM_RUNTIME_ARCH:-$(uname -m)}"
+    [[ "$runtime_arch" != arm64 ]] || runtime_arch=aarch64
+    native_udma_default="$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim"
+fi
+gem5="${UBSIM_GEM5:-$native_gem5_default}"
 m5_path="${UBSIM_M5_PATH:-$lab/system}"
-kernel="${UBSIM_KERNEL:-$lab/artifacts/kernel/vmlinux}"
-default_initrd="$lab/out/official-udma.cpio.gz"
+kernel="${UBSIM_KERNEL:-$lab/artifacts/kernel-64k-20261015/vmlinux}"
+default_initrd="$lab/out/official-udma-64k-20261015.cpio.gz"
+if [[ "$profile" == modern && "$mem_size" == 4GB ]]; then
+    default_initrd="$lab/out/official-udma-64k-node-template-20261021.cpio.gz"
+fi
 initrd="${UBSIM_INITRD:-$default_initrd}"
 config="${UBSIM_CONFIG:-$lab/configs/arm64_fs.py}"
 ns3ub_root="${UBSIM_NS3UB_ROOT:-$lab/sources/ns-3-ub}"
-ub_switch_binary="${UBSIM_UB_SWITCH_BINARY:-$ns3ub_root/build-linux/scratch/ns3.44-ub-net-adapter}"
-runtime_arch="${UBSIM_RUNTIME_ARCH:-$(uname -m)}"
-[[ "$runtime_arch" != arm64 ]] || runtime_arch=aarch64
-udma_device_binary="${UBSIM_UDMA_DEVICE_BINARY:-$lab/artifacts/udma-device-sim-build-linux-$runtime_arch/udma-device-sim}"
+ub_switch_binary="${UBSIM_UB_SWITCH_BINARY:-$native_switch_default}"
+udma_device_binary="${UBSIM_UDMA_DEVICE_BINARY:-$native_udma_default}"
 ub_switch_ready_pattern='\[NS3_UB_NET\] connected'
 run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"
 tap0="${UBSIM_DUAL_TAP0:-/tmp/ubsim-dual.eth0.sock}"
@@ -1208,6 +1365,12 @@ esac
 if (( node_count != 2 )) && [[ "$ub_transport" != switch-adapter ]]; then
     die "more than two nodes currently require --ub-transport switch-adapter"
 fi
+for depth in "$max_jfs_depth" "$max_jfr_depth" "$max_jfc_depth"; do
+    [[ "$depth" =~ ^[0-9]+$ ]] && (( depth > 0 && (depth & (depth - 1)) == 0 )) ||
+        die "UDMA queue capacities must be positive powers of two"
+done
+(( max_jfs_depth <= 8192 && max_jfr_depth <= 32768 && max_jfc_depth <= 2097152 )) ||
+    die "UDMA queue capacity exceeds the modeled context encoding"
 case "$coherent_bus_snoop_response_latency:$memory_bus_frontend_latency:$memory_bus_forward_latency:$memory_bus_response_latency:$memory_bus_snoop_response_latency:$memory_bus_header_latency" in
     *[!0-9:]*) die "coherent and memory bus latencies must be decimal integers" ;;
 esac
@@ -1393,6 +1556,18 @@ case "$network_backend" in
     modular-ns3ub) ;;
     *) die "--network-backend must be modular-ns3ub" ;;
 esac
+case "$ub_fabric_layout" in
+    switch) ;;
+    direct)
+        (( node_count == 2 && ub_port_count == 1 )) ||
+            die "direct UB link requires two nodes and one port per node"
+        [[ "$peer_switch_delay" == 0ns || "$peer_switch_delay" == 0ps ]] ||
+            die "direct UB link requires zero switch delay"
+        (( node_link_rate_gbps[0] == node_link_rate_gbps[1] )) ||
+            die "direct UB link requires equal endpoint rates"
+        ;;
+    *) die "UBSIM_UB_FABRIC_LAYOUT must be switch or direct" ;;
+esac
 if [[ "$network_backend" != builtin && "$ub_transport" != switch-adapter ]]; then
     die "$network_backend requires --ub-transport switch-adapter"
 fi
@@ -1424,6 +1599,9 @@ fi
 (( sq_sge_bytes > 0 )) || die "SQ SGE bytes must be positive"
 (( udma_iotlb_entries >= 0 )) || die "UDMA IOTLB entries must be non-negative"
 (( dma_max_outstanding > 0 )) || die "DMA max outstanding must be positive"
+[[ "$write_payload_read_window" =~ ^[0-9]+$ ]] &&
+    (( write_payload_read_window > 0 && write_payload_read_window <= 4096 )) ||
+    die "WRITE payload read window must be an integer in 1..4096"
 for value in "$sq_prefetch_wqebbs" "$sq_fetch_burst_wqebbs" "$sq_fetch_max_outstanding"; do
     [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 && value <= 4096 )) ||
         die "SQ prefetch settings must be integers in 1..4096"
@@ -1431,10 +1609,16 @@ done
 
 [[ "$completion_event_slots" =~ ^[0-9]+$ ]] && (( completion_event_slots > 0 && completion_event_slots <= 4096 )) ||
     die "completion event slots must be an integer in 1..4096"
+[[ "$max_read_outstanding" =~ ^[0-9]+$ ]] && (( max_read_outstanding <= 8192 )) ||
+    die "UDMA READ issue window must be an integer in 0..8192"
+[[ "$max_jettys" =~ ^[0-9]+$ && "$public_jettys" =~ ^[0-9]+$ ]] &&
+    (( max_jettys >= 2 && max_jettys <= 65535 && public_jettys >= 1 && public_jettys < max_jettys )) ||
+    die "Jetty counts require 2 <= max-jettys <= 65535 and 1 <= public-jettys < max-jettys"
 
 print_resolved_config() {
     cat <<EOF
 manifest_version=1
+initrd_path=$initrd
 execution_mode=$UBSIM_EXECUTION_MODE
 node_count=$node_count
 routing=dynamic_eid
@@ -1454,6 +1638,8 @@ cpu_freq=$cpu_freq
 cpu_boot_model=$cpu_boot_model
 cpu_roi_model=$cpu_roi_model
 cpu_switch_policy=$cpu_switch_policy
+auto_o3_lifecycle=$auto_o3_lifecycle
+fast_boot_noncaching=$fast_boot_noncaching
 cpu_count=$num_cpus
 online_cpu_count=$online_cpu_count
 cpu_event_queue_policy=$cpu_event_queue_policy
@@ -1479,7 +1665,7 @@ o3_fu_pool=DefaultFUPool
 o3_fu_pool_signature=int_alu6,int_muldiv2,fp_alu4,fp_muldiv2,simd4,pred1,rdwr4,ipr1
 cache_line_size=$cache_line_size
 last_cache_level=$last_cache_level
-cache_prefetcher=none
+cache_prefetcher=$l1d_prefetcher
 cache_replacement_policy=lru
 l1i_size=$l1i_size
 l1i_assoc=$l1i_assoc
@@ -1561,6 +1747,7 @@ sync_request=$sync_request
 virtual_time_synchronization=$synchronization
 lifecycle_sync=$lifecycle_sync_enabled
 restore_checkpoint=${restore_checkpoint:-none}
+template_checkpoint=$make_template
 sync_mode=$sync_mode
 ctp_retransmission=$ctp_retransmission
 ctp_rto_ps=$ctp_rto_ps
@@ -1568,6 +1755,7 @@ ctp_max_retransmissions=$ctp_max_retransmissions
 ub_port_count=$ub_port_count
 ub_transport=$ub_transport
 network_backend=$network_backend
+ub_fabric_layout=$ub_fabric_layout
 peer_topology=$peer_topology
 peer_port_map=${peer_port_map:-identity}
 peer_port_selection=$peer_port_selection
@@ -1589,11 +1777,18 @@ external_udma_poll_interval=$external_udma_poll_interval
 external_udma_host_latency_ns=$external_udma_host_latency_ns
 udma_iotlb_entries=$udma_iotlb_entries
 dma_max_outstanding=$dma_max_outstanding
+write_payload_read_window=$write_payload_read_window
 sq_prefetch_wqebbs=$sq_prefetch_wqebbs
 sq_fetch_burst_wqebbs=$sq_fetch_burst_wqebbs
 sq_fetch_max_outstanding=$sq_fetch_max_outstanding
 completion_event_slots=$completion_event_slots
-udma_state_format=3
+max_jfs_depth=$max_jfs_depth
+max_jfr_depth=$max_jfr_depth
+max_jfc_depth=$max_jfc_depth
+max_read_outstanding=$max_read_outstanding
+max_jettys=$max_jettys
+public_jettys=$public_jettys
+udma_state_format=4
 oob_link_speed=$oob_link_speed
 pipe_data=$pipe_data
 packet_trace=$packet_trace
@@ -1604,6 +1799,10 @@ comparison_ctp=1
 comparison_inline_bytes=128
 comparison_jettys=1
 EOF
+    for ((node = 0; node < node_count; ++node)); do
+        printf 'node%d_link_latency_ns=%s\n' "$node" "${node_link_delay_ns[node]}"
+        printf 'node%d_link_rate_gbps=%s\n' "$node" "${node_link_rate_gbps[node]}"
+    done
 }
 
 if (( print_config )); then
@@ -1621,10 +1820,11 @@ if [[ "$cpu_mode" == kvm || "$cpu_mode" == kvm_server_o3 ]]; then
     ubsim_exec bash "$lab/tools/kvm-preflight.sh" "$gem5"
 fi
 
-# The default image records both its own digest and the exact paths/digests of
-# mutable build inputs. Refuse an overwritten archive or a source/image skew.
+# Both retained official images are checked against their recorded image and
+# kernel digests. The 4KiB build image also checks its mutable build inputs.
 # Custom initramfs paths remain the caller's own contract.
-if [[ "$initrd" == "$lab/out/official-udma.cpio.gz" ]]; then
+if [[ "$initrd" == "$lab/out/official-udma.cpio.gz" ||
+      "$initrd" == "$lab/out/official-udma-64k-20261015.cpio.gz" ]]; then
     image_manifest="${initrd%.cpio.gz}.manifest.txt"
     ubsim_exec test -r "$image_manifest" ||
         die "missing default initramfs manifest: $image_manifest"
@@ -1644,6 +1844,8 @@ if [[ "$initrd" == "$lab/out/official-udma.cpio.gz" ]]; then
     }
     verify_image_hash initramfs_sha256 "$initrd"
     verify_image_hash kernel_sha256 "$kernel"
+fi
+if [[ "$initrd" == "$lab/out/official-udma.cpio.gz" ]]; then
     image_components=(
         overlay_init ubsim_cpu_switch ubsim_lat_server ubsim_lat_client
         urma_perftest stock_udma_provider ummu_library
@@ -1657,6 +1859,9 @@ if [[ "$initrd" == "$lab/out/official-udma.cpio.gz" ]]; then
         image_input=$(image_manifest_value "${image_component}_path")
         [[ -n "$image_input" ]] ||
             die "initramfs manifest lacks ${image_component}_path; rebuild it first"
+        if [[ "$image_input" == /workspace/ubsim-gem5-lab/* ]]; then
+            image_input="$lab/${image_input#/workspace/ubsim-gem5-lab/}"
+        fi
         ubsim_exec test -e "$image_input" ||
             die "recorded initramfs input is missing: $image_input"
         verify_image_hash "${image_component}_sha256" "$image_input"
@@ -1675,24 +1880,34 @@ pid_is_live() {
         pid=$(sed -n "1p" "$pidfile")
         case "$pid" in ""|*[!0-9]*) exit 1;; esac
         kill -0 "$pid" 2>/dev/null || exit 1
-        tr "\000" " " < "/proc/$pid/cmdline" | grep -Fq -- "$expected"
+        if test -r "/proc/$pid/cmdline"; then
+            tr "\000" " " < "/proc/$pid/cmdline" | grep -Fq -- "$expected"
+        else
+            ps -ww -p "$pid" -o command= | grep -Fq -- "$expected"
+        fi
     ' _ "$1" "$2"
 }
 
 find_process_with_argument() {
     ubsim_exec bash -c '
         expected=$1
-        for cmdline in /proc/[0-9]*/cmdline; do
-            test -r "$cmdline" || continue
-            pid=${cmdline#/proc/}
-            pid=${pid%/cmdline}
-            test "$pid" = "$$" && continue
-            command=$(tr "\000" " " < "$cmdline")
-            if grep -Fq -- "$expected" <<<"$command"; then
-                printf "%s %s\n" "$pid" "$command"
-                exit 0
-            fi
-        done
+        if test -d /proc/1; then
+            for cmdline in /proc/[0-9]*/cmdline; do
+                test -r "$cmdline" || continue
+                pid=${cmdline#/proc/}
+                pid=${pid%/cmdline}
+                test "$pid" = "$$" && continue
+                command=$(tr "\000" " " < "$cmdline")
+                if grep -Fq -- "$expected" <<<"$command"; then
+                    printf "%s %s\n" "$pid" "$command"
+                    exit 0
+                fi
+            done
+        else
+            port=${expected#--terminal-port=}
+            lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null |
+                sed -n "2p" | grep .
+        fi
         exit 1
     ' _ "$1"
 }
@@ -1722,6 +1937,11 @@ if pid_is_live "$run_root/oob-switch/relay.pid" \
     die "OOB switch is already running; use './lab status' or './lab stop'"
 fi
 
+# Check before removing previous run output or starting any simulator process.
+ubsim_exec python3 "$lab/tools/host_memory_guard.py" check \
+    --phase start --nodes "$node_count" --mem-size "$mem_size" ||
+    die "host memory preflight failed"
+
 case "$run_root" in
     ""|/|.) die "unsafe run output directory: '$run_root'" ;;
 esac
@@ -1742,6 +1962,8 @@ if ubsim_exec test -d "$run_root"; then
         "$run_root/node3" "$run_root/node4" "$run_root/node5"
         "$run_root/node6" "$run_root/node7"
         "$run_root/run-manifest.txt" "$run_root/sync.ready"
+        "$run_root/memory-guard.pid" "$run_root/memory-guard.log"
+        "$run_root/memory-guard.stopped" "$run_root/memory-guard.stderr.log"
     )
     ubsim_exec rm -rf -- "${stale_run_paths[@]}"
     echo "Cleared inactive previous run output under: $run_root"
@@ -1782,16 +2004,26 @@ ubsim_exec test -x "$udma_device_binary" ||
             --shm "${udma_shm_paths[$node]}"
             --sync "$modular_sync_mode"
             --host-link-latency-ps "$((external_udma_host_latency_ns * 1000))"
-            --net-link-latency-ps "$((peer_latency_ns * 1000))"
+            --net-link-latency-ps "$((node_link_delay_ns[node] * 1000))"
             --sync-interval-ps "$((sync_quantum_ns * 1000))"
             --eid "$((0x100 + node))" --ports "$ub_port_count"
+            --max-jfs-depth "$max_jfs_depth" --max-jfr-depth "$max_jfr_depth"
+            --max-jfc-depth "$max_jfc_depth"
+            --max-jettys "$max_jettys" --public-jettys "$public_jettys"
             --sq-prefetch-wqebbs "$sq_prefetch_wqebbs"
             --sq-fetch-burst-wqebbs "$sq_fetch_burst_wqebbs"
             --sq-fetch-max-outstanding "$sq_fetch_max_outstanding"
             --completion-event-slots "$completion_event_slots"
+            --write-payload-read-window "$write_payload_read_window"
         )
+        if [[ "$profile" == modern ]]; then
+            udma_args+=(--one-shot-jfc-notifications --pipelined-completion-dma)
+        fi
+        if (( max_read_outstanding > 0 )); then
+            udma_args+=(--max-read-outstanding "$max_read_outstanding")
+        fi
         (( lifecycle_sync_enabled == 0 )) || udma_args+=(--lifecycle-sync)
-        if [[ -n "$checkpoint_root" ]]; then
+        if [[ -n "$checkpoint_root" && "$template_restore" != 1 ]]; then
             udma_args+=(--state-in "$checkpoint_root/udma-node$node.state")
         fi
         udma_args+=(--state-out "$run_root/udma-node$node/state.bin")
@@ -1827,10 +2059,11 @@ ubsim_exec test -x "$udma_device_binary" ||
         --ctp-retransmission "$ctp_retransmission"
         --ctp-rto-ps "$ctp_rto_ps"
         --ctp-max-retransmissions "$ctp_max_retransmissions")
+    [[ "$ub_fabric_layout" != direct ]] || ub_switch_args+=(--direct-link)
     (( lifecycle_sync_enabled == 0 )) || ub_switch_args+=(--lifecycle-sync)
     for ((node = 0; node < node_count; ++node)); do
         ub_switch_args+=(--endpoint
-            "${net_socket_paths[$node]},$((0x100 + node))")
+            "${net_socket_paths[$node]},$((0x100 + node)),$((node_link_delay_ns[node] * 1000)),${node_link_rate_gbps[node]}")
     done
     ubsim_exec_detached \
         bash "$lab/tools/run-background.sh" \
@@ -1843,12 +2076,35 @@ launch_node() {
     tap=$4
     out="$run_root/node$node"
     sync_args=()
+    # Bash with nounset treats an empty array expansion as unbound on some
+    # versions. An explicit empty script is equivalent to the parser default.
+    readfile_args=(--script=)
+    if (( template_restore )); then
+        ubsim_exec sh -c 'printf "%s\n" "$1" > "$2"' _ \
+            "$node" "$out/identity.txt"
+        readfile_args=(--script="$out/identity.txt")
+    elif [[ -n "${UBSIM_GUEST_READFILE:-}" ]]; then
+        # The guest can retrieve an opt-in host diagnostic with `m5 readfile`
+        # after restoring the ordinary checkpoint.  This does not replace the
+        # checkpoint's initramfs or change its compatibility fingerprint.
+        readfile_args=(--script="$UBSIM_GUEST_READFILE")
+    fi
     adapter_sync_env=0
     sync_args+=(--dist-size=0)
+    if (( auto_o3_lifecycle )); then
+        sync_args+=(--auto-o3-lifecycle)
+    fi
+    if (( fast_boot_noncaching )); then
+        sync_args+=(--fast-boot-noncaching)
+    fi
     adapter_sync_env=1
     external_udma_socket=${host_socket_paths[$node]}
     if [[ -n "$checkpoint_root" ]]; then
-        sync_args+=(--restore-from="$checkpoint_root/node$node-cpt")
+        if (( template_restore )); then
+            sync_args+=(--restore-from="$checkpoint_root/template-cpt")
+        else
+            sync_args+=(--restore-from="$checkpoint_root/node$node-cpt")
+        fi
     fi
     # The pinned gem5 bundle still exposes these two internal OPENURMA names.
     # Bridge the public UBSIM configuration explicitly; otherwise the guest's
@@ -1862,6 +2118,7 @@ launch_node() {
         "OPENURMA_ADAPTER_LOCAL_SYNC=$adapter_sync_env" \
         "OPENURMA_LIFECYCLE_SYNC=$lifecycle_sync_enabled" \
         "UBSIM_EXIT_AFTER_CHECKPOINT=1" \
+        "UBSIM_PROFILE_LIFECYCLE_STATS=${UBSIM_PROFILE_LIFECYCLE_STATS:-0}" \
         "UBSIM_UDMA_HOST_SOCKET=$external_udma_socket" \
         "UBSIM_UDMA_HOST_POLL_INTERVAL=$external_udma_poll_interval" \
         "UBSIM_UDMA_HOST_SYNC=$sync_enabled" \
@@ -1873,6 +2130,7 @@ launch_node() {
         bash "$lab/tools/run-background.sh" "$out/gem5.pid" "$out/gem5.log" \
         "$gem5" --listener-mode=on --outdir="$out" "$config" \
         --kernel="$kernel" --initrd="$initrd" --root-device=/dev/ram \
+        "${readfile_args[@]}" \
         --cpu="$cpu_mode" --m5ops-base="$m5ops_base" \
         --cpu-freq="$cpu_freq" \
         --num-cpus="$num_cpus" --benchmark-cpu="$benchmark_cpu" \
@@ -1896,7 +2154,8 @@ launch_node() {
         --l1i-mshrs="$l1i_mshrs" \
         --l1i-targets-per-mshr="$l1i_targets" \
         --l1i-write-buffers="$l1i_write_buffers" \
-        --l1d-size="$l1d_size" --l1d-assoc="$l1d_assoc" \
+        --l1d-size="$l1d_size" --l1d-prefetcher="$l1d_prefetcher" \
+        --l1d-assoc="$l1d_assoc" \
         --l1d-latency="$l1d_latency" \
         --l1d-mshrs="$l1d_mshrs" \
         --l1d-targets-per-mshr="$l1d_targets" \
@@ -1959,7 +2218,7 @@ launch_node() {
         --eth-tap-socket="$tap" \
         --eth-link-speed="$oob_link_speed" --eth-link-delay="${peer_latency_ns}ns" \
         --terminal-port="$uart" --eth-mac="$mac" \
-        --extra-cmdline="ubsim_node=$node ubsim_provider=$provider"
+        --extra-cmdline="$(if (( make_template || template_restore )); then printf 'ubsim_node=template ubsim_template=1'; else printf 'ubsim_node=%s' "$node"; fi) ubsim_provider=$provider"
 }
 
 for ((node = 0; node < node_count; ++node)); do
@@ -1967,6 +2226,13 @@ for ((node = 0; node < node_count; ++node)); do
     launch_node "$node" "$(node_uart "$node")" "$node_mac" \
         "${tap_paths[$node]}"
 done
+
+ubsim_exec_detached \
+    bash "$lab/tools/run-background.sh" \
+    "$run_root/memory-guard.pid" "$run_root/memory-guard.stderr.log" \
+    python3 "$lab/tools/host_memory_guard.py" monitor \
+    --run-root "$run_root" --nodes "$node_count" \
+    --stop-script "$lab/scripts/run/stop-dual.sh"
 
 for _ in $(seq 1 200); do
     if ubsim_exec grep -q "$ub_switch_ready_pattern" \
@@ -2004,8 +2270,12 @@ echo "  resolved parameters: $run_root/run-manifest.txt"
 echo "  UB-HOST adapters: ${host_socket_paths[*]}"
 echo "  standalone UDMA logs: $run_root/udma-nodeN/udma.log"
 echo "  ns-3 UB-NET fabric: $run_root/ub-switch/gem5.log"
-echo "  UB link model: ${ub_port_count} physical port(s), ${peer_link_rate_gbps} Gbit/s per port, ${peer_latency_ns} ns propagation, ${peer_serialization_stages} serialization stage(s) per port"
-echo "  UB topology: $peer_topology (source-to-destination port map: ${peer_port_map:-identity})"
+echo "  UB link model: ${ub_port_count} physical port(s) per node, ${peer_serialization_stages} serialization stage(s) per port"
+for ((node = 0; node < node_count; ++node)); do
+    echo "    node$node: ${node_link_rate_gbps[node]} Gbit/s, ${node_link_delay_ns[node]} ns propagation"
+done
+echo "  UB-HOST port topology: $peer_topology (source-to-destination port map: ${peer_port_map:-identity})"
+echo "  ns-3-UB fabric layout: $ub_fabric_layout"
 echo "  UB egress selection: $peer_port_selection"
 echo "  UB switch service delay: $peer_switch_delay"
 if (( lifecycle_sync_enabled )); then
@@ -2019,6 +2289,6 @@ echo "  UB routing: destination EID -> registered endpoint adapter"
 echo "  OOB control network: one learning Ethernet switch across all nodes"
 echo
 echo "After all shells are ready, detach any existing UART clients and run:"
-echo "  $lab_host/lab --runtime $UBSIM_EXECUTION_MODE sync"
+echo "  $lab_host/lab sync"
 echo
-echo "Attach node N with: $lab_host/lab --runtime $UBSIM_EXECUTION_MODE attach N"
+echo "Attach node N with: $lab_host/lab attach N"

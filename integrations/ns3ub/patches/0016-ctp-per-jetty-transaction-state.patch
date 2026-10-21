@@ -1,0 +1,815 @@
+diff --git a/src/unified-bus/model/protocol/ub-ctp.cc b/src/unified-bus/model/protocol/ub-ctp.cc
+index b6b99f9..46cc77b 100644
+--- a/src/unified-bus/model/protocol/ub-ctp.cc
++++ b/src/unified-bus/model/protocol/ub-ctp.cc
+@@ -57,23 +57,26 @@ class CtpRequestAttemptTag : public Tag
+         return tid;
+     }
+     TypeId GetInstanceTypeId() const override { return GetTypeId(); }
+-    uint32_t GetSerializedSize() const override { return 34; }
++    uint32_t GetSerializedSize() const override { return 38; }
+     void Serialize(TagBuffer b) const override
+     {
+         b.WriteU32(node); b.WriteU32(key.srcEntityId); b.WriteU32(key.dstNodeId);
+-        b.WriteU32(key.dstEntityId); b.WriteU8(key.vl); b.WriteU32(tassn);
++        b.WriteU32(key.dstEntityId); b.WriteU8(key.vl); b.WriteU32(jettyNum);
++        b.WriteU32(tassn);
+         b.WriteU64(generation); b.WriteU32(attempt); b.WriteU8(drop);
+     }
+     void Deserialize(TagBuffer b) override
+     {
+         node = b.ReadU32(); key.srcEntityId = b.ReadU32(); key.dstNodeId = b.ReadU32();
+-        key.dstEntityId = b.ReadU32(); key.vl = b.ReadU8(); tassn = b.ReadU32();
++        key.dstEntityId = b.ReadU32(); key.vl = b.ReadU8(); jettyNum = b.ReadU32();
++        tassn = b.ReadU32();
+         generation = b.ReadU64(); attempt = b.ReadU32(); drop = b.ReadU8();
+     }
+     void Print(std::ostream& os) const override
+     { os << node << ':' << generation << ':' << attempt; }
+     uint32_t node{0};
+     UbCtpEntityKey key{};
++    uint32_t jettyNum{0};
+     uint32_t tassn{0};
+     uint64_t generation{0};
+     uint32_t attempt{0};
+@@ -808,9 +811,10 @@ UbCtpTransportService::GetTransactionOwner() const
+ }
+ 
+ UbCtpTransactionState&
+-UbCtpTransportService::GetTransactionState(const UbCtpEntityKey& key) const
++UbCtpTransportService::GetTransactionState(const UbCtpEntityKey& key,
++                                           uint32_t jettyNum) const
+ {
+-    return GetTransactionOwner()->GetOrCreateCtpTransactionState(key);
++    return GetTransactionOwner()->GetOrCreateCtpTransactionState(key, jettyNum);
+ }
+ 
+ void
+@@ -828,14 +832,16 @@ UbCtpTransportService::GetEntityStateCount() const
+ }
+ 
+ Ptr<UbCtpTransactionContext>
+-UbCtpTransportService::GetOrCreateTransactionContext(const UbCtpEntityKey& key)
++UbCtpTransportService::GetOrCreateTransactionContext(const UbCtpEntityKey& key,
++                                                      uint32_t jettyNum)
+ {
+     GetOrCreateEntityState(key);
+-    return GetTransactionOwner()->GetOrCreateCtpTransactionContext(key);
++    return GetTransactionOwner()->GetOrCreateCtpTransactionContext(key, jettyNum);
+ }
+ 
+ bool
+-UbCtpTransportService::HasTransactionContextForTesting(const UbCtpEntityKey& key) const
++UbCtpTransportService::HasTransactionContextForTesting(const UbCtpEntityKey& key,
++                                                        uint32_t jettyNum) const
+ {
+     if (m_node == nullptr)
+     {
+@@ -845,7 +851,7 @@ UbCtpTransportService::HasTransactionContextForTesting(const UbCtpEntityKey& key
+     Ptr<UbTransaction> transaction =
+         controller == nullptr ? nullptr : controller->GetUbTransaction();
+     const UbCtpTransactionState* state =
+-        transaction == nullptr ? nullptr : transaction->FindCtpTransactionState(key);
++        transaction == nullptr ? nullptr : transaction->FindCtpTransactionState(key, jettyNum);
+     return state != nullptr && state->context != nullptr;
+ }
+ 
+@@ -982,7 +988,8 @@ UbCtpTransportService::SendSegment(Ptr<UbWqeSegment> segment, const UbCtpEntityK
+     }
+ 
+     UbCtpEntityState& state = GetOrCreateEntityState(key);
+-    Ptr<UbCtpTransactionContext> context = GetOrCreateTransactionContext(key);
++    Ptr<UbCtpTransactionContext> context =
++        GetOrCreateTransactionContext(key, segment->GetJettyNum());
+     if (!segment->IsSentCompleted())
+     {
+         const uint32_t progressBytes = static_cast<uint32_t>(segment->GetBytesLeft());
+@@ -1254,7 +1261,8 @@ UbCtpTransportService::SendAdmittedFragment(Ptr<UbWqeSegment> segment,
+                                             uint32_t taSsn,
+                                             uint32_t progressBytes)
+ {
+-    UbCtpTransactionState& transactionState = GetTransactionState(state.GetKey());
++    UbCtpTransactionState& transactionState =
++        GetTransactionState(state.GetKey(), segment->GetJettyNum());
+     if (transactionState.outstandingSegments.find(taSsn) ==
+         transactionState.outstandingSegments.end())
+     {
+@@ -1312,7 +1320,7 @@ UbCtpTransportService::TrackQueuedRequest(const UbCtpEntityKey& stateKey,
+                                          uint32_t wqeId)
+ {
+     if (!m_retransmissionEnabled && !m_dropNextRequestForTest && !m_dropAllRequestsForTest) return;
+-    const auto key = std::make_pair(stateKey, taSsn);
++    const CtpRequestKey key{stateKey, jettyNum, taSsn};
+     auto [record, inserted] = m_retransmissionRecords.try_emplace(key);
+     NS_ABORT_MSG_IF(!inserted, "CTP attempted to reuse a live retry identity");
+     if (inserted)
+@@ -1327,7 +1335,8 @@ UbCtpTransportService::TrackQueuedRequest(const UbCtpEntityKey& stateKey,
+         record->second.packet = packet->Copy();
+     }
+     CtpRequestAttemptTag tag;
+-    tag.node = m_node->GetId(); tag.key = stateKey; tag.tassn = taSsn;
++    tag.node = m_node->GetId(); tag.key = stateKey;
++    tag.jettyNum = jettyNum; tag.tassn = taSsn;
+     tag.generation = record->second.generation;
+     packet->AddPacketTag(tag);
+ }
+@@ -1337,8 +1346,9 @@ UbCtpTransportService::CancelStaleQueuedRequest(Ptr<Packet> packet)
+ {
+     CtpRequestAttemptTag tag;
+     if (!packet->PeekPacketTag(tag) || m_node == nullptr || tag.node != m_node->GetId()) return false;
+-    const auto record = m_retransmissionRecords.find({tag.key, tag.tassn});
+-    auto* state = GetTransactionOwner()->FindCtpTransactionState(tag.key);
++    const auto record = m_retransmissionRecords.find(
++        CtpRequestKey{tag.key, tag.jettyNum, tag.tassn});
++    auto* state = GetTransactionOwner()->FindCtpTransactionState(tag.key, tag.jettyNum);
+     const bool stale = record == m_retransmissionRecords.end() || record->second.sent ||
+         record->second.generation != tag.generation || record->second.attempts != tag.attempt ||
+         state == nullptr || !state->outstandingSegments.contains(tag.tassn);
+@@ -1362,21 +1372,22 @@ UbCtpTransportService::RequestActuallySent(uint32_t outPort, Ptr<Packet> packet,
+         if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
+             std::cerr << "CTP_RESPONSE_WIRE node=" << m_node->GetId()
+                       << " now_ps=" << Simulator::Now().GetPicoSeconds()
+-                      << " tassn=" << queued->second.key.second
++                      << " tassn=" << std::get<2>(queued->second.key)
+                       << " task=" << queued->second.response->GetTaskId()
+                       << " dwell_ps=" << (Simulator::Now()-queued->second.enqueued).GetPicoSeconds() << '\n';
+         m_queuedResponses.erase(queued);
+     }
+     CtpRequestAttemptTag tag;
+     if (!packet->PeekPacketTag(tag) || m_node == nullptr || tag.node != m_node->GetId()) return;
+-    const auto record = m_retransmissionRecords.find({tag.key, tag.tassn});
++    const auto record = m_retransmissionRecords.find(
++        CtpRequestKey{tag.key, tag.jettyNum, tag.tassn});
+     if (record == m_retransmissionRecords.end() || record->second.sent ||
+         record->second.generation != tag.generation || record->second.attempts != tag.attempt ||
+         record->second.outPort != outPort) {
+         if (tag.attempt != 0) ++m_staleSentRetryCount;
+         return;
+     }
+-    auto* state = GetTransactionOwner()->FindCtpTransactionState(tag.key);
++    auto* state = GetTransactionOwner()->FindCtpTransactionState(tag.key, tag.jettyNum);
+     if (state == nullptr || !state->outstandingSegments.contains(tag.tassn))
+     {
+         if (tag.attempt != 0) ++m_staleSentRetryCount;
+@@ -1403,6 +1414,7 @@ UbCtpTransportService::RequestActuallySent(uint32_t outPort, Ptr<Packet> packet,
+                                         &UbCtpTransportService::HandleRetransmissionTimeout,
+                                         this,
+                                         tag.key,
++                                        tag.jettyNum,
+                                         tag.tassn,
+                                         tag.generation,
+                                         tag.attempt,
+@@ -1412,6 +1424,7 @@ UbCtpTransportService::RequestActuallySent(uint32_t outPort, Ptr<Packet> packet,
+ 
+ void
+ UbCtpTransportService::HandleRetransmissionTimeout(UbCtpEntityKey stateKey,
++                                                   uint32_t jettyNum,
+                                                    uint32_t taSsn,
+                                                    uint64_t generation,
+                                                    uint32_t attempt,
+@@ -1421,7 +1434,7 @@ UbCtpTransportService::HandleRetransmissionTimeout(UbCtpEntityKey stateKey,
+     {
+         return;
+     }
+-    const auto key = std::make_pair(stateKey, taSsn);
++    const CtpRequestKey key{stateKey, jettyNum, taSsn};
+     auto record = m_retransmissionRecords.find(key);
+     if (record == m_retransmissionRecords.end() || record->second.generation != generation ||
+         record->second.attempts != attempt || !record->second.sent)
+@@ -1429,7 +1442,7 @@ UbCtpTransportService::HandleRetransmissionTimeout(UbCtpEntityKey stateKey,
+         m_retransmissionEvents.Resolve(m_lifecycleOwner, token);
+         return;
+     }
+-    auto* state = GetTransactionOwner()->FindCtpTransactionState(stateKey);
++    auto* state = GetTransactionOwner()->FindCtpTransactionState(stateKey, jettyNum);
+     if (state == nullptr || !state->outstandingSegments.contains(taSsn))
+     {
+         m_retransmissionRecords.erase(record);
+@@ -1463,7 +1476,8 @@ UbCtpTransportService::HandleRetransmissionTimeout(UbCtpEntityKey stateKey,
+     record->second.sent = false;
+     Ptr<Packet> retry = record->second.packet->Copy();
+     CtpRequestAttemptTag tag;
+-    tag.node = m_node->GetId(); tag.key = stateKey; tag.tassn = taSsn;
++    tag.node = m_node->GetId(); tag.key = stateKey;
++    tag.jettyNum = jettyNum; tag.tassn = taSsn;
+     tag.generation = record->second.generation; tag.attempt = record->second.attempts;
+     retry->AddPacketTag(tag);
+     ++m_queuedRetryCount;
+@@ -1511,75 +1525,69 @@ UbCtpTransportService::TryContinueJettyTransmission(const UbCtpEntityKey& entity
+     }
+ 
+     auto& jettys = jettysIt->second;
+-    UbCtpTransactionState& transactionState = GetTransactionState(key);
+-    auto& pendingSegments = transactionState.pendingSegments;
+     uint32_t& rrIndex = m_keyJettyRrIndex[key];
+     while (!jettys.empty())
+     {
+-        if (pendingSegments.empty())
++        bool progressed = false;
++        const uint32_t count = static_cast<uint32_t>(jettys.size());
++        for (uint32_t i = 0; i < count; ++i)
+         {
+-            Ptr<UbWqeSegment> segment = nullptr;
+-            const uint32_t count = static_cast<uint32_t>(jettys.size());
+-            for (uint32_t i = 0; i < count; ++i)
++            const uint32_t idx = (rrIndex + i) % count;
++            Ptr<UbJetty> jetty = jettys[idx];
++            if (jetty == nullptr)
++            {
++                continue;
++            }
++            const uint32_t jettyNum = jetty->GetJettyNum();
++            UbCtpTransactionState* transactionState =
++                GetTransactionOwner()->FindCtpTransactionState(key, jettyNum);
++            if (transactionState == nullptr || transactionState->pendingSegments.empty())
+             {
+-                const uint32_t idx = (rrIndex + i) % count;
+-                if (jettys[idx] == nullptr)
+-                {
+-                    continue;
+-                }
+                 Ptr<UbController> controller = m_node->GetObject<UbController>();
+                 NS_ABORT_MSG_IF(controller == nullptr || controller->GetUbTransaction() == nullptr,
+                                 "CTP segmentation requires the Transaction owner");
+-                segment = controller->GetUbTransaction()->PrepareNextCtpWqeSegment(
+-                    jettys[idx],
++                Ptr<UbWqeSegment> segment = controller->GetUbTransaction()->PrepareNextCtpWqeSegment(
++                    jetty,
+                     GetTransactionConstraints().maxSegmentBytes);
+                 if (segment != nullptr && !controller->GetUbTransaction()->IsCtpWqeDispatchReady(
+-                                              jettys[idx]->GetJettyNum(),
++                                              jettyNum,
+                                               segment->GetTaskId()))
+                 {
+                     segment = nullptr;
+                 }
+-                if (segment != nullptr)
+-                {
+-                    rrIndex = (idx + 1) % count;
+-                    break;
+-                }
++                if (segment == nullptr) continue;
++                transactionState = &GetTransactionState(key, jettyNum);
++                transactionState->pendingSegments.push_back(segment);
+             }
+-
+-            if (segment == nullptr)
++            auto& pendingSegments = transactionState->pendingSegments;
++            Ptr<UbWqeSegment> segment = pendingSegments.front();
++            if (segment == nullptr || segment->IsSentCompleted())
+             {
+-                return;
++                pendingSegments.pop_front();
++                progressed = true;
++                rrIndex = (idx + 1) % count;
++                break;
+             }
+-            pendingSegments.push_back(segment);
+-        }
+-
+-        Ptr<UbWqeSegment> segment = pendingSegments.front();
+-        if (segment == nullptr || segment->IsSentCompleted())
+-        {
+-            pendingSegments.pop_front();
+-            continue;
+-        }
+-
+-        const UbCtpEntityKey packetKey = MakeTxKeyForSegment(key, segment);
+-        if (IsCongestionPacingBlocked(entityKey, packetKey))
+-        {
+-            return;
+-        }
+-        Ptr<UbCtpTransactionContext> context = GetOrCreateTransactionContext(key);
+-        const uint32_t taSsn = segment->GetTaSsn();
+-        if (!context->TryAdmit(taSsn))
+-        {
+-            TraceWindowEvent(packetKey, "drain-blocked", taSsn, *context);
+-            return;
+-        }
+-        TraceWindowEvent(packetKey, "admit", taSsn, *context);
+-        m_node->GetObject<UbController>()->GetUbTransaction()->CommitCtpWqeSegment(segment);
+-        const uint32_t progressBytes = static_cast<uint32_t>(segment->GetBytesLeft());
+-        SendAdmittedFragment(segment, state, packetKey, taSsn, progressBytes);
+-        if (segment->IsSentCompleted())
+-        {
+-            pendingSegments.pop_front();
++            const UbCtpEntityKey packetKey = MakeTxKeyForSegment(key, segment);
++            if (IsCongestionPacingBlocked(entityKey, packetKey)) continue;
++            Ptr<UbCtpTransactionContext> context =
++                GetOrCreateTransactionContext(key, jettyNum);
++            const uint32_t taSsn = segment->GetTaSsn();
++            if (!context->TryAdmit(taSsn))
++            {
++                TraceWindowEvent(packetKey, "drain-blocked", taSsn, *context);
++                continue;
++            }
++            TraceWindowEvent(packetKey, "admit", taSsn, *context);
++            m_node->GetObject<UbController>()->GetUbTransaction()->CommitCtpWqeSegment(segment);
++            const uint32_t progressBytes = static_cast<uint32_t>(segment->GetBytesLeft());
++            SendAdmittedFragment(segment, state, packetKey, taSsn, progressBytes);
++            if (segment->IsSentCompleted()) pendingSegments.pop_front();
++            rrIndex = (idx + 1) % count;
++            progressed = true;
++            break;
+         }
++        if (!progressed) return;
+     }
+ }
+ 
+@@ -1737,7 +1745,8 @@ UbCtpTransportService::HandleReceivedPacket(Ptr<Packet> packet, uint32_t ingress
+             // create an empty transaction or resolve a wire sequence through
+             // a null context. Search the existing peer and source-group state.
+             const auto findRequest = [&](const UbCtpEntityKey& key) -> Ptr<UbWqeSegment> {
+-                auto* state = GetTransactionOwner()->FindCtpTransactionState(key);
++                auto* state = GetTransactionOwner()->FindCtpTransactionState(
++                    key, ackHeader.GetIniRcId());
+                 if (state == nullptr || state->context == nullptr) return nullptr;
+                 const auto ssn = ResolveWireTaSsn(*state, ackHeader.GetIniTaSsn());
+                 auto found = state->outstandingSegments.find(ssn);
+@@ -1819,7 +1828,8 @@ UbCtpTransportService::HandleReceivedPacket(Ptr<Packet> packet, uint32_t ingress
+                 ackHeader.GetUbTransactionOpcode() == static_cast<uint8_t>(UbTransactionOpcode::TAACK)
+                     ? 1
+                     : responsePayloadBytes);
+-            CompleteFromTaAck(localKey, ackHeader.GetIniTaSsn(), response);
++            CompleteFromTaAck(localKey, ackHeader.GetIniRcId(),
++                              ackHeader.GetIniTaSsn(), response);
+             return true;
+         }
+     }
+@@ -1981,7 +1991,8 @@ UbCtpTransportService::DispatchInboundTransaction(Ptr<UbWqeSegment> request,
+             if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
+                 std::cerr << "CTP_RESPONSE_EXPIRE node=" << m_node->GetId()
+                           << " now_ps=" << Simulator::Now().GetPicoSeconds()
+-                          << " tassn=" << record->first.second << " queued=" << record->second.queued << '\n';
++                          << " tassn=" << std::get<2>(record->first)
++                          << " queued=" << record->second.queued << '\n';
+             record = m_receivedRmaRequests.erase(record);
+         }
+         else
+@@ -1990,7 +2001,8 @@ UbCtpTransportService::DispatchInboundTransaction(Ptr<UbWqeSegment> request,
+     const bool reliableWrite = request->GetType() == UbTransactionOpcode::WRITE;
+     const bool reliableRead = request->GetType() == UbTransactionOpcode::READ;
+     const bool reliableRma = reliableWrite || reliableRead;
+-    const auto receiveKey = std::make_pair(key, request->GetRequestTassn());
++    const CtpRequestKey receiveKey{key, request->GetOriginJettyNum(),
++                                   request->GetRequestTassn()};
+     if (reliableRma)
+     {
+         auto [record, inserted] = m_receivedRmaRequests.try_emplace(receiveKey);
+@@ -2005,7 +2017,8 @@ UbCtpTransportService::DispatchInboundTransaction(Ptr<UbWqeSegment> request,
+                 if (std::getenv("UBSIM_CTP_RESPONSE_TRACE"))
+                     std::cerr << "CTP_RESPONSE_DUP node=" << m_node->GetId()
+                               << " now_ps=" << Simulator::Now().GetPicoSeconds()
+-                              << " tassn=" << receiveKey.second << " queued=" << record->second.queued << '\n';
++                              << " tassn=" << std::get<2>(receiveKey)
++                              << " queued=" << record->second.queued << '\n';
+                 record->second.expires = Simulator::Now() +
+                     m_retransmissionTimeout * (m_maxRetransmissionAttempts + 1);
+                 // One queued response will answer all currently observed
+@@ -2045,19 +2058,19 @@ UbCtpTransportService::DispatchInboundTransaction(Ptr<UbWqeSegment> request,
+             {
+                 m_dropNextTaAckForTest = false;
+                 ++m_injectedTaAckDropCount;
+-                TryRetireTransactionState(key);
++                TryRetireTransactionState(key, response->GetOriginJettyNum());
+                 return;
+             }
+             if (reliableRead && m_dropNextReadResponseForTest)
+             {
+                 m_dropNextReadResponseForTest = false;
+                 ++m_injectedReadResponseDropCount;
+-                TryRetireTransactionState(key);
++                TryRetireTransactionState(key, response->GetOriginJettyNum());
+                 return;
+             }
+         }
+         SendResponseSegment(response, state);
+-        TryRetireTransactionState(key);
++        TryRetireTransactionState(key, response->GetOriginJettyNum());
+     });
+     transaction->ExecuteInboundTransaction(UINT32_MAX, request, sink);
+     return true;
+@@ -2164,7 +2177,7 @@ UbCtpTransportService::CompleteFromTaAckForTest(const UbCtpEntityKey& key, uint3
+     }
+     response->SetRequestTassn(taSsn);
+     response->SetTaSsn(static_cast<uint16_t>(taSsn));
+-    CompleteFromTaAck(key, taSsn, response);
++    CompleteFromTaAck(key, 0, taSsn, response);
+ }
+ 
+ void
+@@ -2629,7 +2642,8 @@ void
+ UbCtpTransportService::TrackQueuedResponse(Ptr<Packet> packet, Ptr<UbWqeSegment> response,
+                                          const UbCtpEntityKey& key)
+ {
+-    const auto identity = std::make_pair(key, response->GetRequestTassn());
++    const CtpRequestKey identity{key, response->GetOriginJettyNum(),
++                                 response->GetRequestTassn()};
+     auto record = m_receivedRmaRequests.find(identity);
+     if (record == m_receivedRmaRequests.end() || record->second.response != response) return;
+     const bool inserted = m_queuedResponses.emplace(packet->GetUid(),
+@@ -2645,19 +2659,22 @@ UbCtpTransportService::TrackQueuedResponse(Ptr<Packet> packet, Ptr<UbWqeSegment>
+ 
+ void
+ UbCtpTransportService::CompleteFromTaAck(const UbCtpEntityKey& key,
++                                         uint32_t jettyNum,
+                                          uint32_t taSsn,
+                                          Ptr<UbWqeSegment> response)
+ {
+     if (ShouldDelayTaAck(key, taSsn))
+     {
+         GetOrCreateEntityState(key);
+-        TraceWindowEvent(key, "taack-delay", taSsn, *GetOrCreateTransactionContext(key));
++        TraceWindowEvent(key, "taack-delay", taSsn,
++                         *GetOrCreateTransactionContext(key, jettyNum));
+         const uint64_t token = m_delayedTaAckEvents.Track(m_lifecycleOwner);
+-        GetTransactionOwner()->RetainCtpCompletionEvent(key);
++        GetTransactionOwner()->RetainCtpCompletionEvent(key, jettyNum);
+         EventId event = Simulator::Schedule(m_delayTaAckTime,
+                                             &UbCtpTransportService::RunTrackedCompleteFromTaAck,
+                                             this,
+                                             key,
++                                            jettyNum,
+                                             taSsn,
+                                             response,
+                                             token);
+@@ -2665,27 +2682,30 @@ UbCtpTransportService::CompleteFromTaAck(const UbCtpEntityKey& key,
+             m_lifecycleOwner,
+             token,
+             event,
+-            MakeCallback(&UbCtpTransportService::CancelTrackedCompleteFromTaAck, this).Bind(key));
++            MakeCallback(&UbCtpTransportService::CancelTrackedCompleteFromTaAck, this)
++                .Bind(key, jettyNum));
+         return;
+     }
+-    CompleteFromTaAckNow(key, taSsn, response);
+-    TryRetireTransactionState(key);
++    CompleteFromTaAckNow(key, jettyNum, taSsn, response);
++    TryRetireTransactionState(key, jettyNum);
+     const UbCtpEntityKey sourceGroupKey = MakeSourceGroupKeyForRequest(key);
+     if (!(sourceGroupKey == key))
+     {
+-        TryRetireTransactionState(sourceGroupKey);
++        TryRetireTransactionState(sourceGroupKey, jettyNum);
+     }
+ }
+ 
+ void
+-UbCtpTransportService::CancelTrackedCompleteFromTaAck(UbCtpEntityKey key)
++UbCtpTransportService::CancelTrackedCompleteFromTaAck(UbCtpEntityKey key,
++                                                      uint32_t jettyNum)
+ {
+-    GetTransactionOwner()->ReleaseCtpCompletionEvent(key);
+-    TryRetireTransactionState(key);
++    GetTransactionOwner()->ReleaseCtpCompletionEvent(key, jettyNum);
++    TryRetireTransactionState(key, jettyNum);
+ }
+ 
+ void
+ UbCtpTransportService::RunTrackedCompleteFromTaAck(UbCtpEntityKey key,
++                                                   uint32_t jettyNum,
+                                                    uint32_t taSsn,
+                                                    Ptr<UbWqeSegment> response,
+                                                    uint64_t token)
+@@ -2694,31 +2714,33 @@ UbCtpTransportService::RunTrackedCompleteFromTaAck(UbCtpEntityKey key,
+     {
+         return;
+     }
+-    CompleteFromTaAckNow(key, taSsn, response);
++    CompleteFromTaAckNow(key, jettyNum, taSsn, response);
+     m_delayedTaAckEvents.Resolve(m_lifecycleOwner, token);
+-    GetTransactionOwner()->ReleaseCtpCompletionEvent(key);
+-    TryRetireTransactionState(key);
++    GetTransactionOwner()->ReleaseCtpCompletionEvent(key, jettyNum);
++    TryRetireTransactionState(key, jettyNum);
+     const UbCtpEntityKey sourceGroupKey = MakeSourceGroupKeyForRequest(key);
+     if (!(sourceGroupKey == key))
+     {
+-        TryRetireTransactionState(sourceGroupKey);
++        TryRetireTransactionState(sourceGroupKey, jettyNum);
+     }
+ }
+ 
+ void
+-UbCtpTransportService::TryRetireTransactionState(const UbCtpEntityKey& key)
++UbCtpTransportService::TryRetireTransactionState(const UbCtpEntityKey& key,
++                                                 uint32_t jettyNum)
+ {
+-    GetTransactionOwner()->TryRetireCtpTransactionState(key);
++    GetTransactionOwner()->TryRetireCtpTransactionState(key, jettyNum);
+ }
+ 
+ void
+ UbCtpTransportService::CompleteFromTaAckNow(const UbCtpEntityKey& key,
++                                            uint32_t jettyNum,
+                                             uint32_t taSsn,
+                                             Ptr<UbWqeSegment> response)
+ {
+     UbCtpEntityState* state = &GetOrCreateEntityState(key);
+-    UbCtpTransactionState* transactionState = &GetTransactionState(key);
+-    GetOrCreateTransactionContext(key);
++    UbCtpTransactionState* transactionState = &GetTransactionState(key, jettyNum);
++    GetOrCreateTransactionContext(key, jettyNum);
+     taSsn = ResolveWireTaSsn(*transactionState, static_cast<uint16_t>(taSsn));
+     auto outstandingIt = FindOutstandingSegment(*transactionState, taSsn);
+     const UbCtpEntityKey sourceGroupKey = MakeSourceGroupKeyForRequest(key);
+@@ -2727,10 +2749,10 @@ UbCtpTransportService::CompleteFromTaAckNow(const UbCtpEntityKey& key,
+     {
+         auto sourceGroupIt = m_entityStates.find(sourceGroupKey);
+         UbCtpTransactionState* sourceGroupState =
+-            GetTransactionOwner()->FindCtpTransactionState(sourceGroupKey);
++            GetTransactionOwner()->FindCtpTransactionState(sourceGroupKey, jettyNum);
+         if (sourceGroupIt != m_entityStates.end() && sourceGroupState != nullptr)
+         {
+-            GetOrCreateTransactionContext(sourceGroupKey);
++            GetOrCreateTransactionContext(sourceGroupKey, jettyNum);
+             const uint32_t sourceGroupTaSsn =
+                 ResolveWireTaSsn(*sourceGroupState, static_cast<uint16_t>(taSsn));
+             auto sourceGroupOutstandingIt =
+@@ -2816,7 +2838,7 @@ UbCtpTransportService::CompleteFromTaAckNow(const UbCtpEntityKey& key,
+     }
+ 
+     context->MarkTaAck(taSsn);
+-    m_retransmissionRecords.erase(std::make_pair(state->GetKey(), taSsn));
++    m_retransmissionRecords.erase(CtpRequestKey{state->GetKey(), jettyNum, taSsn});
+     Ptr<UbWqeSegment> completedSegment = outstandingIt->second;
+     LastPacketACKsNotify(completedSegment->GetTaskId(),
+                          state->GetKey(),
+diff --git a/src/unified-bus/model/protocol/ub-ctp.h b/src/unified-bus/model/protocol/ub-ctp.h
+index 1458192..81ba2a5 100644
+--- a/src/unified-bus/model/protocol/ub-ctp.h
++++ b/src/unified-bus/model/protocol/ub-ctp.h
+@@ -174,8 +174,10 @@ class UbCtpTransportService : public Object
+     UbCtpEntityState& GetOrCreateEntityState(const UbCtpEntityKey& key);
+     void ConfigureRoutingPolicy(const UbCtpEntityKey& key, RoutingType routingType);
+     uint32_t GetEntityStateCount() const;
+-    Ptr<UbCtpTransactionContext> GetOrCreateTransactionContext(const UbCtpEntityKey& key);
+-    bool HasTransactionContextForTesting(const UbCtpEntityKey& key) const;
++    Ptr<UbCtpTransactionContext> GetOrCreateTransactionContext(const UbCtpEntityKey& key,
++                                                                uint32_t jettyNum = 0);
++    bool HasTransactionContextForTesting(const UbCtpEntityKey& key,
++                                         uint32_t jettyNum = 0) const;
+     Ptr<Packet> BuildDataPacket(Ptr<UbWqeSegment> segment, const UbCtpEntityKey& key);
+     Ptr<Packet> BuildResponsePacketForTest(Ptr<UbWqeSegment> response,
+                                            const UbCtpEntityKey& key);
+@@ -231,7 +233,10 @@ class UbCtpTransportService : public Object
+     using QueueKey = std::tuple<UbCtpEntityKey, uint32_t, uint32_t>;
+ 
+     Ptr<UbTransaction> GetTransactionOwner() const;
+-    UbCtpTransactionState& GetTransactionState(const UbCtpEntityKey& key) const;
++    using CtpJettyKey = std::pair<UbCtpEntityKey, uint32_t>;
++    using CtpRequestKey = std::tuple<UbCtpEntityKey, uint32_t, uint32_t>;
++    UbCtpTransactionState& GetTransactionState(const UbCtpEntityKey& key,
++                                                uint32_t jettyNum = 0) const;
+     void ValidateRoutingType(RoutingType routingType, const std::string& owner) const;
+     bool TryGetJettyPreparation(uint32_t jettyNum,
+                                 Ptr<UbJetty>& jetty,
+@@ -271,10 +276,11 @@ class UbCtpTransportService : public Object
+                                uint32_t outPort,
+                                uint32_t priority);
+     void RunTrackedCompleteFromTaAck(UbCtpEntityKey key,
++                                     uint32_t jettyNum,
+                                      uint32_t taSsn,
+                                      Ptr<UbWqeSegment> response,
+                                      uint64_t token);
+-    void CancelTrackedCompleteFromTaAck(UbCtpEntityKey key);
++    void CancelTrackedCompleteFromTaAck(UbCtpEntityKey key, uint32_t jettyNum);
+     void TrackQueuedRequest(const UbCtpEntityKey& stateKey,
+                            const UbCtpEntityKey& packetKey,
+                            uint32_t taSsn,
+@@ -285,11 +291,12 @@ class UbCtpTransportService : public Object
+                            uint32_t wqeId);
+     void RequestActuallySent(uint32_t outPort, Ptr<Packet> packet, Time completionDelay);
+     void HandleRetransmissionTimeout(UbCtpEntityKey stateKey,
++                                     uint32_t jettyNum,
+                                      uint32_t taSsn,
+                                      uint64_t generation,
+                                      uint32_t attempt,
+                                      uint64_t token);
+-    void TryRetireTransactionState(const UbCtpEntityKey& key);
++    void TryRetireTransactionState(const UbCtpEntityKey& key, uint32_t jettyNum);
+     UbCtpCongestionKey MakeCongestionKey(const UbCtpEntityKey& key) const;
+     bool IsCongestionPacingBlocked(const UbCtpEntityKey& entityKey,
+                                    const UbCtpEntityKey& packetKey);
+@@ -301,9 +308,11 @@ class UbCtpTransportService : public Object
+     void TrackQueuedResponse(Ptr<Packet> packet, Ptr<UbWqeSegment> response,
+                              const UbCtpEntityKey& key);
+     void CompleteFromTaAck(const UbCtpEntityKey& key,
++                           uint32_t jettyNum,
+                            uint32_t taSsn,
+                            Ptr<UbWqeSegment> response);
+     void CompleteFromTaAckNow(const UbCtpEntityKey& key,
++                              uint32_t jettyNum,
+                               uint32_t taSsn,
+                               Ptr<UbWqeSegment> response);
+     std::map<uint32_t, Ptr<UbWqeSegment>>::iterator FindOutstandingSegment(
+@@ -393,7 +402,7 @@ class UbCtpTransportService : public Object
+     uint64_t m_retransmissionExhaustedCount{0};
+     uint64_t m_nextRequestGeneration{1};
+     std::set<uint32_t> m_actualSendPorts;
+-    std::map<std::pair<UbCtpEntityKey, uint32_t>, RetransmissionRecord>
++    std::map<CtpRequestKey, RetransmissionRecord>
+         m_retransmissionRecords;
+     struct ReceivedRmaRecord
+     {
+@@ -401,10 +410,10 @@ class UbCtpTransportService : public Object
+         Time expires{Seconds(0)};
+         uint32_t queued{0};
+     };
+-    std::map<std::pair<UbCtpEntityKey, uint32_t>, ReceivedRmaRecord>
++    std::map<CtpRequestKey, ReceivedRmaRecord>
+         m_receivedRmaRequests;
+     struct QueuedResponse {
+-        std::pair<UbCtpEntityKey, uint32_t> key;
++        CtpRequestKey key;
+         Ptr<UbWqeSegment> response;
+         Time enqueued;
+     };
+diff --git a/src/unified-bus/model/protocol/ub-transaction.cc b/src/unified-bus/model/protocol/ub-transaction.cc
+index 636c4eb..28127c0 100644
+--- a/src/unified-bus/model/protocol/ub-transaction.cc
++++ b/src/unified-bus/model/protocol/ub-transaction.cc
+@@ -992,20 +992,23 @@ UbTransaction::CommitCtpWqeSegment(Ptr<UbWqeSegment> segment)
+ }
+ 
+ UbCtpTransactionState&
+-UbTransaction::GetOrCreateCtpTransactionState(const UbCtpEntityKey& key)
++UbTransaction::GetOrCreateCtpTransactionState(const UbCtpEntityKey& key,
++                                              uint32_t jettyNum)
+ {
+-    return m_ctpTransactionStates.try_emplace(key).first->second;
++    return m_ctpTransactionStates.try_emplace(CtpJettyKey{key, jettyNum}).first->second;
+ }
+ 
+ Ptr<UbCtpTransactionContext>
+-UbTransaction::GetOrCreateCtpTransactionContext(const UbCtpEntityKey& key)
++UbTransaction::GetOrCreateCtpTransactionContext(const UbCtpEntityKey& key,
++                                                uint32_t jettyNum)
+ {
+-    UbCtpTransactionState& state = GetOrCreateCtpTransactionState(key);
++    const CtpJettyKey stateKey{key, jettyNum};
++    UbCtpTransactionState& state = GetOrCreateCtpTransactionState(key, jettyNum);
+     if (state.context == nullptr)
+     {
+-        const auto cursor = m_nextCtpTaSsnByEntity.find(key);
++        const auto cursor = m_nextCtpTaSsnByJetty.find(stateKey);
+         const uint32_t initialSequence =
+-            cursor == m_nextCtpTaSsnByEntity.end() ? 0 : cursor->second;
++            cursor == m_nextCtpTaSsnByJetty.end() ? 0 : cursor->second;
+         state.context = Create<UbCtpTransactionContext>(
+             key,
+             UB_JETTY_TASSN_OOO_THRESHOLD,
+@@ -1015,38 +1018,44 @@ UbTransaction::GetOrCreateCtpTransactionContext(const UbCtpEntityKey& key)
+ }
+ 
+ const UbCtpTransactionState*
+-UbTransaction::FindCtpTransactionState(const UbCtpEntityKey& key) const
++UbTransaction::FindCtpTransactionState(const UbCtpEntityKey& key,
++                                       uint32_t jettyNum) const
+ {
+-    const auto it = m_ctpTransactionStates.find(key);
++    const auto it = m_ctpTransactionStates.find(CtpJettyKey{key, jettyNum});
+     return it == m_ctpTransactionStates.end() ? nullptr : &it->second;
+ }
+ 
+ UbCtpTransactionState*
+-UbTransaction::FindCtpTransactionState(const UbCtpEntityKey& key)
++UbTransaction::FindCtpTransactionState(const UbCtpEntityKey& key,
++                                       uint32_t jettyNum)
+ {
+-    const auto it = m_ctpTransactionStates.find(key);
++    const auto it = m_ctpTransactionStates.find(CtpJettyKey{key, jettyNum});
+     return it == m_ctpTransactionStates.end() ? nullptr : &it->second;
+ }
+ 
+ void
+-UbTransaction::RetainCtpCompletionEvent(const UbCtpEntityKey& key)
++UbTransaction::RetainCtpCompletionEvent(const UbCtpEntityKey& key,
++                                        uint32_t jettyNum)
+ {
+-    ++GetOrCreateCtpTransactionState(key).pendingCompletionEvents;
++    ++GetOrCreateCtpTransactionState(key, jettyNum).pendingCompletionEvents;
+ }
+ 
+ void
+-UbTransaction::ReleaseCtpCompletionEvent(const UbCtpEntityKey& key)
++UbTransaction::ReleaseCtpCompletionEvent(const UbCtpEntityKey& key,
++                                         uint32_t jettyNum)
+ {
+-    UbCtpTransactionState* state = FindCtpTransactionState(key);
++    UbCtpTransactionState* state = FindCtpTransactionState(key, jettyNum);
+     NS_ABORT_MSG_IF(state == nullptr || state->pendingCompletionEvents == 0,
+                     "CTP completion event release would underflow");
+     --state->pendingCompletionEvents;
+ }
+ 
+ bool
+-UbTransaction::TryRetireCtpTransactionState(const UbCtpEntityKey& key)
++UbTransaction::TryRetireCtpTransactionState(const UbCtpEntityKey& key,
++                                            uint32_t jettyNum)
+ {
+-    auto state = m_ctpTransactionStates.find(key);
++    const CtpJettyKey stateKey{key, jettyNum};
++    auto state = m_ctpTransactionStates.find(stateKey);
+     if (state == m_ctpTransactionStates.end())
+     {
+         return true;
+@@ -1054,7 +1063,10 @@ UbTransaction::TryRetireCtpTransactionState(const UbCtpEntityKey& key)
+     const bool activeOperation = std::any_of(
+         m_operations.begin(),
+         m_operations.end(),
+-        [&key](const auto& entry) { return entry.second.ctp && entry.second.ctpKey == key; });
++        [&key, jettyNum](const auto& entry) {
++            return entry.first.first == jettyNum && entry.second.ctp &&
++                   entry.second.ctpKey == key;
++        });
+     const UbCtpTransactionState& transactionState = state->second;
+     if (activeOperation || !transactionState.pendingSegments.empty() ||
+         !transactionState.outstandingSegments.empty() ||
+@@ -1067,7 +1079,7 @@ UbTransaction::TryRetireCtpTransactionState(const UbCtpEntityKey& key)
+     }
+     if (transactionState.context != nullptr)
+     {
+-        m_nextCtpTaSsnByEntity[key] = transactionState.context->GetSendNext();
++        m_nextCtpTaSsnByJetty[stateKey] = transactionState.context->GetSendNext();
+     }
+     m_ctpTransactionStates.erase(state);
+     return true;
+@@ -2399,7 +2411,7 @@ UbTransaction::TryAdmitCtpWqe(uint32_t jettyNum,
+     operation.ctp = true;
+     operation.ctpKey = key;
+     m_operations.emplace(std::make_pair(jettyNum, wqe->GetWqeId()), operation);
+-    GetOrCreateCtpTransactionState(key);
++    GetOrCreateCtpTransactionState(key, jettyNum);
+     wqe->MarkLifecycleManaged();
+     return true;
+ }
+@@ -2600,7 +2612,8 @@ UbTransaction::FinishWqe(uint32_t jettyNum,
+         CancelDispatchEvent(operation->second);
+         const UbCtpEntityKey ctpKey = operation->second.ctpKey;
+         const UbLifecycleResourceIdentity wqeIdentity = operation->second.wqeIdentity;
+-        auto transactionState = m_ctpTransactionStates.find(operation->second.ctpKey);
++        auto transactionState = m_ctpTransactionStates.find(
++            CtpJettyKey{operation->second.ctpKey, jettyNum});
+         if (transactionState != m_ctpTransactionStates.end())
+         {
+             auto& pendingSegments = transactionState->second.pendingSegments;
+@@ -2655,7 +2668,7 @@ UbTransaction::FinishWqe(uint32_t jettyNum,
+                                                       outcome);
+         if (outcome != UbWorkOutcome::COMPLETED)
+         {
+-            TryRetireCtpTransactionState(ctpKey);
++            TryRetireCtpTransactionState(ctpKey, jettyNum);
+         }
+         Ptr<UbController> controller = GetOwnerController();
+         Ptr<UbCtpTransportService> ctpService =
+@@ -2932,7 +2945,7 @@ UbTransaction::DoDispose()
+     }
+     m_remoteRtpWqeSegmentsByTpn.clear();
+     m_ctpTransactionStates.clear();
+-    m_nextCtpTaSsnByEntity.clear();
++    m_nextCtpTaSsnByJetty.clear();
+     m_tpRRIndex.clear();
+     m_random = nullptr;
+     m_serviceMode.clear();
+diff --git a/src/unified-bus/model/protocol/ub-transaction.h b/src/unified-bus/model/protocol/ub-transaction.h
+index 2eda56c..3b356a6 100644
+--- a/src/unified-bus/model/protocol/ub-transaction.h
++++ b/src/unified-bus/model/protocol/ub-transaction.h
+@@ -246,14 +246,17 @@ namespace ns3 {
+         Ptr<UbWqeSegment> PrepareNextCtpWqeSegment(Ptr<UbJetty> jetty,
+                                                    uint32_t maxSegmentBytes);
+         void CommitCtpWqeSegment(Ptr<UbWqeSegment> segment);
+-        UbCtpTransactionState& GetOrCreateCtpTransactionState(const UbCtpEntityKey& key);
++        UbCtpTransactionState& GetOrCreateCtpTransactionState(const UbCtpEntityKey& key,
++                                                               uint32_t jettyNum = 0);
+         Ptr<UbCtpTransactionContext> GetOrCreateCtpTransactionContext(
+-            const UbCtpEntityKey& key);
+-        UbCtpTransactionState* FindCtpTransactionState(const UbCtpEntityKey& key);
+-        const UbCtpTransactionState* FindCtpTransactionState(const UbCtpEntityKey& key) const;
+-        void RetainCtpCompletionEvent(const UbCtpEntityKey& key);
+-        void ReleaseCtpCompletionEvent(const UbCtpEntityKey& key);
+-        bool TryRetireCtpTransactionState(const UbCtpEntityKey& key);
++            const UbCtpEntityKey& key, uint32_t jettyNum = 0);
++        UbCtpTransactionState* FindCtpTransactionState(const UbCtpEntityKey& key,
++                                                        uint32_t jettyNum = 0);
++        const UbCtpTransactionState* FindCtpTransactionState(const UbCtpEntityKey& key,
++                                                              uint32_t jettyNum = 0) const;
++        void RetainCtpCompletionEvent(const UbCtpEntityKey& key, uint32_t jettyNum = 0);
++        void ReleaseCtpCompletionEvent(const UbCtpEntityKey& key, uint32_t jettyNum = 0);
++        bool TryRetireCtpTransactionState(const UbCtpEntityKey& key, uint32_t jettyNum = 0);
+ 
+         bool ProcessWqeSegmentComplete(Ptr<UbWqeSegment> wqeSegment);
+         Ptr<UbWqeSegment> BuildTransactionResponse(uint32_t localTpn,
+@@ -638,8 +641,9 @@ namespace ns3 {
+         };
+ 
+         std::map<std::pair<uint32_t, uint32_t>, OperationRecord> m_operations;
+-        std::map<UbCtpEntityKey, UbCtpTransactionState> m_ctpTransactionStates;
+-        std::map<UbCtpEntityKey, uint32_t> m_nextCtpTaSsnByEntity;
++        using CtpJettyKey = std::pair<UbCtpEntityKey, uint32_t>;
++        std::map<CtpJettyKey, UbCtpTransactionState> m_ctpTransactionStates;
++        std::map<CtpJettyKey, uint32_t> m_nextCtpTaSsnByJetty;
+         std::map<RtpTxQueueKey, RtpTxQueue> m_rtpTxQueues;
+         std::vector<UbLifecycleResourceIdentity> m_tpgsBlockingJettyRetry;
+         bool m_collectRtpResolutionCountersForTest{false};

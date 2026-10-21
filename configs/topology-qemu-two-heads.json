@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "qemu-two-heads-one-400g-switch",
+  "nodes": [
+    {"id": "head-a", "simulator": "qemu"},
+    {"id": "head-b", "simulator": "qemu"}
+  ],
+  "devices": [
+    {"id": "udma-a", "node": "head-a", "type": "udma", "eid": 256, "ports": 1, "max_jettys": 47},
+    {"id": "udma-b", "node": "head-b", "type": "udma", "eid": 257, "ports": 1, "max_jettys": 47}
+  ],
+  "switches": [
+    {"id": "switch-0", "type": "ns3ub", "delay_ns": 500}
+  ],
+  "links": [
+    {"device": "udma-a", "device_port": 0, "switch": "switch-0", "switch_port": 0, "rate_gbps": 400, "latency_ns": 375},
+    {"device": "udma-b", "device_port": 0, "switch": "switch-0", "switch_port": 1, "rate_gbps": 400, "latency_ns": 375}
+  ],
+  "execution": {"sync": "off", "checkpoint": "none"}
+}

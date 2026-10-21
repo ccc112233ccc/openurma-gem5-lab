@@ -4,7 +4,6 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
 source "$script_dir/../runtime.sh"
-container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
 run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"
@@ -69,6 +68,21 @@ ubsim_exec python3 "$serial_tool" \
     --ports "${uart_ports[@]}" \
     --command "$sync_command" \
     --timeout "$sync_timeout" --prompt-kick-after 1
+
+# A cloned shell-ready snapshot can reach a prompt while still carrying the
+# source node's identity. Check the running guests rather than trusting the
+# addresses printed by the launcher or the command's exit status alone.
+identity_commands=()
+for ((node = 0; node < node_count; ++node)); do
+    printf -v expected_mac '02:00:00:00:00:%02x' "$((node + 1))"
+    identity_commands+=(
+        "test \"\$UBSIM_NODE\" = '$node' && test \"\$(hostname)\" = 'ubsim-node$node' && ip -4 -o addr show dev eth0 | grep -Fq '10.0.0.$((node + 1))/24' && ip -o link show dev eth0 | grep -Fq '$expected_mac'")
+done
+ubsim_exec python3 "$serial_tool" \
+    --ports "${uart_ports[@]}" \
+    --commands "${identity_commands[@]}" \
+    --timeout "$sync_timeout" --prompt-kick-after 1 >/dev/null ||
+    die "guest node identity, OOB address, or MAC does not match the topology"
 
 for ((node = 0; node < node_count; ++node)); do
     if (( timer_verified_by_checkpoint )); then

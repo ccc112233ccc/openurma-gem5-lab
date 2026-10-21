@@ -4,6 +4,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab="$(cd "$script_dir/../.." && pwd)"
 run_dir="${UBSIM_QEMU_DUAL_OUT:-$lab/run-qemu-dual}"
+node_count=$(awk -F= '$1 == "node_count" {print $2; exit}' "$run_dir/run-manifest.txt" 2>/dev/null || true)
+[[ "$node_count" =~ ^[2-8]$ ]] || node_count=2
 
 pid_live() {
     local file=$1 pid
@@ -23,12 +25,15 @@ show_process() {
     fi
 }
 
-show_process node0 "$run_dir/node0/qemu.pid"
-show_process node1 "$run_dir/node1/qemu.pid"
-show_process udma0 "$run_dir/udma-node0/udma.pid"
-show_process udma1 "$run_dir/udma-node1/udma.pid"
+for ((node = 0; node < node_count; ++node)); do
+    show_process "node$node" "$run_dir/node$node/qemu.pid"
+done
+for ((node = 0; node < node_count; ++node)); do
+    show_process "udma$node" "$run_dir/udma-node$node/udma.pid"
+done
 show_process ns3-fabric "$run_dir/ub-fabric/ns3.pid"
-for node in 0 1; do
+if (( node_count > 2 )); then show_process oob-switch "$run_dir/oob-switch/relay.pid"; fi
+for ((node = 0; node < node_count; ++node)); do
     terminal="$run_dir/node$node/system.terminal"
     pidfile="$run_dir/node$node/qemu.pid"
     if pid_live "$pidfile" && [[ -r "$terminal" ]] && grep -aq 'Official UDMA full-system guest' "$terminal"; then
@@ -37,6 +42,12 @@ for node in 0 1; do
         echo "node$node      booting (see $terminal)"
     fi
 done
-echo "UARTs: localhost:${UBSIM_QEMU_UART0:-3560}, localhost:${UBSIM_QEMU_UART1:-3570}"
-echo "SSH:   localhost:${UBSIM_QEMU_SSH0_PORT:-2220} (node0), localhost:${UBSIM_QEMU_SSH1_PORT:-2221} (node1)"
+uart0=$(awk -F= '$1 == "uart0" {print $2; exit}' "$run_dir/run-manifest.txt" 2>/dev/null || true)
+uart1=$(awk -F= '$1 == "uart1" {print $2; exit}' "$run_dir/run-manifest.txt" 2>/dev/null || true)
+ssh0=$(awk -F= '$1 == "ssh0_port" {print $2; exit}' "$run_dir/run-manifest.txt" 2>/dev/null || true)
+ssh1=$(awk -F= '$1 == "ssh1_port" {print $2; exit}' "$run_dir/run-manifest.txt" 2>/dev/null || true)
+uart0=${uart0:-3560}; uart1=${uart1:-3570}; ssh0=${ssh0:-2220}; ssh1=${ssh1:-2221}
+for ((node = 0; node < node_count; ++node)); do
+    echo "node$node UART: localhost:$((uart0 + node * (uart1 - uart0))), SSH: localhost:$((ssh0 + node * (ssh1 - ssh0)))"
+done
 echo "Logs:  $run_dir"

@@ -20,43 +20,33 @@ PROCESS_FILES = {
 }
 
 
-def docker_text(container: str, *command: str, check: bool = True) -> str:
-    result = subprocess.run(
-        ["docker", "exec", container, *command],
-        check=check,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    return result.stdout
-
-
-def process_snapshot(container: str, run_root: str) -> dict[str, dict[str, int]]:
+def process_snapshot(run_root: Path) -> dict[str, dict[str, int]]:
     snapshots: dict[str, dict[str, int]] = {}
     for label, relative_pidfile in PROCESS_FILES.items():
-        pidfile = f"{run_root}/{relative_pidfile}"
-        pid_text = docker_text(container, "sh", "-c", f"cat '{pidfile}' 2>/dev/null || true")
+        pidfile = run_root / relative_pidfile
+        pid_text = pidfile.read_text() if pidfile.is_file() else ""
         if not pid_text.strip().isdigit():
             continue
         pid = int(pid_text.strip())
-        payload = docker_text(
-            container,
-            "python3",
-            "-c",
-            "import json,pathlib,sys;"
-            "p=pathlib.Path('/proc')/sys.argv[1];"
-            "s=(p/'stat').read_text();r=s[s.rfind(')')+2:].split();"
-            "st=(p/'status').read_text().splitlines();"
-            "kv={x.split(':',1)[0]:x.split(':',1)[1].strip() for x in st if ':' in x};"
-            "io={x.split(':',1)[0]:int(x.split(':',1)[1]) for x in (p/'io').read_text().splitlines()};"
-            "print(json.dumps({'pid':int(sys.argv[1]),'minflt':int(r[7]),'majflt':int(r[9]),"
-            "'utime_ticks':int(r[11]),'stime_ticks':int(r[12]),'num_threads':int(r[17]),"
-            "'voluntary_ctxt_switches':int(kv.get('voluntary_ctxt_switches','0')),'nonvoluntary_ctxt_switches':int(kv.get('nonvoluntary_ctxt_switches','0')),'read_bytes':io.get('read_bytes',0),'write_bytes':io.get('write_bytes',0)}))",
-            str(pid),
-            check=False,
-        )
-        if payload.strip():
-            snapshots[label] = json.loads(payload)
+        proc = Path("/proc") / str(pid)
+        try:
+            stat = (proc / "stat").read_text()
+            fields = stat[stat.rfind(")") + 2:].split()
+            status = dict(line.split(":", 1) for line in
+                          (proc / "status").read_text().splitlines() if ":" in line)
+            io = dict(line.split(":", 1) for line in
+                      (proc / "io").read_text().splitlines() if ":" in line)
+            snapshots[label] = {
+                "pid": pid, "minflt": int(fields[7]), "majflt": int(fields[9]),
+                "utime_ticks": int(fields[11]), "stime_ticks": int(fields[12]),
+                "num_threads": int(fields[17]),
+                "voluntary_ctxt_switches": int(status.get("voluntary_ctxt_switches", "0")),
+                "nonvoluntary_ctxt_switches": int(status.get("nonvoluntary_ctxt_switches", "0")),
+                "read_bytes": int(io.get("read_bytes", "0")),
+                "write_bytes": int(io.get("write_bytes", "0")),
+            }
+        except (FileNotFoundError, PermissionError):
+            continue
     return snapshots
 
 
@@ -114,22 +104,18 @@ def main() -> int:
     parser.add_argument("--size", type=int, required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--container", default="ubsim-gem5-lab")
     parser.add_argument("--run-root", type=Path, default=Path("run-dual"))
     args = parser.parse_args()
+    if not Path("/proc/self/stat").is_file():
+        parser.error("process profiling requires a Linux host with /proc")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     raw_path = args.output_dir / f"{args.label}.uart.txt"
     json_path = args.output_dir / f"{args.label}.json"
-    container_run_root = os.environ.get(
-        "UBSIM_DUAL_OUT", "/workspace/ubsim-gem5-lab/run-dual"
-    )
-    ticks_per_second = int(docker_text(
-        args.container, "python3", "-c",
-        "import os; print(os.sysconf('SC_CLK_TCK'))"
-    ).strip())
-    before = process_snapshot(args.container, container_run_root)
-    offsets = stats_offsets(args.run_root)
+    run_root = Path(os.environ.get("UBSIM_DUAL_OUT", args.run_root))
+    ticks_per_second = os.sysconf("SC_CLK_TCK")
+    before = process_snapshot(run_root)
+    offsets = stats_offsets(run_root)
 
     command = [
         "./lab", "latency", "--samples", str(args.samples),
@@ -140,7 +126,7 @@ def main() -> int:
     completed = subprocess.run(command, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE)
     wall_seconds = time.perf_counter() - started
-    after = process_snapshot(args.container, container_run_root)
+    after = process_snapshot(run_root)
 
     report = {
         "label": args.label,
@@ -150,7 +136,7 @@ def main() -> int:
         "wall_seconds": wall_seconds,
         "returncode": completed.returncode,
         "process_deltas": subtract(before, after, ticks_per_second),
-        "gem5_roi_stats": parse_new_stats(args.run_root, offsets),
+        "gem5_roi_stats": parse_new_stats(run_root, offsets),
         "result_tsv": completed.stdout,
         "stderr": completed.stderr,
     }

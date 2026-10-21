@@ -26,7 +26,6 @@ client=$2
 samples=${3:-100}
 size=${4:-128}
 port=${5:-21115}
-container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
 run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"

@@ -3,6 +3,7 @@
 
 #include "base/logging.hh"
 #include "base/trace.hh"
+#include "cpu/thread_context.hh"
 #include "mem/packet_access.hh"
 #include "sim/sim_exit.hh"
 
@@ -12,6 +13,11 @@
 
 namespace gem5
 {
+
+// Implemented in the pinned gem5 System::Threads patch. The fence keeps
+// device events live while deferring guest ThreadContext wakeups.
+void blockExternalActivation(ThreadContext *context);
+bool unblockExternalActivation(ThreadContext *context);
 
 namespace host_proto = ubsim::proto::host;
 
@@ -210,6 +216,10 @@ UbHostAdapter::pollDevice()
 {
     ++pollEvents;
     serviceDevice(protocolTime());
+    if (lifecyclePending && lifecycleCommitSeen) {
+        exitSimLoopNow("ubsim lifecycle sync commit");
+        return;
+    }
     while (host_proto::UbHostH2DOutSync(&interface, protocolTime()) != 0) {
         ++syncBackpressure;
         std::this_thread::yield();
@@ -301,6 +311,10 @@ UbHostAdapter::scheduleNextPoll()
                     host_proto::UbHostD2HInTimestamp(&interface);
                 if (timestamp <= protocolTime()) {
                     serviceDevice(protocolTime());
+                    if (lifecyclePending && lifecycleCommitSeen) {
+                        exitSimLoopNow("ubsim lifecycle sync commit");
+                        return;
+                    }
                     continue;
                 }
                 break;
@@ -375,18 +389,45 @@ UbHostAdapter::resetProtocolEpoch()
 }
 
 void
-UbHostAdapter::toggleLifecycleSync()
+UbHostAdapter::beginLifecycleSync()
 {
     if (!lifecycleSync)
         return;
-    if (!dmaOperations.empty() || !mmioCompletions.empty())
-        fatal("%s: lifecycle sync requested with outstanding host operations\n",
-              name());
-    if (pollEvent.scheduled())
-        deschedule(pollEvent);
+    if (lifecyclePending)
+        fatal("%s: overlapping lifecycle fences\n", name());
+    // A timing DMA completion may run after the last device poll.  Its reply
+    // has already been sent, but its bookkeeping entry is normally retired by
+    // the next serviceDevice() call.  Retire those entries before testing the
+    // drained fence precondition.
+    dmaOperations.erase(
+        std::remove_if(dmaOperations.begin(), dmaOperations.end(),
+            [](const auto &operation) { return operation->completed; }),
+        dmaOperations.end());
+    // Keep the guest stopped while the outstanding host replies drain.  The
+    // UDMA peer waits for its own host requests and model events before COMMIT.
+
+    // Interrupts and timer resume events can activate a suspended context
+    // while the event queue advances through the fence. Defer every wakeup
+    // until COMMIT, while still running device and DMA events.
+    for (auto *context : sys->threads) {
+        auto *cpu = context->getCpuPtr();
+        blockExternalActivation(context);
+        blockedContexts.push_back(context);
+        instructionSnapshots.push_back({cpu, cpu->totalInsts()});
+        if (context->status() != ThreadContext::Active)
+            continue;
+        context->suspend();
+        if (context->status() != ThreadContext::Suspended)
+            fatal("%s: failed to suspend guest for lifecycle drain\n", name());
+        pausedContexts.push_back({context});
+    }
+    if (pausedContexts.empty())
+        fatal("%s: lifecycle fence has no running guest context\n", name());
 
     ++lifecycleGeneration;
     lifecycleCommitSeen = false;
+    lifecyclePending = true;
+    lifecycleWaitStarted = std::chrono::steady_clock::now();
     const bool enable = !lifecycleSyncActive;
     auto *message = host_proto::UbHostH2DOutAlloc(&interface, protocolTime());
     if (!message)
@@ -399,14 +440,37 @@ UbHostAdapter::toggleLifecycleSync()
     host_proto::UbHostH2DOutSend(&interface, message,
         static_cast<uint8_t>(host_proto::H2DType::Lifecycle));
 
-    const auto wait_started = std::chrono::steady_clock::now();
-    while (!lifecycleCommitSeen) {
-        serviceDevice(UINT64_MAX);
-        ++boundaryWaitYields;
-        std::this_thread::yield();
-    }
+    // gem5 must keep executing device and DMA events at finite conservative
+    // horizons while the guest CPU is paused. pollDevice() returns to Python
+    // precisely when the real COMMIT message reaches this adapter.
+    scheduleNextPoll();
+}
+
+void
+UbHostAdapter::finishLifecycleSync()
+{
+    if (!lifecyclePending || !lifecycleCommitSeen)
+        fatal("%s: lifecycle fence finished without COMMIT\n", name());
+    const bool enable = !lifecycleSyncActive;
     if (lifecycleCommitEnabled != enable)
         fatal("%s: lifecycle fence target mismatch\n", name());
+    dmaOperations.erase(
+        std::remove_if(dmaOperations.begin(), dmaOperations.end(),
+            [](const auto &operation) { return operation->completed; }),
+        dmaOperations.end());
+    if (!dmaOperations.empty() || !mmioCompletions.empty())
+        fatal("%s: lifecycle fence committed with outstanding host operations "
+              "dma=%u mmio=%u\n", name(),
+              static_cast<unsigned>(dmaOperations.size()),
+              static_cast<unsigned>(mmioCompletions.size()));
+    for (const auto &snapshot : instructionSnapshots) {
+        if (snapshot.cpu->totalInsts() != snapshot.instructions)
+            fatal("%s: guest executed during lifecycle drain cpu=%s before=%llu after=%llu\n",
+                  name(), snapshot.cpu->name(),
+                  static_cast<unsigned long long>(snapshot.instructions),
+                  static_cast<unsigned long long>(snapshot.cpu->totalInsts()));
+    }
+
     if (enable) {
         resetProtocolEpoch();
         while (host_proto::UbHostH2DOutSync(&interface, 0) != 0) {
@@ -423,13 +487,26 @@ UbHostAdapter::toggleLifecycleSync()
         epochOrigin = 0;
     }
     const auto wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now() - wait_started).count();
+        std::chrono::steady_clock::now() - lifecycleWaitStarted).count();
     inform("[UB_HOST_FENCE] object=%s generation=%llu active=%d origin_tick=%llu wait_ns=%lld\n",
            name(), static_cast<unsigned long long>(lifecycleGeneration),
            enable ? 1 : 0,
            static_cast<unsigned long long>(epochOrigin),
            static_cast<long long>(wait_ns));
+    lifecyclePending = false;
     scheduleNextPoll();
+    std::vector<ThreadContext *> wakeups;
+    for (auto *context : blockedContexts) {
+        if (unblockExternalActivation(context))
+            wakeups.push_back(context);
+    }
+    for (const auto &paused : pausedContexts)
+        paused.context->activate();
+    for (auto *context : wakeups)
+        context->activate();
+    pausedContexts.clear();
+    blockedContexts.clear();
+    instructionSnapshots.clear();
 }
 
 void

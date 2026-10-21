@@ -5,22 +5,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lab_dir="$(cd "$script_dir/.." && pwd)"
 # shellcheck source=runtime.sh
 source "$script_dir/runtime.sh"
-# This builder is also the native producer for the QEMU adapter stack on
-# Apple Silicon.  The general lab runtime remains Linux-or-Docker only; limit
-# the exception to this portable host-side component build.
-if [[ "$UBSIM_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
-    ubsim_runtime_validate() { :; }
-fi
-container="$UBSIM_CONTAINER"
+# This builder also produces the QEMU adapter stack on Apple Silicon.
 runtime_lab="$(ubsim_runtime_default_lab "$lab_dir")"
-if [[ "$UBSIM_EXECUTION_MODE" == docker ]]; then
-    default_source_root="$runtime_lab/sources/ns-3-ub"
-else
-    default_source_root="$lab_dir/sources/ns-3-ub"
-fi
+default_source_root="$lab_dir/sources/ns-3-ub"
 source_root="${UBSIM_NS3UB_ROOT:-$default_source_root}"
 build_suffix=linux
-if [[ "$UBSIM_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
+if [[ "$(uname -s)" == Darwin ]]; then
     build_suffix=macos
 fi
 cache_dir="${UBSIM_NS3UB_CACHE:-$source_root/cmake-cache-$build_suffix}"
@@ -42,13 +32,10 @@ ctp_wire_retry_patch="$runtime_lab/integrations/ns3ub/patches/0012-ctp-actual-se
 ctp_cancel_retry_patch="$runtime_lab/integrations/ns3ub/patches/0013-ctp-stale-retry-cancel.patch"
 ctp_response_queue_patch="$runtime_lab/integrations/ns3ub/patches/0014-ctp-response-queue-coalescing.patch"
 ctp_path_observation_patch="$runtime_lab/integrations/ns3ub/patches/0015-ctp-path-observation.patch"
+ctp_per_jetty_patch="$runtime_lab/integrations/ns3ub/patches/0016-ctp-per-jetty-transaction-state.patch"
 simbricks_base_source="$runtime_lab/components/udma-device-sim/simbricks_base_portable.c"
 expected_source_revision=d6aa9e242d5a93f5bbd1ad54f39b1620c1b8757b
 
-# Docker Desktop can retain an unreachable virtiofs directory after the host
-# switches between source branches that add/remove a build directory. A clean
-# workspace uses the source-local paths; a stale mount transparently falls
-# back to container-local caches instead of failing during CMake configure.
 ubsim_runtime_start
 # The complete adapter is lab-owned and checked in under integrations/. The
 # upstream ns-3-UB checkout supplies the fabric model at one pinned revision.
@@ -112,6 +99,8 @@ ubsim_exec git -C "$source_root" apply --check "$ctp_response_queue_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_response_queue_patch"
 ubsim_exec git -C "$source_root" apply --check "$ctp_path_observation_patch"
 ubsim_exec git -C "$source_root" apply "$ctp_path_observation_patch"
+ubsim_exec git -C "$source_root" apply --check "$ctp_per_jetty_patch"
+ubsim_exec git -C "$source_root" apply "$ctp_per_jetty_patch"
 ubsim_exec rm -f "$source_root/scratch/ub-gem5-adapter.cc" \
     "$source_root/src/unified-bus/model/ub-external-adapter-protocol.h"
 ubsim_exec mkdir -p "$source_root/scratch/ubsim-ub-net"
@@ -143,7 +132,7 @@ ubsim_exec cmake -S "$source_root" -B "$cache_dir" \
     -DNS3_OUTPUT_DIRECTORY="$output_dir"
 
 ubsim_exec cmake --build "$cache_dir" \
-    --target scratch_ub-net-adapter scratch_ctp-recovery-contract scratch_ctp-feedback-contract scratch_ctp-read-length-contract scratch_ctp-wire-retry-contract \
+    --target scratch_ub-net-adapter scratch_ctp-recovery-contract scratch_ctp-feedback-contract scratch_ctp-read-length-contract scratch_ctp-wire-retry-contract scratch_ctp-multijetty-entity-contract \
     -j "${UBSIM_BUILD_JOBS:-8}"
 
 ubsim_exec test -x "$output_dir/scratch/ns3.44-ub-net-adapter"
@@ -153,8 +142,11 @@ ubsim_exec "$output_dir/scratch/ns3.44-ctp-feedback-contract" enabled
 ubsim_exec "$output_dir/scratch/ns3.44-ctp-feedback-contract" enabled single
 ubsim_exec "$output_dir/scratch/ns3.44-ctp-read-length-contract"
 ubsim_exec "$output_dir/scratch/ns3.44-ctp-wire-retry-contract"
+ubsim_exec "$output_dir/scratch/ns3.44-ctp-multijetty-entity-contract"
+ubsim_exec "$output_dir/scratch/ns3.44-ctp-multijetty-entity-contract" --split-jettys
+ubsim_exec "$output_dir/scratch/ns3.44-ctp-multijetty-entity-contract" --retry-jettys
 
-if [[ "$UBSIM_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
+if [[ "$(uname -s)" == Darwin ]]; then
     # The UB-NET contract peer is portable too.  Reuse the checked-in Darwin
     # build when available so the native CTP order path is exercised on macOS.
     peer="$lab_dir/artifacts/ub-switch-sim-build/ub-net-contract-peer"
@@ -182,7 +174,7 @@ if [[ "$UBSIM_EXECUTION_MODE" == native && "$(uname -s)" == Darwin ]]; then
     fi
 else
     # Build the protocol peer from the same pinned SimBricks tree and exercise
-    # asynchronous and conservative-synchronization contracts end to end.
+    # WQE-envelope contracts under asynchronous and conservative synchronization.
     switch_build=/tmp/ubsim-ub-switch-ns3-build
     ubsim_exec env UBSIM_LAB_ROOT="$runtime_lab" \
         UBSIM_UB_SWITCH_BUILD="$switch_build" \
@@ -190,16 +182,11 @@ else
         bash "$runtime_lab/scripts/build/build_ub_switch_sim.sh"
     for sync_mode in off required; do
         ubsim_exec timeout 20 bash \
-            "$runtime_lab/components/ub-switch-sim/tests/process_contract.sh" \
+            "$runtime_lab/integrations/ns3ub/tests/order_contract.sh" \
             "$output_dir/scratch/ns3.44-ub-net-adapter" \
             "$switch_build/ub-net-contract-peer" \
             "/tmp/ubsim-ns3ub-contract-$sync_mode" "$sync_mode"
     done
-    ubsim_exec timeout 20 bash \
-        "$runtime_lab/integrations/ns3ub/tests/order_contract.sh" \
-        "$output_dir/scratch/ns3.44-ub-net-adapter" \
-        "$switch_build/ub-net-contract-peer" \
-        /tmp/ubsim-ns3ub-order-contract
     ubsim_exec timeout 20 bash \
         "$runtime_lab/integrations/ns3ub/tests/retransmission_contract.sh" \
         "$output_dir/scratch/ns3.44-ub-net-adapter" \

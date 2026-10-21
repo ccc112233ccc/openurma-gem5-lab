@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "cpu/base.hh"
 #include "dev/arm/base_gic.hh"
 #include "dev/dma_device.hh"
 #include "params/UbHostAdapter.hh"
@@ -32,7 +33,8 @@ class UbHostAdapter final : public DmaDevice
                   PortID idx=InvalidPortID) override;
     Tick read(PacketPtr packet) override;
     Tick write(PacketPtr packet) override;
-    void toggleLifecycleSync();
+    void beginLifecycleSync();
+    void finishLifecycleSync();
 
   private:
     struct DmaOperation {
@@ -82,7 +84,19 @@ class UbHostAdapter final : public DmaDevice
     bool lifecycleSyncActive{false};
     bool lifecycleCommitSeen{false};
     bool lifecycleCommitEnabled{false};
+    bool lifecyclePending{false};
     uint64_t lifecycleGeneration{0};
+    struct PausedContext {
+        ThreadContext *context;
+    };
+    struct InstructionSnapshot {
+        BaseCPU *cpu;
+        Counter instructions;
+    };
+    std::vector<PausedContext> pausedContexts;
+    std::vector<ThreadContext *> blockedContexts;
+    std::vector<InstructionSnapshot> instructionSnapshots;
+    std::chrono::steady_clock::time_point lifecycleWaitStarted{};
     uint64_t pollEvents{0};
     uint64_t servicePolls{0};
     uint64_t emptyServicePolls{0};

@@ -155,13 +155,6 @@ mkdir -p "$lab/out"
 if [[ "$lab/artifacts/kernel/vmlinux" -nt "$lab/artifacts/kernel/Image" ]]; then
     if [[ "$lab/out/qemu-Image" -nt "$lab/artifacts/kernel/vmlinux" ]]; then
         : # Preserve a flat image already generated from this vmlinux.
-    elif command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-        container="${UBSIM_CONTAINER:-ubsim-gem5-lab}"
-        container_root="${UBSIM_CONTAINER_LAB_ROOT:-/workspace/ubsim-gem5-lab}"
-        docker exec "$container" aarch64-linux-gnu-objcopy \
-            -O binary -R .note -R .note.gnu.build-id -R .comment -S \
-            "$container_root/artifacts/kernel/vmlinux" \
-            "$container_root/out/qemu-Image"
     else
         python3 "$lab/tools/elf_to_flat_binary.py" \
             "$lab/artifacts/kernel/vmlinux" "$lab/out/qemu-Image"

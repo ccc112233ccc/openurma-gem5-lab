@@ -21,6 +21,7 @@
 /*.raw.txt
 /checkpoints/
 /experiments/
+/configs/ui-tasks/
 
 # Generated presentation output. Keep the current AICO plan and generator.
 /presentation-aico/output/

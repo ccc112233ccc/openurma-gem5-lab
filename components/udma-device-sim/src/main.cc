@@ -46,10 +46,19 @@ struct Options {
     std::uint64_t endpoint_eid{0x100};
     std::uint64_t port_count{2};
     std::uint64_t dma_max_outstanding{256};
+    std::uint64_t write_payload_read_window{8};
     std::uint64_t sq_prefetch_wqebbs{64};
     std::uint64_t sq_fetch_burst_wqebbs{16};
     std::uint64_t sq_fetch_max_outstanding{4};
     std::uint64_t completion_event_slots{64};
+    std::uint64_t max_jettys{1152};
+    std::uint64_t public_jettys{128};
+    std::uint64_t max_jfs_depth{1024};
+    std::uint64_t max_jfr_depth{1024};
+    std::uint64_t max_jfc_depth{4096};
+    bool one_shot_jfc_notifications{false};
+    bool pipelined_completion_dma{false};
+    std::uint64_t max_read_outstanding{0};
     std::uint64_t iotlb_entries{4096};
     SimbricksBaseIfSyncMode sync_mode{kSimbricksBaseIfSyncOptional};
     bool lifecycle_sync{false};
@@ -105,6 +114,9 @@ bool ParseOptions(int argc, char** argv, Options& options)
         } else if (arg == "--dma-max-outstanding" && i + 1 < argc) {
             if (!ParseUnsigned(argv[++i], options.dma_max_outstanding) ||
                 options.dma_max_outstanding > 4096) return false;
+        } else if (arg == "--write-payload-read-window" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.write_payload_read_window) ||
+                options.write_payload_read_window > 4096) return false;
         } else if (arg == "--sq-prefetch-wqebbs" && i + 1 < argc) {
             if (!ParseUnsigned(argv[++i], options.sq_prefetch_wqebbs) ||
                 !options.sq_prefetch_wqebbs || options.sq_prefetch_wqebbs > 4096) return false;
@@ -117,9 +129,31 @@ bool ParseOptions(int argc, char** argv, Options& options)
         } else if (arg == "--completion-event-slots" && i + 1 < argc) {
             if (!ParseUnsigned(argv[++i], options.completion_event_slots) ||
                 !options.completion_event_slots || options.completion_event_slots > 4096) return false;
+        } else if (arg == "--max-jettys" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.max_jettys) ||
+                options.max_jettys < 2 || options.max_jettys > 65535) return false;
+        } else if (arg == "--public-jettys" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.public_jettys) ||
+                !options.public_jettys || options.public_jettys > 65534) return false;
+        } else if (arg == "--max-jfs-depth" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.max_jfs_depth) ||
+                options.max_jfs_depth > 8192) return false;
+        } else if (arg == "--max-jfr-depth" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.max_jfr_depth) ||
+                options.max_jfr_depth > 32768) return false;
+        } else if (arg == "--max-jfc-depth" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.max_jfc_depth) ||
+                options.max_jfc_depth > 2097152) return false;
         } else if (arg == "--iotlb-entries" && i + 1 < argc) {
             if (!ParseUnsigned(argv[++i], options.iotlb_entries) ||
                 options.iotlb_entries > (1U << 20)) return false;
+        } else if (arg == "--one-shot-jfc-notifications") {
+            options.one_shot_jfc_notifications = true;
+        } else if (arg == "--pipelined-completion-dma") {
+            options.pipelined_completion_dma = true;
+        } else if (arg == "--max-read-outstanding" && i + 1 < argc) {
+            if (!ParseUnsigned(argv[++i], options.max_read_outstanding) ||
+                options.max_read_outstanding > 8192) return false;
         } else if (arg == "--test-abi") {
             options.extraction_test_abi = true;
         } else if (arg == "--lifecycle-sync") {
@@ -862,11 +896,22 @@ int Run(const Options& options)
     model_config.endpoint_eid = static_cast<std::uint32_t>(options.endpoint_eid);
     model_config.dma_max_outstanding =
         static_cast<std::uint32_t>(options.dma_max_outstanding);
+    model_config.write_payload_read_window =
+        static_cast<std::uint32_t>(options.write_payload_read_window);
     model_config.iotlb_entries = static_cast<std::uint32_t>(options.iotlb_entries);
     model_config.sq_prefetch_wqebbs = static_cast<std::uint32_t>(options.sq_prefetch_wqebbs);
     model_config.sq_fetch_burst_wqebbs = static_cast<std::uint32_t>(options.sq_fetch_burst_wqebbs);
     model_config.sq_fetch_max_outstanding = static_cast<std::uint32_t>(options.sq_fetch_max_outstanding);
     model_config.completion_event_slots = static_cast<std::uint32_t>(options.completion_event_slots);
+    model_config.max_jettys = static_cast<std::uint32_t>(options.max_jettys);
+    model_config.public_jettys = static_cast<std::uint32_t>(options.public_jettys);
+    model_config.max_jfs_depth = static_cast<std::uint32_t>(options.max_jfs_depth);
+    model_config.max_jfr_depth = static_cast<std::uint32_t>(options.max_jfr_depth);
+    model_config.max_jfc_depth = static_cast<std::uint32_t>(options.max_jfc_depth);
+    model_config.one_shot_jfc_notifications = options.one_shot_jfc_notifications;
+    model_config.pipelined_completion_dma = options.pipelined_completion_dma;
+    model_config.max_read_outstanding =
+        static_cast<std::uint32_t>(options.max_read_outstanding);
     model_config.extraction_test_abi = options.extraction_test_abi;
     device::UdmaModel model(host, network, model_config);
     if (!options.state_in.empty()) {
@@ -948,6 +993,10 @@ int Run(const Options& options)
                 now = 0;
                 model.RebaseTime(0);
             } else {
+                std::cerr << "[UDMA_WRITE_FENCE] generation="
+                          << host.Generation() << " eid=0x" << std::hex
+                          << options.endpoint_eid << std::dec << '\n';
+                model.DumpWriteTiming(std::cerr);
                 now += epoch_origin_ps;
                 model.RebaseTime(now);
                 host_if.base.in_timestamp = host_if.base.out_timestamp = now;
@@ -1058,6 +1107,7 @@ int Run(const Options& options)
               << " sq_wqes=" << model.sq_wqes()
               << " sq_completions=" << model.sq_completions()
               << " rma_pending_peak=" << model.rma_pending_peak()
+              << " read_window_stalls=" << model.read_window_stalls()
               << " sq_wqebbs_retired=" << model.sq_wqebbs_retired()
               << " sq_consumer_wraps=" << model.sq_consumer_wraps()
               << " sq_depth_rejects=" << model.sq_depth_rejects()
@@ -1067,6 +1117,7 @@ int Run(const Options& options)
               << model.last_unknown_queue_offset() << std::dec
               << " ubase_errors=" << model.ubase_errors() << '\n';
     network.DumpPorts(std::cerr);
+    model.DumpWriteTiming(std::cerr);
     host.DumpPending(std::cerr);
     model.DumpProgress(std::cerr);
     if (!options.state_out.empty()) {
@@ -1096,6 +1147,8 @@ int main(int argc, char** argv)
                      "[--eid N] [--ports N] "
                      "[--sq-prefetch-wqebbs N --sq-fetch-burst-wqebbs N --sq-fetch-max-outstanding N] "
                      "[--completion-event-slots N] "
+                     "[--max-jfs-depth N --max-jfr-depth N --max-jfc-depth N] "
+                     "[--max-jettys N --public-jettys N] "
                      "[--lifecycle-sync] [--state-in PATH] [--state-out PATH] "
                      "[--test-abi]\n";
         return 2;

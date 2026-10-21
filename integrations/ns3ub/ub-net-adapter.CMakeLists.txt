@@ -21,6 +21,14 @@ build_exec(
   EXECUTABLE_DIRECTORY_PATH ${CMAKE_OUTPUT_DIRECTORY}/scratch/
 )
 
+build_exec(
+  EXECNAME ctp-multijetty-entity-contract
+  EXECNAME_PREFIX scratch_
+  SOURCE_FILES ${ubsim_lab_root}/integrations/ns3ub/tests/ctp-multijetty-entity.cc
+  LIBRARIES_TO_LINK ${libunified-bus} ${libcore} ${libnetwork}
+  EXECUTABLE_DIRECTORY_PATH ${CMAKE_OUTPUT_DIRECTORY}/scratch/
+)
+
 add_library(ubsim_simbricks_base STATIC simbricks-base-portable.c)
 target_include_directories(ubsim_simbricks_base SYSTEM PUBLIC
   "${ubsim_lab_root}/sources/simbricks/lib")

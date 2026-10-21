@@ -6,6 +6,7 @@ from run_qemu_timing_trial import (write_bw_command, validate_write_capabilities
 
 class WriteTrialParametersTest(unittest.TestCase):
     def test_single_direction_read(self):
+        self.assertTrue(parse_args(["unused", "--read-latency"]).read_latency)
         original = bw_command("read_bw", 4096, 21410, 2048, 512)
         self.assertEqual(bw_command("read_bw", 4096, 21410, 2048, 512,
                                    unidirectional_read=True), original.replace("-B ", ""))

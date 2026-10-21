@@ -10,7 +10,7 @@ kernel_root="${KSRC:-$default_kernel_root}"
 arm_build="${ARM_BUILD:-$lab_root/artifacts/umdk-build}"
 busybox="${BUSYBOX_ARM64:-/bin/busybox}"
 output="${OUT:-$lab_root/out/official-udma.cpio.gz}"
-bridge="$lab_root/official-udma/ub_v2m_bridge/ubsim_ub_v2m.ko"
+bridge="${UB_V2M_BRIDGE_DIR:-$lab_root/official-udma/ub_v2m_bridge}/ubsim_ub_v2m.ko"
 
 modules=(
     "$kernel_root/drivers/ub/ubfi/ubfi.ko"

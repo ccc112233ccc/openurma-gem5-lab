@@ -34,7 +34,8 @@ class SqPrefetchLaunchTest(unittest.TestCase):
             source = (ROOT / "scripts/run" / name).read_text()
             self.assertIn('--completion-event-slots "$completion_event_slots"', source)
             self.assertIn('completion_event_slots=$completion_event_slots\n', source)
-            self.assertIn('udma_state_format=3\n', source)
+            state_format = 4 if name == "run-dual.sh" else 3
+            self.assertIn(f'udma_state_format={state_format}\n', source)
             block = re.search(r'\[\[ "\$completion_event_slots".*?\n\s*die [^\n]+', source).group()
             for value, valid in (("1", True), ("64", True), ("4096", True),
                                  ("0", False), ("4097", False), ("-1", False), ("no", False)):

@@ -4,25 +4,13 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/runtime.sh
 source "$script_dir/../runtime.sh"
-container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
 run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"
 uart0="${UBSIM_DUAL_UART0:-3460}"
 uart1="${UBSIM_DUAL_UART1:-3470}"
 
-if [[ "$UBSIM_EXECUTION_MODE" == docker ]]; then
-    if ! docker inspect "$container" >/dev/null 2>&1; then
-        echo "Container does not exist: $container" >&2
-        exit 2
-    fi
-    if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != true ]; then
-        echo "Container is stopped: $container"
-        exit 1
-    fi
-else
-    ubsim_runtime_validate
-fi
+ubsim_runtime_validate
 
 show_process() {
     label=$1
@@ -33,7 +21,7 @@ show_process() {
     fi
     pid=$(ubsim_exec sed -n '1p' "$pidfile")
     if [[ "$pid" =~ ^[0-9]+$ ]] && ubsim_exec kill -0 "$pid" 2>/dev/null; then
-        printf '%-8s running (%s pid %s)\n' "$label" "$UBSIM_EXECUTION_MODE" "$pid"
+        printf '%-8s running (pid %s)\n' "$label" "$pid"
     else
         printf '%-8s stopped (stale pid %s)\n' "$label" "$pid"
     fi
@@ -68,12 +56,19 @@ fi
 
 for ((node = 0; node < node_count; ++node)); do
     transcript="$run_root/node$node/system.terminal"
-    if ubsim_exec test -r "$transcript"; then
-        if ubsim_exec grep -aq 'Official UDMA full-system guest' "$transcript"; then
+    node_pid="$(ubsim_exec sed -n '1p' "$run_root/node$node/gem5.pid" 2>/dev/null || true)"
+    if [[ "$node_pid" =~ ^[0-9]+$ ]] &&
+       ubsim_exec kill -0 "$node_pid" 2>/dev/null &&
+       ubsim_exec test -r "$transcript"; then
+        if ubsim_exec test -e "$run_root/sync.ready" ||
+           ubsim_exec grep -aq 'Official UDMA full-system guest' "$transcript" ||
+           ubsim_exec grep -aFq "(ubsim-node$node) ~ #" "$transcript"; then
             echo "node$node   guest shell ready"
         else
             echo "node$node   booting (see $transcript)"
         fi
+    else
+        echo "node$node   guest stopped"
     fi
 done
 

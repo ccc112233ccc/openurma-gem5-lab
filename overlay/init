@@ -30,6 +30,7 @@ UBSIM_M5OPS_MODE=inst
 UBSIM_M5OPS_BASE=""
 UBSIM_AUTO_NET=0
 UBSIM_SSH=0
+UBSIM_TEMPLATE=0
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
         ubsim_node=*)
@@ -46,21 +47,12 @@ for arg in $(cat /proc/cmdline); do
         ubsim_m5ops_base=*) UBSIM_M5OPS_BASE=${arg#*=} ;;
         ubsim_auto_net=1) UBSIM_AUTO_NET=1 ;;
         ubsim_ssh=1) UBSIM_SSH=1 ;;
+        ubsim_template=1) UBSIM_TEMPLATE=1 ;;
     esac
 done
 export UBSIM_NODE UBSIM_PROVIDER UBSIM_CPU_SWITCH UBSIM_BENCH_CPU
 export UBSIM_M5OPS_MODE UBSIM_M5OPS_BASE
-export UBSIM_AUTO_NET UBSIM_SSH
-case "$UBSIM_NODE" in
-    '') hostname ubsim-gem5; eid_last_byte=1; guest_ip="" ;;
-    *)
-        hostname "ubsim-node$UBSIM_NODE"
-        eid_last_byte=$((UBSIM_NODE + 1))
-        guest_ip="10.0.0.$((UBSIM_NODE + 1))"
-        ;;
-esac
-eid_suffix=$(printf '%04x' "$((0x100 + ${UBSIM_NODE:-0}))")
-eid_display="0000:0000:0000:0000:0000:0000:0000:$eid_suffix"
+export UBSIM_AUTO_NET UBSIM_SSH UBSIM_TEMPLATE
 
 load_one() {
     module="$1"
@@ -90,6 +82,32 @@ emergency_shell() {
     done
 }
 
+# A reusable gem5 checkpoint stops here, before hostname, IP or the official
+# UDMA driver has observed a node identity. The host supplies one decimal node
+# number through gem5's per-instance readfile after restoring this image.
+if [ "$UBSIM_TEMPLATE" = 1 ]; then
+    echo "[ubsim-init] saving node-neutral checkpoint before UDMA setup"
+    /usr/bin/ubsim-checkpoint || emergency_shell "template checkpoint failed"
+    UBSIM_NODE=$(/usr/bin/ubsim-readfile) ||
+        emergency_shell "template restore has no node identity"
+    case "$UBSIM_NODE" in
+        [0-7]) ;;
+        *) emergency_shell "invalid template node identity: $UBSIM_NODE" ;;
+    esac
+    export UBSIM_NODE
+    echo "[ubsim-init] restored template as node $UBSIM_NODE"
+fi
+
+case "$UBSIM_NODE" in
+    '') hostname ubsim-gem5; guest_ip="" ;;
+    *)
+        hostname "ubsim-node$UBSIM_NODE"
+        guest_ip="10.0.0.$((UBSIM_NODE + 1))"
+        ;;
+esac
+eid_suffix=$(printf '%04x' "$((0x100 + ${UBSIM_NODE:-0}))")
+eid_display="0000:0000:0000:0000:0000:0000:0000:$eid_suffix"
+
 echo
 echo "[ubsim-init] mounting guest filesystems"
 load_one ipv6.ko || true
@@ -118,6 +136,12 @@ if [ -n "$guest_ip" ]; then
     done
     if [ -e /sys/class/net/eth0 ]; then
         echo 1 > /proc/sys/net/ipv6/conf/eth0/disable_ipv6 2>/dev/null || true
+        if [ "$UBSIM_TEMPLATE" = 1 ]; then
+            mac_suffix=$(printf '%02x' "$((UBSIM_NODE + 1))")
+            ip link set eth0 down || emergency_shell "cannot reset template NIC"
+            ip link set eth0 address "02:00:00:00:00:$mac_suffix" ||
+                emergency_shell "cannot assign unique template NIC MAC"
+        fi
         ip link set eth0 up 2>/dev/null || true
         if [ "$UBSIM_AUTO_NET" = 1 ]; then
             ip addr replace "$guest_ip/24" dev eth0

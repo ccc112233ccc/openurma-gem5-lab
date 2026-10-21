@@ -35,6 +35,7 @@ SYNC_SMOKE_CASES = [
     ("write_lat_128_sync", "write_lat", 128, 8, 1, 1, False, None),
     ("read_lat_128_sync", "read_lat", 128, 8, 1, 1, False, None),
     ("send_bw_128_sync", "send_bw", 128, 16, 16, 16, False, None),
+    ("read_bw_4096_sync", "read_bw", 4096, 64, 16, 16, True, None),
 ]
 
 TIMING_SEND_CASES = [
@@ -129,8 +130,8 @@ MULTI_CASES = [
 
 
 def validate_depth_output(output: str, depth: int, size: int,
-                          iterations: int) -> list[str]:
-    """Require both guests' actual depth and a complete bandwidth result row.
+                          iterations: int, source_node_only: bool = False) -> list[str]:
+    """Require the source's actual depth and both bandwidth result rows.
 
     This proves configured queue capacity, not a measured in-flight high-water
     mark; fast completions can keep the latter below the configured limit.
@@ -141,8 +142,9 @@ def validate_depth_output(output: str, depth: int, size: int,
         errors.append("expected two UART transcripts")
     for index, section in enumerate(sections):
         depths = re.findall(r"JFS depth\s*:\s*(\d+)", section)
-        if depths != [str(depth)]:
-            errors.append(f"node{index}: expected JFS depth {depth}, got {depths}")
+        expected_depths = [] if source_node_only and index == 0 else [str(depth)]
+        if depths != expected_depths:
+            errors.append(f"node{index}: expected JFS depth {expected_depths}, got {depths}")
         number = r"\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
         row = rf"(?m)^\s*{size}\s+{iterations}\s+{number}\s+{number}\s+{number}\s*$"
         if len(re.findall(row, section)) != 1:
@@ -295,8 +297,9 @@ def main() -> int:
         ]
         valid_tick_deltas = [value for value in tick_deltas if value is not None]
         raw.write_text(result.stdout)
-        validation_errors = (validate_depth_output(result.stdout, queue_depth,
-                             size, iterations * args.jettys) if queue_depth else [])
+        validation_errors = (validate_depth_output(
+            result.stdout, queue_depth, size, iterations * args.jettys,
+            source_node_only=args.suite == "timing-send") if queue_depth else [])
         if args.jettys > 1:
             observed = re.findall(r"Number of jettys\s*:\s*(\d+)", result.stdout)
             if observed != [str(args.jettys)] * 2:

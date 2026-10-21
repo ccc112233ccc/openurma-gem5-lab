@@ -154,6 +154,19 @@ actual_sha="$(git -C "$UMDK_SRC" rev-parse HEAD)"
 [[ "$actual_sha" == "$PINNED_UMDK_SHA" ]] || \
     die "UMDK is at $actual_sha, expected $PINNED_UMDK_SHA"
 
+# The pinned source bundle ends before the one-sided RMA bandwidth timing
+# addition. Apply this lab-owned perftest patch idempotently while leaving the
+# official provider implementation untouched.
+perftest_sync_patch="$LAB_DIR/patches/source/umdk/0012-synchronize-unidirectional-rma-bandwidth.patch"
+[[ -r "$perftest_sync_patch" ]] || die "missing perftest timing patch: $perftest_sync_patch"
+if git -C "$UMDK_SRC" apply --reverse --check "$perftest_sync_patch" 2>/dev/null; then
+    :
+elif git -C "$UMDK_SRC" apply --check "$perftest_sync_patch"; then
+    git -C "$UMDK_SRC" apply "$perftest_sync_patch"
+else
+    die "perftest timing patch cannot be applied or recognized"
+fi
+
 # Do not silently package binaries from a locally edited UMDK checkout.  A
 # caller may explicitly allow unrelated experiments, but never changes in the
 # stock provider subtree that this script claims to build unchanged.
@@ -166,7 +179,12 @@ if [[ "$ALLOW_DIRTY_UMDK" == "enable" ]]; then
     }
     echo "ALLOW_DIRTY_UMDK=enable: unrelated UMDK changes allowed; stock UDMA subtree is clean"
 else
-    git -C "$UMDK_SRC" diff --quiet -- || die "UMDK worktree has unstaged source changes"
+    git -C "$UMDK_SRC" diff -- src/urma/tools/urma_perftest/perftest_run_test.c |
+        cmp -s - "$perftest_sync_patch" ||
+        die "perftest differs from the tracked timing patch"
+    git -C "$UMDK_SRC" diff --quiet -- . \
+        ':(exclude)src/urma/tools/urma_perftest/perftest_run_test.c' ||
+        die "UMDK worktree has unrelated unstaged source changes"
     git -C "$UMDK_SRC" diff --cached --quiet -- || die "UMDK worktree has staged source changes"
 fi
 

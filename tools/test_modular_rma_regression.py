@@ -105,6 +105,15 @@ class DepthTests(unittest.TestCase):
     def test_complete_both_nodes(self):
         self.assertEqual(validate_depth_output(self.transcript(), 512, 4096, 2048), [])
 
+    def test_single_direction_source_only_depth(self):
+        server = "--- UART 3460 ---\nJFR depth : 512\n128 1024 0.00 100.15 0.820433\n"
+        client = "--- UART 3470 ---\nJFS depth : 512\n128 1024 614.40 576.88 4.725803\n"
+        self.assertEqual(validate_depth_output(server + client, 512, 128, 1024,
+                                               source_node_only=True), [])
+        self.assertTrue(validate_depth_output(server + client.replace("512", "128"),
+                                              512, 128, 1024,
+                                              source_node_only=True))
+
     def test_reject_clamped_depth_missing_node_or_incomplete_row(self):
         for text in (self.transcript(128), "", self.transcript().split("--- UART 3570")[0],
                      self.transcript().replace("12.34 0.001234", "12.34")):

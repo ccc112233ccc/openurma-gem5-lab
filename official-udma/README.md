@@ -1,55 +1,12 @@
-# Official openEuler UDMA stack
+# 官方 UDMA 客体软件栈
 
-This directory contains build inputs and retained evidence for running the
-unmodified openEuler UB stack in the full-system guest.
+本目录提供 OLK UB/UMMU/UDMA 内核栈的构建输入、镜像打包入口和硬件服务契约。官方内核模块与 UMDK 在 ARM64 客体里运行；gem5/QEMU 本身只编入 UB-HOST 平台适配器，硬件行为由独立 UDMA 设备和 ns-3-UB 网络模型提供。完整构建与加载链路见[官方软件栈集成](../docs/guest-driver-integration.md)。
 
-## Software boundary
+## 构建入口
 
-- OLK 6.6 supplies UBUS, UMMU, UBASE/UBCORE, UBURMA and UDMA kernel code.
-- UMDK supplies `liburma`, `urma_admin`, `urma_perftest`, and the stock UDMA
-  provider.
-- The lab supplies only the absent hardware: discovery resources, MMIO
-  registers, firmware/control queues, DMA, interrupts, queue execution and the
-  UB network.
-- `ub_v2m_bridge/` is simulation-only integration glue that exposes the
-  required UB MSI domain over gem5's GICv2m parent. It does not modify an
-  official driver source file.
+- [`kernel.fragment`](kernel.fragment) 与 [`build_modules.sh`](build_modules.sh)：合并内核配置，构建一致的内核与官方模块，并发布 `artifacts/kernel/`。
+- [`build_initramfs.sh`](build_initramfs.sh)：调用通用打包器，将模块、官方 UMDK 库、provider、工具与客体启动脚本放进 initramfs。
+- [`ub_v2m_bridge/`](ub_v2m_bridge/)：项目自有的模拟平台 MSI 域桥接；它与官方 UDMA 驱动源码分离。
+- [`contract.tsv`](contract.tsv)：驱动访问到的设备服务清单。功能覆盖与限制见[驱动覆盖审计](../docs/validation/official-driver-coverage.md)。
 
-The executable path has no dependency on the retired prototype repository and
-no fallback provider or kernel module.
-
-## Validated gates
-
-The retained evidence covers:
-
-1. official module build and device discovery;
-2. `udma.ko` probe, `udma0`, `/dev/uburma/udma0`, EID, and ACTIVE ports;
-3. context, token, segment, JFC/JFS/JFR/Jetty, TP and aggregation resources;
-4. two-node CTP SEND/RECV;
-5. RMA READ/WRITE and bidirectional bandwidth paths;
-6. multi-port TP-context routing;
-7. modular gem5/QEMU host adapters, standalone UDMA devices, and ns-3 fabric.
-
-See `contract.tsv` for the driver-to-hardware service inventory and the
-`*-evidence.md` files for captured commands and output. Passing module loading
-alone is never counted as a data-plane result.
-
-## Build and run
-
-```sh
-./lab setup --jobs 8
-./lab build initramfs
-./lab start --nodes 2 --profile fast --provider official
-./lab status
-./lab attach 0
-```
-
-Inside the guest:
-
-```sh
-urma_admin show
-```
-
-The initramfs is produced as `out/official-udma.cpio.gz`. Source revisions are
-recorded in `SOURCE_REVISIONS.md`; the official drivers and provider are built
-from `oe66`, `deps/ummu`, and `sources/umdk` respectively.
+标准用户入口是仓库根目录的 `./lab build kernel`、`./lab build umdk`、`./lab build initramfs`。ARM64 Linux 客体源码构建需要 Linux 或相应交叉构建环境；当前工作区已保留的 64 KiB 客体镜像有独立来源，不能假定 `./lab build all` 会重建它们。启动后在客体运行 `urma_admin show`，可检查 `udma0`、EID 和物理端口状态。数据路径还应通过两端 `urma_perftest` 或项目回归检查；模块加载成功本身不是数据路径验证。

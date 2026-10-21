@@ -1,0 +1,53 @@
+diff --git a/src/sim/system.cc b/src/sim/system.cc
+index f23db1725..cd7ba2074 100644
+--- a/src/sim/system.cc
++++ b/src/sim/system.cc
+@@ -67,6 +67,36 @@ namespace gem5
+ 
+ std::vector<System *> System::systemList;
+ 
++namespace
++{
++
++// An external timing fence runs DMA events while guest contexts are paused.
++// Remember wakeups until the fence commits, without changing ordinary guest
++// quiesce and interrupt handling outside that short interval.
++std::unordered_map<ThreadContext *, bool> externalActivationFences;
++
++} // anonymous namespace
++
++void
++blockExternalActivation(ThreadContext *context)
++{
++    assert(context);
++    const auto [position, inserted] =
++        externalActivationFences.emplace(context, false);
++    (void)position;
++    assert(inserted);
++}
++
++bool
++unblockExternalActivation(ThreadContext *context)
++{
++    const auto found = externalActivationFences.find(context);
++    assert(found != externalActivationFences.end());
++    const bool requested = found->second;
++    externalActivationFences.erase(found);
++    return requested;
++}
++
+ void
+ System::Threads::Thread::resume()
+ {
+@@ -172,6 +202,11 @@ bool
+ System::Threads::activationDeferred(ContextID id)
+ {
+     auto &t = thread(id);
++    const auto blocked = externalActivationFences.find(t.context);
++    if (blocked != externalActivationFences.end()) {
++        blocked->second = true;
++        return true;
++    }
+     if (t.quiesceUntil <= curTick()) {
+         t.quiesceUntil = 0;
+         return false;

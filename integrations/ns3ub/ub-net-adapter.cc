@@ -33,6 +33,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -90,11 +91,14 @@ std::uint64_t ParseUnsigned(const std::string& text, const char* name,
 struct EndpointOption {
     std::string socket;
     std::uint32_t eid{};
+    std::optional<std::uint64_t> link_delay_ps;
+    std::optional<std::uint64_t> rate_gbps;
 };
 
 struct Options {
     std::vector<EndpointOption> endpoints;
     std::uint32_t ports{2};
+    bool direct_link{false};
     std::uint64_t link_delay_ps{100000};
     std::uint64_t switch_delay_ps{0};
     std::uint64_t rate_gbps{400};
@@ -117,12 +121,24 @@ struct Options {
 
 EndpointOption ParseEndpoint(const std::string& value)
 {
-    const auto comma = value.rfind(',');
-    if (comma == std::string::npos || comma == 0)
-        throw std::runtime_error("endpoint must be SOCKET,EID");
-    const auto eid = ParseUnsigned(value.substr(comma + 1), "endpoint EID");
+    std::vector<std::string> parts;
+    std::size_t start = 0;
+    for (std::size_t comma = value.find(','); comma != std::string::npos;
+         comma = value.find(',', start)) {
+        parts.push_back(value.substr(start, comma - start));
+        start = comma + 1;
+    }
+    parts.push_back(value.substr(start));
+    if ((parts.size() != 2 && parts.size() != 4) || parts[0].empty())
+        throw std::runtime_error("endpoint must be SOCKET,EID[,DELAY_PS,RATE_GBPS]");
+    const auto eid = ParseUnsigned(parts[1], "endpoint EID");
     if (eid > 0xcffff) throw std::runtime_error("endpoint EID exceeds 20 bits");
-    return {value.substr(0, comma), static_cast<std::uint32_t>(eid)};
+    EndpointOption endpoint{parts[0], static_cast<std::uint32_t>(eid)};
+    if (parts.size() == 4) {
+        endpoint.link_delay_ps = ParseUnsigned(parts[2], "endpoint delay");
+        endpoint.rate_gbps = ParseUnsigned(parts[3], "endpoint rate");
+    }
+    return endpoint;
 }
 
 Options ParseOptions(int argc, char** argv)
@@ -139,6 +155,8 @@ Options ParseOptions(int argc, char** argv)
             options.link_delay_ps = ParseUnsigned(argv[++i], "link delay", true);
         else if (arg == "--switch-delay-ps" && i + 1 < argc)
             options.switch_delay_ps = ParseUnsigned(argv[++i], "switch delay", true);
+        else if (arg == "--direct-link")
+            options.direct_link = true;
         else if (arg == "--rate-gbps" && i + 1 < argc)
             options.rate_gbps = ParseUnsigned(argv[++i], "line rate");
         else if (arg == "--sync-interval-ps" && i + 1 < argc)
@@ -193,10 +211,18 @@ Options ParseOptions(int argc, char** argv)
         throw std::runtime_error("at least two endpoints are required");
     if (options.ports == 0 || options.ports > 16)
         throw std::runtime_error("ports must be in [1,16]");
+    if (options.direct_link &&
+        (options.endpoints.size() != 2 || options.ports != 1 || options.switch_delay_ps != 0))
+        throw std::runtime_error("direct link requires two endpoints, one port and zero switch delay");
     std::unordered_map<std::uint32_t, bool> eids;
     for (const auto& endpoint : options.endpoints)
         if (!eids.emplace(endpoint.eid, true).second)
             throw std::runtime_error("endpoint EIDs must be unique");
+    for (const auto& endpoint : options.endpoints) {
+        const auto rate = endpoint.rate_gbps.value_or(options.rate_gbps);
+        if (rate > std::numeric_limits<std::uint64_t>::max() / 1000000000ULL)
+            throw std::runtime_error("endpoint rate exceeds uint64 bps range");
+    }
     return options;
 }
 
@@ -329,8 +355,7 @@ class UbNetFabric {
     explicit UbNetFabric(const Options& options)
         : options_(options), endpoints_(options.endpoints.size()),
           endpoint_ports_(options.endpoints.size()),
-          partial_wqes_(options.endpoints.size()),
-          last_native_tassn_(options.endpoints.size())
+          partial_wqes_(options.endpoints.size())
     {
         ObjectFactory scheduler;
         scheduler.SetTypeId(AdapterEventScheduler::GetTypeId());
@@ -361,6 +386,7 @@ class UbNetFabric {
         PublishLinks();
         std::cerr << "[NS3_UB_NET] connected " << endpoints_.size()
                   << " UB-NET endpoints"
+                  << " topology=" << (options_.direct_link ? "direct" : "switch")
                   << " ports=" << options_.ports
                   << " rate_gbps=" << options_.rate_gbps
                   << " ctp_retransmission="
@@ -583,6 +609,8 @@ class UbNetFabric {
                   << " native_wqes_submitted=" << native_wqes_submitted_
                   << " native_wqes_completed=" << native_wqes_completed_
                   << " native_wqes_failed=" << native_wqes_failed_
+                  << " guest_jetty_identities=" << guest_jetty_identities_.size()
+                  << " native_jetty_bindings=" << native_jetty_bindings_
                   << " target_dma_drained_after_terminal=" << target_dma_drained_after_terminal_
                   << " target_dma_errors=" << target_dma_errors_
                   << " pending_target_dma=" << pending_target_executions_.size()
@@ -626,11 +654,11 @@ class UbNetFabric {
                   << " ctp_native_segment_send_span_ps="
                   << (last_native_segment_send_ps_ - first_native_segment_send_ps_)
                   << " ctp_second_segment_gap_ps=" << second_native_segment_gap_ps_
-                  << " ctp_queue_marks=" << ctp_feedback_->marked
+                  << " ctp_queue_marks=" << (ctp_feedback_ ? ctp_feedback_->marked : 0)
                   << " ctp_cnp_sent=" << ctp_cnp_sent
                   << " ctp_cnp_suppressed=" << ctp_cnp_suppressed
                   << " ctp_wire_pacing_waits=" << ctp_wire_waits
-                  << " ctp_peak_queue_bytes=" << ctp_feedback_->peakBytes
+                  << " ctp_peak_queue_bytes=" << (ctp_feedback_ ? ctp_feedback_->peakBytes : 0)
                   << '\n';
     }
 
@@ -648,7 +676,8 @@ class UbNetFabric {
             // ns-3 owns serialization and switch queueing, while its internal
             // UbLink uses zero propagation delay to avoid double counting.
             const std::uint64_t boundary_latency =
-                std::max<std::uint64_t>(1, options_.link_delay_ps);
+                std::max<std::uint64_t>(1,
+                    options_.endpoints[i].link_delay_ps.value_or(options_.link_delay_ps));
             endpoint.params.link_latency = boundary_latency;
             endpoint.params.sync_interval =
                 std::min(options_.sync_interval_ps, boundary_latency);
@@ -670,12 +699,20 @@ class UbNetFabric {
             if (endpoint.peer_intro.port_count < options_.ports)
                 throw std::runtime_error("endpoint exposes too few UB ports");
         }
+        for (std::size_t i = 0; i < endpoints_.size(); ++i)
+            std::cerr << "[NS3_UB_NET_ENDPOINT] eid=" << options_.endpoints[i].eid
+                      << " delay_ps=" << endpoints_[i].params.link_latency
+                      << " rate_gbps="
+                      << options_.endpoints[i].rate_gbps.value_or(options_.rate_gbps)
+                      << '\n';
     }
 
     void BuildTopology()
     {
-        const DataRate rate(std::to_string(options_.rate_gbps) + "Gbps");
         for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
+            const auto endpoint_rate_gbps =
+                options_.endpoints[endpoint].rate_gbps.value_or(options_.rate_gbps);
+            const DataRate rate(std::to_string(endpoint_rate_gbps) + "Gbps");
             Ptr<Node> node = CreateObject<Node>();
             // The external UDMA process is the host-facing half of a UB
             // device.  Model its ns-3 half as a UB_DEVICE as well so compact
@@ -706,7 +743,7 @@ class UbNetFabric {
             service->SetRetransmissionEnabled(options_.ctp_retransmission);
             service->SetRetransmissionTimeout(PicoSeconds(options_.ctp_rto_ps));
             service->SetMaxRetransmissionAttempts(options_.ctp_max_retransmissions);
-            const std::uint64_t line_rate_bps = options_.rate_gbps * 1000000000ULL;
+            const std::uint64_t line_rate_bps = endpoint_rate_gbps * 1000000000ULL;
             service->SetCongestionLineRate(line_rate_bps);
             service->SetCnpFeedbackInterval(PicoSeconds(options_.ctp_cnp_interval_ps));
             service->SetCongestionRecovery(PicoSeconds(options_.ctp_recovery_interval_ps),
@@ -731,48 +768,60 @@ class UbNetFabric {
                 "CtpRecvNotify",
                 MakeCallback(&UbNetFabric::OnNativePacketReceived, this));
         }
-        switch_node_ = CreateObject<Node>();
-        switch_ = CreateObject<UbSwitch>();
-        switch_node_->AggregateObject(switch_);
-        switch_->SetNodeType(UB_SWITCH);
-        // Preserve ns-3-UB's lossless-fabric behavior.  Without flow control,
-        // a multi-segment WQE can overflow the small port staging queues
-        // before the 400-Gbit/s link serializes the burst.  CTP RM would then
-        // wait forever for a segment that never reached target execution.
-        switch_->SetAttribute("FlowControl", EnumValue(FcType::CBFC));
-        switch_->SetAttribute("InPortProcessingDelay",
-                              TimeValue(PicoSeconds(options_.switch_delay_ps)));
-        for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
-            for (std::uint32_t port = 0; port < options_.ports; ++port) {
-                Ptr<UbPort> switch_port = CreateObject<UbPort>();
-                switch_port->SetAddress(Mac48Address::Allocate());
-                switch_port->SetDataRate(rate);
-                switch_node_->AddDevice(switch_port);
-                switch_ports_.push_back(switch_port);
-                Ptr<UbLink> link = CreateObject<UbLink>();
-                link->SetAttribute("Delay", TimeValue(PicoSeconds(0)));
-                switch_port->Attach(link);
-                endpoint_ports_[endpoint][port]->Attach(link);
+        if (options_.direct_link) {
+            // The two UB_DEVICE ports share one physical point-to-point link.
+            // Propagation is already charged at the two UB-NET boundaries.
+            Ptr<UbLink> link = CreateObject<UbLink>();
+            link->SetAttribute("Delay", TimeValue(PicoSeconds(0)));
+            endpoint_ports_[0][0]->Attach(link);
+            endpoint_ports_[1][0]->Attach(link);
+        } else {
+            switch_node_ = CreateObject<Node>();
+            switch_ = CreateObject<UbSwitch>();
+            switch_node_->AggregateObject(switch_);
+            switch_->SetNodeType(UB_SWITCH);
+            // Preserve ns-3-UB's lossless-fabric behavior.  Without flow control,
+            // a multi-segment WQE can overflow the small port staging queues
+            // before the 400-Gbit/s link serializes the burst.  CTP RM would then
+            // wait forever for a segment that never reached target execution.
+            switch_->SetAttribute("FlowControl", EnumValue(FcType::CBFC));
+            switch_->SetAttribute("InPortProcessingDelay",
+                                  TimeValue(PicoSeconds(options_.switch_delay_ps)));
+            for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
+                const auto endpoint_rate_gbps =
+                    options_.endpoints[endpoint].rate_gbps.value_or(options_.rate_gbps);
+                const DataRate rate(std::to_string(endpoint_rate_gbps) + "Gbps");
+                for (std::uint32_t port = 0; port < options_.ports; ++port) {
+                    Ptr<UbPort> switch_port = CreateObject<UbPort>();
+                    switch_port->SetAddress(Mac48Address::Allocate());
+                    switch_port->SetDataRate(rate);
+                    switch_node_->AddDevice(switch_port);
+                    switch_ports_.push_back(switch_port);
+                    Ptr<UbLink> link = CreateObject<UbLink>();
+                    link->SetAttribute("Delay", TimeValue(PicoSeconds(0)));
+                    switch_port->Attach(link);
+                    endpoint_ports_[endpoint][port]->Attach(link);
+                }
+            }
+            switch_->Init();
+            ctp_feedback_ = CreateObject<UbCtpQueueFeedback>();
+            ctp_feedback_->Configure(switch_, options_.ctp_mark_threshold_bytes);
+            switch_->SetCongestionCtrl(ctp_feedback_);
+            for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
+                std::vector<std::uint16_t> outputs;
+                for (std::uint32_t port = 0; port < options_.ports; ++port)
+                    outputs.push_back(static_cast<std::uint16_t>(
+                        endpoint * options_.ports + port));
+                switch_->GetRoutingProcess()->AddShortestRoute(
+                    utils::NodeIdToIp(endpoint_nodes_[endpoint]->GetId()).Get(), outputs);
+                for (std::uint32_t port = 0; port < options_.ports; ++port)
+                    switch_->GetRoutingProcess()->AddShortestRoute(
+                        utils::NodeIdToIp(endpoint_nodes_[endpoint]->GetId(), port).Get(),
+                        {static_cast<std::uint16_t>(endpoint * options_.ports + port)});
             }
         }
-        switch_->Init();
-        ctp_feedback_ = CreateObject<UbCtpQueueFeedback>();
-        ctp_feedback_->Configure(switch_, options_.ctp_mark_threshold_bytes);
-        switch_->SetCongestionCtrl(ctp_feedback_);
-        for (std::size_t endpoint = 0; endpoint < endpoints_.size(); ++endpoint) {
-            std::vector<std::uint16_t> outputs;
-            for (std::uint32_t port = 0; port < options_.ports; ++port)
-                outputs.push_back(static_cast<std::uint16_t>(
-                    endpoint * options_.ports + port));
-            switch_->GetRoutingProcess()->AddShortestRoute(
-                utils::NodeIdToIp(endpoint_nodes_[endpoint]->GetId()).Get(), outputs);
-            for (std::uint32_t port = 0; port < options_.ports; ++port)
-                switch_->GetRoutingProcess()->AddShortestRoute(
-                    utils::NodeIdToIp(endpoint_nodes_[endpoint]->GetId(), port).Get(),
-                    {static_cast<std::uint16_t>(endpoint * options_.ports + port)});
-        }
         // Native CTP performs source-Entity member selection on the endpoint
-        // switch before the packet reaches the central fabric.  Give every
+        // UB_DEVICE before the packet reaches the attached link. Give every
         // endpoint routes to every remote Entity member, with all local
         // member ports as equal-cost outputs.  The CTP routing policy then
         // selects the concrete source port rather than bypassing endpoint
@@ -936,18 +985,21 @@ class UbNetFabric {
             endpoint_nodes_.at(source)->GetObject<UbController>();
         Ptr<UbFunction> function = controller->GetUbFunction();
         Ptr<UbCtpTransportService> service = controller->GetCtpTransportService();
-        // This Jetty belongs to the modeled UB endpoint, not to the guest
-        // provider.  Keep one reusable native Jetty per endpoint/Entity path;
-        // guest Jetty ids remain metadata in NativeTask and may be created and
-        // destroyed independently by every perftest invocation.
-        constexpr std::uint32_t jetty_id = 1;
+        // Native transaction windows, ACKs, retries and duplicate keys are
+        // scoped to a Jetty. Preserve the hardware Jetty identity end to end.
+        const std::uint32_t jetty_id = complete.wire.source_jetty;
+        if (jetty_id > 0xFFFFFU)
+            throw std::runtime_error("guest Jetty ID exceeds CTP's 20-bit wire field");
+        guest_jetty_identities_.emplace(source, jetty_id);
         const UbCtpEntityKey key{.srcEntityId = complete.frame.source_eid,
                                  .dstNodeId = endpoint_nodes_[destination]->GetId(),
                                  .dstEntityId = complete.frame.destination_eid,
                                  .vl = 1};
-        if (!function->IsJettyExists(jetty_id))
+        if (!function->IsJettyExists(jetty_id)) {
             function->CreateJetty(endpoint_nodes_[source]->GetId(),
                                   endpoint_nodes_[destination]->GetId(), jetty_id);
+            ++native_jetty_bindings_;
+        }
         Ptr<UbJetty> jetty = function->GetJetty(jetty_id);
         if (!service->HasJettyPreparation(jetty_id) && !service->PrepareJetty(jetty, key))
             throw std::runtime_error("failed to prepare native CTP Jetty");
@@ -1050,10 +1102,12 @@ class UbNetFabric {
             wire_ssn, NativeSegment{task->second.next_offset, logical_bytes, {}});
         task->second.next_offset += logical_bytes;
         const std::size_t source = task->second.source;
-        if (last_native_tassn_[source] &&
-            ta_ssn != *last_native_tassn_[source] + 1)
+        const std::uint32_t jetty_id = task->second.wire.source_jetty;
+        const auto jetty_key = std::make_pair(source, jetty_id);
+        auto& last_tassn = last_native_tassn_[jetty_key];
+        if (last_tassn && ta_ssn != *last_tassn + 1)
             ++ctp_tassn_discontinuities_;
-        last_native_tassn_[source] = ta_ssn;
+        last_tassn = ta_ssn;
         ++ctp_request_segments_;
         ++ctp_native_admitted_;
         const std::uint64_t send_ps = static_cast<std::uint64_t>(
@@ -1072,7 +1126,7 @@ class UbNetFabric {
                     {.srcEntityId = endpoints_[task->second.source].eid,
                      .dstNodeId = endpoint_nodes_[task->second.destination]->GetId(),
                      .dstEntityId = endpoints_[task->second.destination].eid,
-                     .vl = 1});
+                     .vl = 1}, task->second.wire.source_jetty);
         ctp_native_max_outstanding_ = std::max<std::uint64_t>(
             ctp_native_max_outstanding_, context->GetOutstandingCount());
         if (options_.inject_ctp_cnp_after_first_segment && !ctp_cnp_injected_)
@@ -1475,8 +1529,11 @@ class UbNetFabric {
     std::vector<Ptr<Node>> endpoint_nodes_;
     std::vector<std::vector<Ptr<UbPort>>> endpoint_ports_;
     std::vector<std::unordered_map<std::uint64_t, PartialWqe>> partial_wqes_;
-    std::vector<std::optional<std::uint32_t>> last_native_tassn_;
+    std::map<std::pair<std::size_t, std::uint32_t>,
+             std::optional<std::uint32_t>> last_native_tassn_;
     std::unordered_map<std::uint32_t, NativeTask> native_tasks_;
+    std::set<std::pair<std::size_t, std::uint32_t>> guest_jetty_identities_;
+    std::uint64_t native_jetty_bindings_{};
     std::deque<NativeTerminalDiagnostic> recent_terminals_;
     std::uint64_t terminal_history_evictions_{};
     std::map<TargetExecutionKey, PendingTargetExecution> pending_target_executions_;
@@ -1547,7 +1604,7 @@ int main(int argc, char** argv)
         std::cerr << "ub-net-adapter: " << error.what() << '\n';
         std::cerr << "usage: ub-net-adapter --endpoint SOCKET,EID "
                      "--endpoint SOCKET,EID [--endpoint ...] [--ports N] "
-                     "[--link-delay-ps N] [--switch-delay-ps N] "
+                     "[--link-delay-ps N] [--switch-delay-ps N] [--direct-link] "
                      "[--rate-gbps N] [--sync off|optional|required] "
                      "[--sync-interval-ps N] [--lifecycle-sync] "
                      "[--ctp-retransmission on|off] [--ctp-rto-ps N] "

@@ -1,0 +1,15 @@
+diff --git a/src/sim/serialize.hh b/src/sim/serialize.hh
+index 15be41f8f..b8f59354f 100644
+--- a/src/sim/serialize.hh
++++ b/src/sim/serialize.hh
+@@ -390,7 +390,9 @@ arrayParamOut(CheckpointOut &os, const std::string &name,
+ {
+     os << name << "=";
+     auto it = start;
+-    using Elem = std::remove_cv_t<std::remove_reference_t<decltype(*it)>>;
++    // vector<bool> dereferences to a proxy, not bool. Use its value type so
++    // ShowParam<bool> writes true/false, which ParseParam<bool> can restore.
++    using Elem = typename std::iterator_traits<InputIterator>::value_type;
+     if (it != end)
+         ShowParam<Elem>::show(os, *it++);
+     while (it != end) {

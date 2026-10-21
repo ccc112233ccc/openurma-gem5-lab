@@ -13,13 +13,13 @@ arm64_sysroot="${UBSIM_ARM64_SYSROOT:-}"
 
 usage() {
     cat <<'EOF'
-Usage: ./lab --runtime native setup [--target-arch arm64|x86_64]
+Usage: ./lab setup [--target-arch arm64|x86_64]
        [--build-mode auto|native|cross] [--arm64-sysroot PATH]
        [--sources-only] [--skip-deps] [--jobs N]
 
 Install Ubuntu dependencies, fetch every pinned source revision, and build the
 complete lab on Ubuntu 22.04. An x86_64 host cross-builds the ARM64 kernel,
-drivers, UMDK, initramfs and ARM gem5 guest without an ARM64 container. The
+drivers, UMDK, initramfs and ARM gem5 guest. The
 x86_64 target builds UMDK userspace/provider only. --skip-deps is useful on
 provisioned hosts.
 EOF
@@ -107,4 +107,4 @@ fi
 echo "[native-setup] building the complete ARM64 stack"
 "$script_dir/build-all.sh"
 echo "[native-setup] PASS"
-echo "Start two nodes with: ./lab --runtime native start --profile fast --provider official"
+echo "Start two nodes with: ./lab start-ready --profile fast --provider official"

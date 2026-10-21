@@ -106,6 +106,37 @@ struct Fixture {
 
 int main() {
     Fixture f;
+    assert(d::abi::Load32(f.model.BuildUbaseResponse(0x0030).data() + 56) / 4 == 1024);
+    assert(d::abi::Load32(f.model.BuildUbaseResponse(0x0030).data() + 48) == 1024);
+    assert(d::abi::Load32(f.model.BuildUbaseResponse(0x0030).data() + 256) == 128);
+    {
+        Fixture limited;
+        limited.model.config_.max_jettys = 47;
+        limited.model.config_.public_jettys = 1;
+        const auto ubase = limited.model.BuildUbaseResponse(0x0030);
+        const auto firmware = limited.model.BuildUbaseResponse(0x0002);
+        const auto firmware_halfword = [&firmware](std::size_t offset) {
+            return std::uint16_t(firmware[offset]) |
+                   (std::uint16_t(firmware[offset + 1]) << 8);
+        };
+        assert(d::abi::Load32(ubase.data() + 48) == 46);
+        assert(d::abi::Load32(ubase.data() + 256) == 1);
+        assert(firmware_halfword(58) == 1);
+        assert(firmware_halfword(76) == 1);
+        assert(firmware_halfword(78) == 46);
+        for (std::uint32_t id = 1; id <= 47; ++id)
+            limited.model.jetty_contexts_[id] = {};
+        limited.Mailbox(0x04, 48, Context);
+        limited.Status(28);
+        assert(limited.model.jetty_count() == 47);
+    }
+    f.model.config_.max_jfs_depth = 8192;
+    f.model.config_.max_jfr_depth = 8192;
+    f.model.config_.max_jfc_depth = 524288;
+    const auto caps = f.model.BuildUbaseResponse(0x0030);
+    assert(d::abi::Load32(caps.data() + 56) / 4 == 8192);
+    assert(d::abi::Load32(caps.data() + 68) == 8192);
+    assert(d::abi::Load32(caps.data() + 92) == 524288);
     f.Create();
     f.Query();
     assert((f.Word(4) & 0x3fffffU) == 0 && (f.Word(18) & 0x3fffffU) == 0);
@@ -150,4 +181,25 @@ int main() {
     f.Query(); assert((f.Word(5) & 0x3fffffU) == 3);
     f.host.fail_output = true;
     f.Mailbox(0x26, 7, Output); f.Status(5);
+
+    // The advertised large CQ must also accept its last entry and wrap.
+    Fixture large;
+    constexpr std::uint32_t depth = 524288;
+    std::vector<std::uint8_t> context(128);
+    d::abi::Store32(context.data(), 1 | static_cast<std::uint32_t>(Cq) | (13U << 4));
+    d::abi::Store32(context.data() + 16, 128U << 22);
+    d::abi::Store32(context.data() + 24, Ci >> 6);
+    large.host.memory[Context] = context;
+    large.Mailbox(0x24, 7, Context); large.Status();
+    assert(large.model.jfc_contexts_.at(7).depth == depth);
+    large.model.jfc_contexts_.at(7).producer = depth - 1;
+    d::abi::Store32(large.host.memory[Ci].data(), depth - 1);
+    const std::uint64_t last = Cq + std::uint64_t(depth - 1) * d::abi::kCqeBytes;
+    large.model.iotlb_[(std::uint64_t{1} << 63) | (last >> 12)] = last & ~std::uint64_t{0xfff};
+    std::size_t wrapped{};
+    for (int i = 0; i < 2; ++i)
+        large.model.WriteCqe(7, false, true, 0, 0, 9, 8, 0, 0,
+                             [&](bool ok) { assert(ok); ++wrapped; });
+    assert(wrapped == 2 && large.model.jfc_contexts_.at(7).producer == depth + 1);
+    assert(large.host.memory.count(last) && large.host.memory.count(Cq));
 }

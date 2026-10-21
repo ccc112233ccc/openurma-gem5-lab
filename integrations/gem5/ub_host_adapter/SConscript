@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+import sys
 
 Import('*')
 
@@ -8,4 +9,5 @@ env.Append(CPPPATH=[lab, os.path.join(lab, 'sources/simbricks/lib')])
 
 SimObject('UbHostAdapter.py', sim_objects=['UbHostAdapter'])
 Source('UbHostAdapter.cc')
-Source('simbricks_base_portable.c')
+simbricks_flags = ['-Wno-error=format'] if sys.platform == 'darwin' else []
+Source('simbricks_base_portable.c', append={'CCFLAGS': simbricks_flags})

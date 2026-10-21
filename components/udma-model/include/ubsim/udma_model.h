@@ -140,6 +140,10 @@ class UdmaModel {
         // serializing every 4-KiB page makes adapter latency an artificial
         // bandwidth limit.
         std::uint32_t dma_max_outstanding{256};
+        // Maximum non-inline WRITE payload DMA reads prepared concurrently
+        // per Jetty. This is a model capacity, not a measured device limit.
+        // Frames still leave the SQ in WQE order.
+        std::uint32_t write_payload_read_window{8};
         // Number of 4-KiB token translations cached by the modeled IOTLB.
         // Zero disables caching for validation experiments.
         std::uint32_t iotlb_entries{4096};
@@ -153,6 +157,27 @@ class UdmaModel {
         // CEQ/MSI notifications. Reservations precede CQ DMA, so asynchronous
         // notification cannot create an unbounded event backlog.
         std::uint32_t completion_event_slots{64};
+        // Total device-visible JFS/Jetty identities and the reserved public
+        // identities within that total. The stock driver derives max_jetty
+        // from the UBASE JFS count plus the firmware public Jetty count.
+        std::uint32_t max_jettys{1152};
+        std::uint32_t public_jettys{128};
+        // Guest-visible queue capacities. Keep historical defaults for
+        // existing checkpoints; a hardware-matched profile can opt into the
+        // larger capacities without changing the checkpoint state format.
+        std::uint32_t max_jfs_depth{1024};
+        std::uint32_t max_jfr_depth{1024};
+        std::uint32_t max_jfc_depth{4096};
+        // Honor the official one-shot JFC arm doorbell. Legacy runs keep the
+        // historical always-notify behavior for checkpoint reproducibility.
+        bool one_shot_jfc_notifications{false};
+        // Permit independent CQ DMA transactions while retaining ordered
+        // SQ retirement. Legacy profiles retain their serial completion path.
+        bool pipelined_completion_dma{false};
+        // Zero preserves the historical unlimited RMA issue window. A
+        // hardware-like READ window prevents thousands of requests from
+        // flooding host DMA and network queues when JFS depth is large.
+        std::uint32_t max_read_outstanding{0};
         // Temporary descriptor ABI used only by the extraction contract test.
         // Production device processes leave this false.
         bool extraction_test_abi{false};
@@ -189,6 +214,8 @@ class UdmaModel {
     bool IsQuiescent() const;
     // Read-only snapshot for stalled completion/lifecycle diagnosis.
     void DumpProgress(std::ostream& output) const;
+    // Process-lifetime virtual-time diagnostics; excluded from checkpoints.
+    void DumpWriteTiming(std::ostream& output) const;
     void RebaseTime(std::uint64_t now_ps = 0);
     bool SaveState(std::ostream& output) const;
     bool LoadState(std::istream& input);
@@ -213,6 +240,7 @@ class UdmaModel {
     // RMA peak counts local READ/WRITE requests awaiting remote completion;
     // it excludes SEND, remote service requests and completion publication.
     std::uint64_t rma_pending_peak() const { return rma_pending_peak_; }
+    std::uint64_t read_window_stalls() const { return read_window_stalls_; }
     std::uint64_t sq_wqebbs_retired() const { return sq_wqebbs_retired_; }
     std::uint64_t sq_consumer_wraps() const { return sq_consumer_wraps_; }
     std::uint64_t sq_depth_rejects() const { return sq_depth_rejects_; }
@@ -247,6 +275,33 @@ class UdmaModel {
     }
 
   private:
+    struct TimingStage {
+        std::uint64_t count{};
+        std::uint64_t total_ps{};
+        std::uint64_t max_ps{};
+        std::uint64_t in_flight{};
+        std::uint64_t peak_in_flight{};
+        void Begin() {
+            ++in_flight;
+            if (in_flight > peak_in_flight) peak_in_flight = in_flight;
+        }
+        void End(std::uint64_t start_ps, std::uint64_t end_ps) {
+            if (in_flight) --in_flight;
+            ++count;
+            const auto elapsed = end_ps >= start_ps ? end_ps - start_ps : 0;
+            total_ps += elapsed;
+            if (elapsed > max_ps) max_ps = elapsed;
+        }
+    };
+    TimingStage sq_prefetch_timing_;
+    TimingStage source_payload_timing_;
+    TimingStage target_write_timing_;
+    TimingStage write_ack_timing_;
+    TimingStage cqe_wait_timing_;
+    TimingStage cqe_publish_timing_;
+    std::unordered_map<std::uint64_t, std::uint64_t> write_ack_starts_;
+    std::uint64_t completion_slots_peak_{};
+    std::uint64_t jfc_pending_peak_{};
     void FetchDescriptor(std::uint64_t address);
     void FetchPayload(std::uint64_t sequence, Descriptor descriptor);
     void Finish(std::uint64_t sequence, const Descriptor& descriptor,
@@ -295,8 +350,22 @@ class UdmaModel {
         bool ready{};
         std::uint8_t status{};
         std::uint8_t substatus{};
+        bool publication_started{};
+        bool publication_done{};
     };
     struct SqPipeline {
+        struct PreparedWrite {
+            std::uint32_t producer{};
+            std::uint32_t wqebbs{};
+            std::uint16_t completed_index{};
+            std::uint32_t byte_count{};
+            std::uint64_t immediate{};
+            bool completion_enabled{};
+            std::vector<std::uint8_t> raw;
+            std::vector<std::uint8_t> payload;
+            bool ready{};
+            bool failed{};
+        };
         std::uint64_t issue{};
         std::uint64_t next_fetch{};
         std::uint32_t prefetch_inflight{};
@@ -307,15 +376,19 @@ class UdmaModel {
         bool dispatching{};
         bool retiring{};
         bool publishing{};
+        std::uint32_t publications_in_flight{};
+        bool publication_failed{};
         bool ordered{};
         bool kick{};
         std::deque<SqCompletion> completions;
+        std::deque<std::shared_ptr<PreparedWrite>> prepared_writes;
     };
     std::unordered_map<std::uint32_t, std::shared_ptr<SqPipeline>> sq_pipelines_;
     void ReleaseSqFetch(std::uint32_t id, bool resume);
     void FillSqCache(std::uint32_t id);
     void ReserveSq(std::uint32_t id, std::uint32_t wqebbs, bool ordered);
     void RetireSq(std::uint32_t id);
+    void RetireSqPipelined(std::uint32_t id);
     void ContinueSqWqe(std::uint32_t jetty_id, std::uint32_t producer,
                        std::vector<std::uint8_t> raw,
                        std::uint32_t remaining_wqebbs,
@@ -324,7 +397,9 @@ class UdmaModel {
                      std::vector<std::uint8_t> raw);
     void SubmitSqPayload(std::uint32_t jetty_id, std::uint32_t producer,
                          std::vector<std::uint8_t> raw,
-                         std::vector<std::uint8_t> payload);
+                         std::vector<std::uint8_t> payload,
+                         std::optional<std::uint16_t> reserved_index = {});
+    void DrainPreparedWrites(std::uint32_t jetty_id);
     void CompleteSq(std::uint32_t jetty_id, std::uint32_t producer,
                     std::uint32_t wqebbs, std::uint16_t completed_index,
                     std::uint8_t opcode, std::uint32_t byte_count,
@@ -355,9 +430,11 @@ class UdmaModel {
         std::deque<std::function<void(Completion)>> pending;
         bool running{};
         bool dispatching{};
+        std::uint32_t in_flight{};
     };
     std::unordered_map<std::uint32_t, std::shared_ptr<JfcPublicationQueue>>
         jfc_publications_;
+    std::unordered_map<std::uint32_t, std::uint32_t> jfc_cqe_dma_in_flight_;
     void ProcessCompletionEvent();
     void RaiseInterrupt(std::uint32_t vector, Completion completion);
     struct MsiState {
@@ -389,6 +466,7 @@ class UdmaModel {
     void ReceiveReadRequest(Frame frame);
     void ReceiveWriteAck(Frame frame);
     void ReceiveReadResponse(Frame frame);
+    void ProcessUmmuCommandQueue(std::uint32_t queue);
     using TranslateCompletion = std::function<void(bool, std::uint64_t)>;
     void TranslateToken(std::uint32_t token, std::uint64_t address, bool write,
                         TranslateCompletion completion);
@@ -424,7 +502,7 @@ class UdmaModel {
                        std::uint32_t level,
                        TranslateCompletion completion);
     void WalkTokenPageTable(std::uint64_t table, std::uint64_t address,
-                            std::uint32_t level,
+                            std::uint32_t level, std::uint32_t granule,
                             TranslateCompletion completion);
     void ReadToken(std::uint32_t token, std::uint64_t address,
                    std::size_t length, ReadCompletion completion,
@@ -480,6 +558,7 @@ class UdmaModel {
     NetworkInterface& network_;
     Config config_;
     std::array<std::uint8_t, 0x5000> ummu_registers_{};
+    std::unordered_map<std::uint32_t, bool> ummu_command_queue_busy_;
     std::unordered_map<std::uint64_t, std::uint64_t> iotlb_;
     std::optional<std::uint32_t> generic_iova_token_;
     std::array<std::uint32_t, 0x120 / sizeof(std::uint32_t)>
@@ -561,6 +640,7 @@ class UdmaModel {
     };
     std::unordered_map<std::uint32_t, EventQueueContext> ceqs_;
     std::unordered_map<std::uint32_t, std::uint32_t> jfc_ceqs_;
+    std::unordered_map<std::uint32_t, std::uint8_t> armed_jfcs_;
     struct PendingCompletionEvent {
         std::uint32_t jfc_id{};
         std::uint32_t ceq_id{};
@@ -621,6 +701,7 @@ class UdmaModel {
     std::uint64_t sq_wqes_{0};
     std::uint64_t sq_completions_{0};
     std::uint64_t rma_pending_peak_{0};
+    std::uint64_t read_window_stalls_{0};
     std::uint64_t sq_wqebbs_retired_{0};
     std::uint64_t sq_consumer_wraps_{0};
     std::uint64_t sq_depth_rejects_{0};

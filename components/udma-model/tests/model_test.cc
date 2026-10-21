@@ -262,7 +262,7 @@ int main()
     assert(official_model.ReadMmio(0x11000 + 56 + 32, 8, value) &&
            value == official_config.mmio_base + 0x12000);
     assert(official_model.ReadMmio(0xf00010, 4, value) && value == 0x00000b08);
-    assert(official_model.ReadMmio(0xf00018, 4, value) && value == 0x0000906e);
+    assert(official_model.ReadMmio(0xf00018, 4, value) && value == 0x0000916e);
     assert(official_model.ReadMmio(0xf0001c, 4, value) && value == 0x00001010);
     assert(official_model.WriteMmio(0xf00030, 4, 0x55aa));
     assert(official_model.ReadMmio(0xf00034, 4, value) && value == 0x55aa);
@@ -275,6 +275,29 @@ int main()
     assert(official_model.WriteMmio(0xf00108, 4, 0x80000007));
     assert(official_model.ReadMmio(0xf0010c, 4, value) &&
            value == 0x80000007);
+    // The UMMU may acknowledge CMD_SYNC only after fetching all preceding
+    // commands through its coherent DMA port. A producer doorbell alone is
+    // insufficient: the driver uses the consumer as a visibility barrier for
+    // newly written TCT entries.
+    {
+        MockHost queue_host;
+        MockNetwork queue_network(queue_host);
+        device::UdmaModel queue_model(queue_host, queue_network, official_config);
+        queue_host.Store(0x70000, std::vector<std::uint8_t>(64, 0));
+        queue_host.defer_reads = true;
+        assert(queue_model.WriteMmio(0xf00100, 8, 0x70000 | 3));
+        assert(queue_model.WriteMmio(0xf00108, 4, 0x80000000));
+        assert(queue_model.ReadMmio(0xf0010c, 4, value) &&
+               value == 0x80000000);
+        assert(queue_model.WriteMmio(0xf00108, 4, 0x80000002));
+        assert(queue_model.ReadMmio(0xf0010c, 4, value) &&
+               value == 0x80000000);
+        assert(!queue_model.IsQuiescent());
+        queue_host.FlushReads();
+        assert(queue_model.ReadMmio(0xf0010c, 4, value) &&
+               value == 0x80000002);
+        assert(queue_model.IsQuiescent());
+    }
     assert(official_model.WriteMmio(0x12010, 4, 64));
     assert(official_model.ReadMmio(0x12010, 4, value) && value == 64);
     assert(official_model.WriteMmio(0x318408, 4, 8));

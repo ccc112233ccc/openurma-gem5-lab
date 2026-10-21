@@ -4,6 +4,7 @@ set -euo pipefail
 adapter=$1
 peer=$2
 work=$3
+sync_mode=${4:-off}
 mkdir -p "$work"
 rm -f "$work"/*.sock "$work"/*.shm "$work"/*.log
 
@@ -13,10 +14,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$peer" sender "$work/a.sock" "$work/a.shm" off ctp-order \
+"$peer" sender "$work/a.sock" "$work/a.shm" "$sync_mode" ctp-order \
     >"$work/a.log" 2>&1 &
 sender_pid=$!
-"$peer" receiver "$work/b.sock" "$work/b.shm" off ctp-order \
+"$peer" receiver "$work/b.sock" "$work/b.shm" "$sync_mode" ctp-order \
     >"$work/b.log" 2>&1 &
 receiver_pid=$!
 
@@ -26,7 +27,7 @@ for _ in $(seq 1 100); do
 done
 [[ -S "$work/a.sock" && -S "$work/b.sock" ]]
 
-"$adapter" --sync off \
+"$adapter" --sync "$sync_mode" \
     --endpoint "$work/a.sock,0x101" \
     --endpoint "$work/b.sock,0x202" >"$work/adapter.log" 2>&1 &
 adapter_pid=$!

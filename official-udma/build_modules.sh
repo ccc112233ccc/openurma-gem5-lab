@@ -7,7 +7,7 @@ fragment="${FRAGMENT:-$lab_root/official-udma/kernel.fragment}"
 arch="${ARCH:-arm64}"
 cross_compile="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 jobs="${JOBS:-8}"
-ub_v2m_bridge="$lab_root/official-udma/ub_v2m_bridge"
+ub_v2m_bridge="${UB_V2M_BRIDGE_DIR:-$lab_root/official-udma/ub_v2m_bridge}"
 artifact_dir="${ARTIFACT_DIR:-$lab_root/artifacts/kernel}"
 
 [[ -d "$kernel_root" ]] || {

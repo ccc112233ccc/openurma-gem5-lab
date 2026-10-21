@@ -15,7 +15,8 @@ class UbHostAdapter(DmaDevice):
     type = "UbHostAdapter"
     cxx_class = "gem5::UbHostAdapter"
     cxx_header = "ub_host_adapter/UbHostAdapter.hh"
-    cxx_exports = [PyBindMethod("toggleLifecycleSync")]
+    cxx_exports = [PyBindMethod("beginLifecycleSync"),
+                   PyBindMethod("finishLifecycleSync")]
 
     pio_addr = Param.Addr("Device MMIO base")
     pio_size = Param.Addr(0x10000, "Device MMIO aperture size")

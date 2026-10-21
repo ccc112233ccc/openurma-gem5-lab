@@ -7,7 +7,15 @@ if(NOT EXISTS "${SIMBRICKS_ROOT}/lib/simbricks/base/proto.h")
     message(FATAL_ERROR "SimBricks source missing at ${SIMBRICKS_ROOT}; run ./lab setup --sources-only")
 endif()
 
-add_library(ubsim_udma_model STATIC src/udma_model.cc)
+add_library(ubsim_udma_model STATIC
+    src/udma_model.cc
+    src/udma_control.cc
+    src/udma_resources.cc
+    src/udma_sq.cc
+    src/udma_completion.cc
+    src/udma_translation.cc
+    src/udma_runtime.cc
+    src/udma_receive.cc)
 target_include_directories(ubsim_udma_model PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(ubsim_udma_model PUBLIC cxx_std_17)

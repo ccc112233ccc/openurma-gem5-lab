@@ -25,7 +25,6 @@ Run one synchronized send_lat session per adjacent node pair (0<->1, 2<->3,
 EOF
 }
 
-container="$UBSIM_CONTAINER"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 lab="${UBSIM_LAB_ROOT:-$(ubsim_runtime_default_lab "$repo_root")}"
 run_root="${UBSIM_DUAL_OUT:-$lab/run-dual}"

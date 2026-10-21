@@ -35,14 +35,22 @@ struct Host final : d::HostInterface {
     std::vector<std::uint16_t> entries;
     std::vector<std::uint8_t> statuses;
     bool hold_payload{};
+    bool hold_payload_read{};
     bool hold_cq{};
     bool hold_sq{};
     struct Read { std::uint64_t address; std::size_t length; d::ReadCompletion done; };
     std::vector<Read> sq_reads;
+    std::vector<Read> payload_reads;
     std::vector<std::pair<std::uint64_t, std::size_t>> sq_history;
     void FinishSq(std::size_t index, bool ok = true) {
         auto read = std::move(sq_reads.at(index));
         sq_reads.erase(sq_reads.begin() + index);
+        read.done(ok, ok ? std::vector<std::uint8_t>(memory.begin() + read.address,
+                    memory.begin() + read.address + read.length) : std::vector<std::uint8_t>{});
+    }
+    void FinishPayload(std::size_t index, bool ok = true) {
+        auto read = std::move(payload_reads.at(index));
+        payload_reads.erase(payload_reads.begin() + index);
         read.done(ok, ok ? std::vector<std::uint8_t>(memory.begin() + read.address,
                     memory.begin() + read.address + read.length) : std::vector<std::uint8_t>{});
     }
@@ -56,6 +64,10 @@ struct Host final : d::HostInterface {
                 sq_reads.push_back({addr, len, std::move(done)});
                 return;
             }
+        }
+        if (hold_payload_read && addr >= Payload) {
+            payload_reads.push_back({addr, len, std::move(done)});
+            return;
         }
         done(true, {memory.begin() + addr, memory.begin() + addr + len});
     }
@@ -108,31 +120,36 @@ struct Fixture {
     }
     void Post(unsigned start, unsigned opcode, unsigned count,
               unsigned ordered_index = std::numeric_limits<unsigned>::max(),
-              unsigned expected_issued = 0, unsigned order_flags = 2) {
-        const unsigned blocks = opcode == 3 ? 2 : 1;
+              unsigned expected_issued = 0, unsigned order_flags = 2,
+              bool inline_write = true) {
+        const unsigned blocks = opcode == 3 && inline_write ? 2 : 1;
         for (unsigned i = 0; i < count; ++i) {
             unsigned pos = start + i * blocks;
             std::vector<std::uint8_t> wqe(blocks * 64);
-            unsigned flags = 0x20 | (opcode == 3 ? 0x40 : 0) |
+            unsigned flags = 0x20 | (opcode == 3 && inline_write ? 0x40 : 0) |
                 (i == ordered_index ? order_flags : 0);
             d::abi::Store32(wqe.data(), pos | (flags << 16) |
                 (((pos / 8) & 1) ? 0 : (1U << 31)));
             d::abi::Store32(wqe.data() + 4, (opcode << 8) |
-                (opcode == 3 ? (32U << 22) : 0));
-            d::abi::Store32(wqe.data() + 8, 1 | (opcode == 6 ? 1U << 24 : 0));
+                (opcode == 3 && inline_write ? (32U << 22) : 0));
+            d::abi::Store32(wqe.data() + 8, 1 |
+                ((opcode == 6 || (opcode == 3 && !inline_write)) ? 1U << 24 : 0));
             d::abi::Store32(wqe.data() + 12, 9);
             d::abi::Store64(wqe.data() + 40, Payload);
-            if (opcode == 3) std::fill(wqe.begin() + 48, wqe.begin() + 80, i + 1);
+            if (opcode == 3 && inline_write)
+                std::fill(wqe.begin() + 48, wqe.begin() + 80, i + 1);
             else {
                 d::abi::Store32(wqe.data() + 48, 4);
                 d::abi::Store64(wqe.data() + 56, Payload + i * 4);
+                if (opcode == 3)
+                    std::fill_n(host.memory.begin() + Payload + i * 4, 4, i + 1);
             }
             for (unsigned b = 0; b < blocks; ++b)
                 std::copy_n(wqe.begin() + b * 64, 64,
                     host.memory.begin() + Sq + ((pos + b) % 8) * 64);
         }
         model.ProcessSq(9, start + count * blocks);
-        if (host.hold_sq) return;
+        if (host.hold_sq || host.hold_payload_read) return;
         const unsigned issued = expected_issued ? expected_issued : count;
         assert(net.frames.size() == issued);
         assert(model.pending_rma_.size() == issued);
@@ -168,6 +185,128 @@ struct Fixture {
 };
 
 int main() {
+    // One Jetty can fetch several non-inline WRITE payloads at once, but
+    // reverse DMA completion must not reorder the frames or SQ completions.
+    {
+        Fixture f;
+        f.model.config_.write_payload_read_window = 3;
+        f.host.hold_payload_read = true;
+        f.Post(0, 3, 4, std::numeric_limits<unsigned>::max(), 0, 2, false);
+        assert(f.host.payload_reads.size() == 3);
+        assert(f.model.source_payload_timing_.peak_in_flight == 3);
+        assert(f.net.frames.empty());
+        std::ostringstream in_flight;
+        assert(!f.model.SaveState(in_flight));
+        f.host.FinishPayload(2);
+        assert(f.net.frames.empty());
+        f.host.FinishPayload(0);
+        assert(f.net.frames.size() == 1);
+        f.host.FinishPayload(0);
+        assert(f.net.frames.size() == 3);
+        assert(f.host.payload_reads.size() == 1);
+        f.host.FinishPayload(0);
+        assert(f.net.frames.size() == 4);
+        for (unsigned i = 0; i < 4; ++i) {
+            assert(f.net.frames[i].bytes == std::vector<std::uint8_t>(4, i + 1));
+            assert(f.net.frames[i].sequence == i + 1);
+        }
+        for (unsigned i : {3U, 1U, 2U, 0U}) f.Reply(i);
+        assert((f.host.entries == std::vector<std::uint16_t>{0, 1, 2, 3}));
+        assert(f.model.pending_rma_.empty());
+    }
+    // A window of one reproduces the old per-Jetty source DMA concurrency
+    // while keeping the same ordered-issue implementation.
+    {
+        Fixture f;
+        f.model.config_.write_payload_read_window = 1;
+        f.host.hold_payload_read = true;
+        f.Post(0, 3, 2, std::numeric_limits<unsigned>::max(), 0, 2, false);
+        assert(f.host.payload_reads.size() == 1);
+        f.host.FinishPayload(0);
+        assert(f.host.payload_reads.size() == 1);
+        f.host.FinishPayload(0);
+        assert(f.model.source_payload_timing_.peak_in_flight == 1);
+        f.Reply(0);
+        f.Reply(1);
+    }
+    // A READ posted behind an unfetched WRITE payload cannot overtake the
+    // WRITE frame, even though READ itself has no source payload DMA.
+    {
+        Fixture f;
+        f.host.hold_payload_read = true;
+        f.Post(0, 3, 1, std::numeric_limits<unsigned>::max(), 0, 2, false);
+        f.Post(1, 6, 1);
+        assert(f.net.frames.empty());
+        assert(f.model.sq_wqes() == 1);
+        f.host.FinishPayload(0);
+        assert(f.net.frames.size() == 2);
+        assert(f.net.frames[0].operation == d::Frame::Operation::Write);
+        assert(f.net.frames[1].operation == d::Frame::Operation::ReadRequest);
+        f.Reply(1);
+        f.Reply(0);
+        assert((f.host.entries == std::vector<std::uint16_t>{0, 1}));
+    }
+    // A failed DMA retires its reserved slot with a local error and does
+    // not strand a later payload that completed first.
+    {
+        Fixture f;
+        f.host.hold_payload_read = true;
+        f.Post(0, 3, 2, std::numeric_limits<unsigned>::max(), 0, 2, false);
+        f.host.FinishPayload(1);
+        assert(f.net.frames.empty());
+        f.host.FinishPayload(0, false);
+        assert(f.net.frames.size() == 1);
+        assert(f.net.frames[0].bytes == std::vector<std::uint8_t>(4, 2));
+        f.Reply(0);
+        assert((f.host.entries == std::vector<std::uint16_t>{0, 1}));
+        assert((f.host.statuses == std::vector<std::uint8_t>{2, 0}));
+        assert(f.model.jetty_contexts_.at(9).consumer == 2);
+    }
+    // An ordered WRITE cannot start before older WRITEs retire, and queue
+    // destroy must retain the Jetty until its already-started payload DMA and
+    // ACK drain. A late callback must never touch a released SQ pipeline.
+    {
+        Fixture f;
+        f.host.hold_payload_read = true;
+        f.Post(0, 3, 2, 1, 0, 2, false);
+        assert(f.host.payload_reads.size() == 1);
+        f.host.FinishPayload(0);
+        assert(f.net.frames.size() == 1);
+        assert(f.host.payload_reads.empty());
+        f.Reply(0);
+        assert(f.host.payload_reads.size() == 1);
+        f.host.FinishPayload(0);
+        assert(f.net.frames.size() == 2);
+        f.Reply(1);
+    }
+    {
+        Fixture f;
+        f.host.hold_payload_read = true;
+        f.Post(0, 3, 2, 1, 0, 2, false);
+        assert(f.host.payload_reads.size() == 1);
+        f.Destroy();
+        f.host.FinishPayload(0);
+        assert(f.net.frames.size() == 1);
+        assert(f.model.jetty_count() == 1);
+        f.Reply(0);
+        assert(f.model.jetty_count() == 0);
+        assert(f.net.frames.size() == 1);
+    }
+    // A device READ window must pause descriptor issue without reducing the
+    // guest SQ depth, then resume the queued descriptor on completion.
+    {
+        Fixture f;
+        f.model.config_.max_read_outstanding = 1;
+        f.Post(0, 6, 2, std::numeric_limits<unsigned>::max(), 1);
+        assert(f.model.read_window_stalls() > 0);
+        assert(f.model.sq_wqes() == 1);
+        f.Reply(0);
+        assert(f.net.frames.size() == 2);
+        assert(f.model.sq_wqes() == 2);
+        f.Reply(1);
+        assert(f.model.pending_rma_.empty());
+        assert((f.host.entries == std::vector<std::uint16_t>{0, 1}));
+    }
     // Advertised producer, not ring capacity, bounds descriptor prefetch.
     // Extend the doorbell while the first DMA is outstanding; later DMA
     // callbacks may arrive first but must not execute past the missing head.
@@ -195,6 +334,26 @@ int main() {
         for (auto [address, length] : f.host.sq_history)
             assert(address >= Sq && address + length <= Sq + 4 * 64);
         for (unsigned i = 0; i < 4; ++i) f.Reply(i);
+        assert(f.model.pending_rma_.empty());
+    }
+    // A cache that frees one entry per WQE must wait for burst-sized room
+    // when the head is already cached. Otherwise an eight-WQE doorbell
+    // degenerates into one 64-byte DMA for each WQE after the initial fill.
+    {
+        Fixture f;
+        f.model.config_.sq_prefetch_wqebbs = 4;
+        f.model.config_.sq_fetch_burst_wqebbs = 2;
+        f.model.config_.sq_fetch_max_outstanding = 4;
+        f.host.hold_sq = true;
+        f.Post(0, 6, 8);
+        while (!f.host.sq_reads.empty()) f.host.FinishSq(0);
+        assert(f.net.frames.size() == 8);
+        assert(f.host.sq_history.size() == 4);
+        for (const auto& [address, length] : f.host.sq_history) {
+            assert(address >= Sq && address + length <= Sq + 8 * 64);
+            assert(length == 2 * 64);
+        }
+        for (unsigned i = 0; i < 8; ++i) f.Reply(i);
         assert(f.model.pending_rma_.empty());
     }
     // Fetching across a fence is allowed, executing across it is not.

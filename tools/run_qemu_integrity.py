@@ -3,6 +3,7 @@
 import argparse
 import json
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -34,7 +35,8 @@ def main():
     args = p.parse_args()
     root = Path(__file__).resolve().parents[1]
     args.output.mkdir(parents=True, exist_ok=False)
-    manifest = (root / "run-qemu-dual/run-manifest.txt").read_text()
+    run_root = Path(os.environ.get("UBSIM_QEMU_DUAL_OUT", root / "run-qemu-dual"))
+    manifest = (run_root / "run-manifest.txt").read_text()
     if "synchronization=off" not in manifest.splitlines():
         raise RuntimeError("functional integrity runner requires no-sync")
     (args.output / "model-manifest.txt").write_text(manifest)

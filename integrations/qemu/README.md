@@ -1,83 +1,29 @@
-# QEMU UB-HOST adapter
+# QEMU UB-HOST 适配器
 
-The QEMU integration is intentionally a host adapter only.  It translates a
-16 MiB SysBus MMIO aperture, guest-physical DMA, and three GIC interrupt lines
-to the same UB-HOST v1 process protocol used by gem5.  WQE decoding, queue
-state, RMA, packetization, port selection, and ns-3 timing stay in the existing
-standalone processes.
+本目录只实现 QEMU 客体平台与独立 UDMA 设备进程之间的 `UB-HOST` 接口。它映射设备 MMIO，转发客体物理内存 DMA 与平台中断，并处理同步所需的虚拟时间。WQE、Jetty、RMA 和网络行为仍在独立 UDMA 与 ns-3-UB 进程中，不在 QEMU 中复制。完整系统图见[系统架构](../../docs/architecture.md)。
 
-The first supported host is Apple Silicon macOS with QEMU 11.1.1. TCG is the
-reference mode. Functional mode runs without a common virtual clock; timing
-mode combines QEMU icount with pairwise timestamp/SYNC messages on every
-QEMU↔UDMA and UDMA↔ns-3 boundary.
+## 启动方式
 
-Build and launch the verified single-node probe with:
+QEMU TCG 有两种任务模式：
 
-```bash
-./lab build qemu
-./lab start-qemu --help
-```
+- `execution.sync: off`：功能模式，默认不使用共同 `icount` 时钟，用于驱动探测、数据正确性与回归；客体打印的微秒数不作为模型时延。
+- `execution.sync: required`：TCG `icount` 与 `UB-HOST`、`UB-NET` 的时间戳及 `SYNC` 一起开启，从启动阶段保持共同虚拟时间轴。它可用于受同步约束的模型实验，但数值仍需单独校准。
 
-`start-qemu` uses TCG, GICv2, a Cortex-A72 CPU model, and the unchanged
-official openEuler OLK and UMDK userspace/kernel stack. The command launches a
-standalone UDMA process and terminates its network interface with the contract
-peer; it is meant to verify discovery/MMIO/DMA/driver probe interactively.
-The expected terminal evidence is `/dev/uburma/udma0` plus four ACTIVE EIDs in
-`urma_admin show`.
+对照诊断用的 `UBSIM_QEMU_ICOUNT_WITH_SYNC_OFF=1` 可以只保留 QEMU `icount` 而关闭进程同步；这不是可用于 UB 时延结论的模式。详细规则见[仿真同步与计时](../../docs/synchronization.md)。
 
-The two-node functional path reuses exactly the same UB-HOST device adapter and
-connects each QEMU guest to its own UDMA process.  Both UDMA network sides join
-one native ns-3 UB-NET fabric, while a separate QEMU socket network provides
-the TCP setup/control channel:
+已有工作区的两节点功能任务可按下列方式运行：
 
-```bash
-./lab --runtime native build udma-device
-./lab --runtime native build ns3ub
-./lab start-qemu-dual
+```sh
+./lab topology validate configs/topology-qemu-two-heads.json
+./lab topology plan configs/topology-qemu-two-heads.json
+./lab topology start configs/topology-qemu-two-heads.json
 ./lab status-qemu
-./lab attach-qemu 0
-./lab attach-qemu 1
+./lab qemu-rma-regression
+./lab stop-qemu
 ```
 
-This path has been validated with the unchanged official stack: both guests
-report `udma0` with four ACTIVE EIDs, the OOB network passes bidirectional
-traffic, and a two-sided 128-byte CTP/RM `urma_perftest send_lat` completes
-through the standalone UDMA and ns-3 processes.  Synchronization is off, so
-the reported microseconds are host-scheduling observations and are not a
-modeled latency result.
+QEMU 声明式任务支持 2–8 台主机的单交换机拓扑或两节点直连，可给不同机头设置 CPU 类型、核数和内存；目前不支持 checkpoint 恢复。可执行文件与客体镜像的构建入口见[编译与运行](../../docs/build-and-run.md)。QEMU 的 HVF 与当前 GICv2m MSI 桥接路径不匹配，官方 UDMA 客体路径以 TCG 为准。
 
-For deterministic timing, synchronize all five processes from virtual time
-zero:
+## 代码与验证
 
-```bash
-UBSIM_PEER_LATENCY_NS=500 ./lab start-qemu-dual --timing
-```
-
-`--timing-strict` is an alias for compatibility. Timed MMIO reads suspend the
-TCG vCPU, allow the conservative clock to advance to the device completion,
-then restore and retry the exact guest load instruction. The MMIO region opts
-out of QEMU's normal reentrancy guard because this protocol deliberately exits
-the callback through TCG's longjmp path, matching the SimBricks QEMU adapter.
-
-Device completion waits use a distinct CPU scheduling flag, not just ordinary
-WFI/halt: pending interrupts remain asserted but cannot repeatedly wake an
-unfinished MMIO load and roll back icount. The CPU is idle for timer warp and
-not runnable until the device completion releases it. CPU stop/work-list
-handling keeps priority. The build script installs these pinned QEMU core
-hooks for clean and incremental builds; `tools/test_qemu_device_wait.py`
-exercises their real predicates with deterministic IRQ stubs. In-flight QEMU
-migration and machine reset are not validated by this mechanism.
-
-The 500-ns reference run boots both unchanged official UDMA stacks and scans
-bidirectional `write_bw` from 2 bytes through 1 MiB. It measured about 58 us
-for 128-byte `send_lat`, 315 MB/s at 4 KiB, and a 553 MB/s large-message
-plateau. The plateau is currently set by serialized external UDMA fragments,
-host DMA transactions, and adapter crossings rather than the configured
-400-Gbit/s ns-3 link. Treat it as a deterministic model baseline and trend,
-not as the final device-throughput calibration.
-
-Apple HVF itself is available in the same QEMU binary, but QEMU HVF only
-supports GICv3.  The current simulation glue publishes the official UBUS MSI
-domain over GICv2m, so the official UDMA path intentionally remains on TCG
-until the bridge has an ITS-backed implementation.  This is an interrupt
-topology limitation, not a UB-HOST transport limitation.
+此目录中的适配代码配合项目固定版本 QEMU 补丁构建。功能回归记录见[QEMU 验证材料](../../docs/validation/README.md)。模拟器启动时保存的 manifest 是判断功能/计时模式、端口速率与边界时延的依据。

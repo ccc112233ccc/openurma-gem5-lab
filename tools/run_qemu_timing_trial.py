@@ -156,6 +156,8 @@ def parse_args(argv=None):
                    help="maximum inline bytes (-I), independent of SQ depth (-T)")
     p.add_argument("--user-read-scan", action="store_true",
                    help="run requested a23/n16384 READ scan, capped to reported queue limits")
+    p.add_argument("--read-latency", action="store_true",
+                   help="measure 128 B single-direction read_lat in the same guest session")
     p.add_argument("--read-size", type=int,
                    help="with --user-read-scan, isolate one size instead of a23")
     p.add_argument("--read-sizes", type=int, nargs="+",
@@ -240,6 +242,21 @@ def main():
                             returncode=0))
         print(f"shell-ready: {time.monotonic()-start:.3f}s", flush=True)
         if run("network", serial+["--command", "ubsim-net-up"], args.timeout+10): return 1
+        if args.read_latency:
+            latency = ("LD_LIBRARY_PATH=/lib:/usr/lib urma_perftest read_lat "
+                       "-d udma0 --eid_idx 0 --ctp -s 128 -P 21114 -J 1 "
+                       "-I 0 -n 128 -l 1 -Q 1 -p 0")
+            if run("read-latency", serial+["--stagger", "1", "--commands",
+                                          latency, latency+" -S 10.0.0.1"],
+                   args.timeout+10): return 1
+            text = (args.output/"read-latency.txt").read_text()
+            row = re.findall(r"(?m)^\s*128\s+\d+\s+([\d.]+\s+){3}([\d.]+)\s+",
+                             text)
+            if len(row) != 1:
+                records[-1]["validation_errors"] = ["missing unique client READ latency row"]
+                records[-1]["returncode"] = 1
+                return 1
+            records[-1]["average_us"] = float(row[0][1])
         if args.user_read_scan:
             if run("capabilities", serial+["--command", "urma_admin show -d udma0 -w"],
                    args.timeout+10): return 1
